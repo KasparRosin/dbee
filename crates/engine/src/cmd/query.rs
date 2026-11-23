@@ -1,4 +1,5 @@
-//! Query tabs: `query.run`, `query.cancel`, `query.showResult` and `query.setDatabase`.
+//! Query tabs: `query.run`, `query.cancel`, `query.showResult`, `query.setDatabase`, `query.commit`
+//! and `query.rollback`.
 //!
 //! **Running** is a job on the query connection, which is not the browse connection: a `BEGIN`
 //! left open in a query tab never reaches table pages or an Apply. The job opens the connection
@@ -31,7 +32,10 @@
 //! connection's `Cancel`, again while the statement has not ended (a request that reaches the
 //! server before the statement is lost), and waits for the statement to end and for each request
 //! to arrive (so none can reach a later run, [`crate::jobs::stoppable`]); it starts no further
-//! statement. A stopped run ends with code `cancelled`. The job is never dropped or aborted.
+//! statement. A stopped run ends with code `cancelled`. The job is never dropped or aborted. Only
+//! dbee's own cancel reads so: a statement the server stopped while dbee had sent no cancel for it
+//! (a timeout, another session's cancel) fails with the server's code and words, its `meaning`
+//! `interrupted`, and one that ended before the cancel reached it keeps its result.
 //!
 //! **The database a run starts in.** On a dialect with `USE`, a tab with a database of its own
 //! makes it current first, unless the query connection is known to be there already (a `USE`
@@ -40,15 +44,40 @@
 //! when the connection opens, each `USE` it sends, and where the driver says each statement that
 //! succeeded left it (`ResultSet::database_after`; MySQL's server reports it in its OK packets).
 //! It sends no statement of its own to find out. A statement the server answered with an error
-//! moves nothing; one that ended any other way (cancelled, or lost) may have, so the database is
+//! moves nothing; one that ended any other way (cancelled or interrupted, or lost) may have, so the database is
 //! no longer known, as when the driver cannot tell: it is never guessed. After a run
 //! that got past its `USE`, the tab's database becomes that one, so a `USE` in the text sticks to
 //! the tab; the next run's `USE` keeps every tab in its own. A tab with none starts where the
 //! connection is ([`crate::Connected::starts_in`]).
 //!
+//! **The transaction.** All of a connection's query tabs share the query session, so its
+//! transaction belongs to the connection ([`Connected::transaction`]). After each run, commit and
+//! rollback the job asks the driver whether the session is in a transaction, as the server reported
+//! it ([`Connection::transaction`]): never from the SQL text, so a `BEGIN` in a script, MySQL's
+//! `SET autocommit = 0` and a statement that commits on its own all read as the server says. A run
+//! that finds the session idle and leaves it in a transaction makes its tab the owner; a run of
+//! another tab keeps the owner, and closing the owner with `force` leaves the transaction without
+//! one. A run whose result was not applied leaves it unknown; a lost or replaced query connection
+//! ends it. `query.commit` and `query.rollback` send `COMMIT` or `ROLLBACK` on the query session
+//! from any of its tabs, as a job that counts as the connection's run; with no transaction open
+//! they send nothing and say so. Table tabs run on the browse connection and never touch it.
+//!
+//! **Closing over a transaction.** Closing the owner tab while the transaction is open or failed,
+//! or the connection while it has one in any state, asks first ([`end_question`]). Run again with
+//! `end`, the close sends the same `COMMIT` or `ROLLBACK` as a job and closes once it went through
+//! ([`end_then_close`]). The question is asked from the state the last finished run left; a run
+//! still going is inside the transaction, so only a rollback ends it then: the close stops the
+//! run, waits for its result to come in first, and looks at the transaction it left before it
+//! ends it.
+//!
 //! **Errors** keep the server's message, code, meaning, detail and hint ([`QueryError`]); the
 //! position the server gives (characters into the statement) becomes a byte offset into the tab
 //! text.
+//!
+//! **Time.** Each result and the error say how long their statement took (`ms`): whole
+//! milliseconds from sending the statement to its result, its failure or its stop, not the run's
+//! time. A run that stopped before its statement was sent (connecting, the tab's `USE`, a NUL in
+//! the text, a stop between statements) gives the error no time (`null`).
 //!
 //! **Stale results** (see [`super`]): a run whose connection was closed or replaced is
 //! `{"ignored": true}` and changes nothing. A run whose tab closed is ignored too, but the engine
@@ -62,25 +91,45 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
-use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState};
+use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState, TransactionState};
 use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
 
 use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
-use crate::jobs::{self, Stop};
-use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
+use crate::jobs::{self, Sent, Stop};
+use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome, Transaction};
 use crate::turns::InTurn;
-use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
+use crate::{Apply, ConnectionId, EndAbout, EngineError, JobId, Json, Need, Outcome, Running, Session, Tab, TabId, Which};
 
 const RUN: &str = "query.run";
 const CANCEL: &str = "query.cancel";
 const SHOW_RESULT: &str = "query.showResult";
 const SET_DATABASE: &str = "query.setDatabase";
+const COMMIT: &str = "query.commit";
+const ROLLBACK: &str = "query.rollback";
+
+/// What `query.commit` and `query.rollback` say when the query session has no transaction open.
+pub const NO_TRANSACTION: &str = "no transaction is open";
+
+/// What `query.commit` says of a Postgres transaction that had failed: the server ends it with a
+/// rollback.
+pub const FAILED_COMMIT: &str = "the transaction had failed, so the server rolled it back: nothing was committed";
+
+/// What `query.rollback` says when the query connection was lost: its transaction ended with it.
+pub const ENDED_WITH_SESSION: &str = "the query connection was lost, and the server rolled its transaction back";
+
+/// Why `query.commit` fails when the query connection was lost.
+pub const COMMIT_SESSION_LOST: &str =
+    "the query connection was lost, and the server rolled its transaction back: nothing was committed. Run again to open a new one";
+
+/// Why a close refuses `end: "commit"` while a query run goes on its connection.
+pub const ONLY_ROLLBACK: &str = "a statement is still running in the transaction; it can only be rolled back";
 
 /// Why `query.run` does not start: the text holds no statement.
 pub const NOTHING_TO_RUN: &str = "there is no statement to run";
@@ -139,6 +188,28 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
     CommandSpec {
+        id: COMMIT,
+        label: "Commit",
+        menu: &[],
+        shortcut: None,
+        params: "{tab?}",
+        enabled: needs_db,
+        run: commit,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
+        id: ROLLBACK,
+        label: "Rollback",
+        menu: &[],
+        shortcut: None,
+        params: "{tab?}",
+        enabled: needs_db,
+        run: rollback,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
         id: SET_DATABASE,
         label: "Set Query Database",
         menu: &[],
@@ -165,6 +236,15 @@ pub fn can_set_database(s: &Session) -> Result<(), String> {
     if c.dialect.has_use_database() { Ok(()) } else { Err(NO_DATABASE_SWITCH.into()) }
 }
 
+/// Whether `query.commit` or `query.rollback` from query tab `tab` would run now: its connection
+/// open, and no run, commit or rollback going on it (else why, as the command's `busy` says it).
+/// The error band's ROLLBACK follows it.
+pub fn can_end(s: &Session, tab: TabId) -> Result<(), String> {
+    needs_db(s)?;
+    let id = s.state.connection(Which::Tab(tab)).map(|c| c.id).ok_or(NOT_CONNECTED)?;
+    busy(s, id).map_or(Ok(()), Err)
+}
+
 // ---- stopping a run --------------------------------------------------------------------------
 
 /// Stops the query run of connection `connection` when it is `job`.
@@ -184,9 +264,13 @@ fn busy(s: &Session, connection: ConnectionId) -> Option<String> {
         Tab::Query(q) if q.running == Some(run.job) => Some(q.title.as_str()),
         _ => None,
     });
-    Some(match title {
-        Some(title) => running_in(title),
-        None => "a cancelled query is still stopping".into(),
+    let label = s.jobs.running().find(|(job, _)| *job == run.job).map(|(_, label)| label);
+    Some(match (title, label) {
+        (Some(title), _) => running_in(title),
+        (None, Some(COMMIT)) => "a COMMIT is running".into(),
+        (None, Some(ROLLBACK)) => "a ROLLBACK is running".into(),
+        (None, Some("tab.close" | "connection.close")) => "a COMMIT or ROLLBACK is running before a close".into(),
+        (None, _) => "a cancelled query is still stopping".into(),
     })
 }
 
@@ -219,6 +303,8 @@ struct Failure {
     statement: usize,
     error: DbError,
     position: Option<usize>,
+    /// How long the statement ran before it failed or stopped; `None` when it was not sent.
+    ms: Option<u64>,
 }
 
 /// What a run brings back.
@@ -232,6 +318,9 @@ struct Ran {
     current: CurrentDatabase,
     /// The tab's `USE` went through, or it needed none: its statements were reached.
     past_use: bool,
+    /// Whether the connection's session is in a transaction after the run, as the driver says;
+    /// `None` when no connection was reached.
+    transaction: Option<TransactionState>,
 }
 
 /// The byte offset in `text` of 1-based character `chars` of the statement at `range`, as the
@@ -261,8 +350,15 @@ struct RunSetup {
 /// rows do not fit its result is cut (and says so); once its columns do not fit it fails, and the
 /// run ends there ([`DbError::TooLarge`]). A statement without columns still runs.
 async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup: RunSetup, stop: Arc<Stop>, budget: usize) -> Ran {
-    let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None, current: setup.current.clone(), past_use: false };
-    let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
+    let mut ran = Ran {
+        conn: None,
+        outcomes: Vec::with_capacity(ranges.len()),
+        failure: None,
+        current: setup.current.clone(),
+        past_use: false,
+        transaction: None,
+    };
+    let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None, ms: None });
     if stop.is_set() {
         ran.failure = stopped(0);
         return ran;
@@ -285,12 +381,12 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                     // took TLS away. The connection closes as it is dropped, unused.
                     Ok(conn) if conn.info().tls < browse_tls => {
                         log::info!("the query connection has less TLS than the browse connection; nothing was sent");
-                        ran.failure = Some(Failure { statement: 0, error: DbError::Other(QUERY_TLS_LOST.into()), position: None });
+                        ran.failure = Some(Failure { statement: 0, error: DbError::Other(QUERY_TLS_LOST.into()), position: None, ms: None });
                         return ran;
                     }
                     Ok(conn) => (conn, true),
                     Err(error) => {
-                        ran.failure = Some(Failure { statement: 0, error, position: None });
+                        ran.failure = Some(Failure { statement: 0, error, position: None, ms: None });
                         return ran;
                     }
                 },
@@ -316,7 +412,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                     }
                     other => other,
                 };
-                ran.failure = Some(Failure { statement: 0, error, position: None });
+                ran.failure = Some(Failure { statement: 0, error, position: None, ms: None });
             }
         }
     }
@@ -329,19 +425,23 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                 break;
             }
             let Some(sql) = text.get(range.clone()) else {
-                ran.failure = Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None });
+                ran.failure =
+                    Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None, ms: None });
                 break;
             };
             if let Some(at) = setup.dialect.misplaced_nul(sql) {
-                ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at) });
+                ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at), ms: None });
                 break;
             }
             let limits = Limits { max_rows: if left == 0 { 0 } else { RUN_LIMITS.max_rows }, max_bytes: left };
-            match run_one(conn.as_ref(), sql, limits, &stop).await {
+            let sent = Instant::now();
+            let ran_one = run_one(conn.as_ref(), sql, limits, &stop).await;
+            let ms = ms_since(sent);
+            match ran_one {
                 Ok(result) => {
                     ran.current = ran.current.after(&result.database_after, moves);
                     left = left.saturating_sub(dbee_driver::result_cost(&result));
-                    ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
+                    ran.outcomes.push(StatementOutcome { range, result: Arc::new(result), ms });
                 }
                 Err(error) => {
                     ran.current = ran.current.after_failure(&error, moves);
@@ -349,18 +449,25 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                         DbError::Server(s) => s.position.and_then(|chars| byte_position(&text, &range, chars)),
                         _ => None,
                     };
-                    ran.failure = Some(Failure { statement: i, error, position });
+                    ran.failure = Some(Failure { statement: i, error, position, ms: Some(ms) });
                     break;
                 }
             }
         }
     }
+    ran.transaction = Some(conn.transaction().await);
     ran.conn = Some((conn, opened));
     ran
 }
 
+/// The whole milliseconds since `start`, at most `u64::MAX`.
+fn ms_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out until the
-/// statement has ended ([`jobs::stoppable`]); it then usually ends with `Cancelled`.
+/// statement has ended ([`jobs::stoppable`]); it then usually ends with `Cancelled`, unless it
+/// ended first.
 async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
     jobs::stoppable(conn.canceller(), conn.run(sql, limits), stop).await
 }
@@ -368,7 +475,8 @@ async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) 
 // ---- applying a run --------------------------------------------------------------------------
 
 /// The result as `query.run`, `query.showResult` and `inspect()` show it: `{statement, start,
-/// end, columns, rows, rowsSeen, complete, rowsAffected}`, `rows` being the rows kept.
+/// end, columns, rows, rowsSeen, complete, rowsAffected, ms}`, `rows` being the rows kept and
+/// `ms` how long the statement took.
 fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
     let r = &o.result;
     json!({
@@ -380,6 +488,7 @@ fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
         "rowsSeen": r.rows_seen,
         "complete": r.complete,
         "rowsAffected": r.rows_affected,
+        "ms": o.ms,
     })
 }
 
@@ -404,11 +513,10 @@ pub(crate) fn summary(q: &QueryTab, connected: Option<&Connected>) -> Json {
     })
 }
 
-/// `selection` when it lies in `result`'s grid.
+/// `selection` as far as it is kept on `result`'s grid ([`Selection::kept`]).
 fn fitting(selection: Option<Selection>, result: Option<&ResultSet>) -> Option<Selection> {
     let result = result?;
-    let fits = |(row, column): (usize, usize)| row < result.rows.len() && column < result.columns.len();
-    selection.filter(|sel| fits(sel.anchor) && fits(sel.focus))
+    selection.and_then(|sel| sel.kept(result.rows.len(), result.columns.len()))
 }
 
 /// The error a run ended with, its `position` a byte offset into the tab text and `statement`
@@ -463,7 +571,7 @@ fn query_error(e: &EngineError, f: &Failure) -> QueryError {
         DbError::Server(s) => (s.message_with_code(), Some(s.code.clone()), s.meaning, s.detail.clone(), s.hint.clone()),
         _ => (e.to_string(), None, None, None, None),
     };
-    QueryError { code: e.code(), message, server_code, meaning, detail, hint, position: f.position, statement: f.statement }
+    QueryError { code: e.code(), message, server_code, meaning, detail, hint, position: f.position, statement: f.statement, ms: f.ms }
 }
 
 /// `conn` is the connection `generation` was taken from.
@@ -478,17 +586,21 @@ fn same_connection(generation: &Weak<InTurn>, conn: &Arc<InTurn>) -> bool {
 fn apply_run(s: &mut Session, tab: TabId, id: ConnectionId, generation: &Weak<InTurn>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     let for_tab = matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me);
+    let tab_open = s.state.tab(tab).is_some();
     // The connection is still the one the run started on: not closed, not replaced.
     let Some(c) = s.state.connection_mut(Which::Id(id)).filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
     // The run is over (clearing the marker of a job that ended is not applying its result).
     if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
         c.query_run = None;
     }
-    let Ran { conn, outcomes, failure, current, past_use } = ran;
+    let Ran { conn, outcomes, failure, current, past_use, transaction } = ran;
     match &conn {
-        // Opened by the job: it becomes the session's query connection. Without the tab, a lost
-        // one is dropped: no open tab ever ran on it.
-        Some((used, true)) if c.query.is_none() && (for_tab || !used.is_closed()) => c.query = Some(Arc::clone(used)),
+        // Opened by the job: it becomes the session's query connection, with a new session. Without
+        // the tab, a lost one is dropped: no open tab ever ran on it.
+        Some((used, true)) if c.query.is_none() && (for_tab || !used.is_closed()) => {
+            c.query = Some(Arc::clone(used));
+            c.transaction = None;
+        }
         Some((used, false)) if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used)) => return Ok(ignored()),
         _ => {}
     }
@@ -496,6 +608,9 @@ fn apply_run(s: &mut Session, tab: TabId, id: ConnectionId, generation: &Weak<In
         && c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used))
     {
         c.query_database = current.clone();
+        if let Some(state) = transaction {
+            c.transaction = Transaction::after(c.transaction, state, tab_open.then_some(tab));
+        }
     }
     if !for_tab {
         return Ok(ignored());
@@ -569,7 +684,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if c.query.as_ref().is_some_and(|q| q.is_closed()) {
         log::info!("query: the query connection has closed; this run fails, and the next opens a new one");
         c.query = None;
-        let f = Failure { statement: 0, error: DbError::ConnectionLost, position: None };
+        let f = Failure { statement: 0, error: DbError::ConnectionLost, position: None, ms: None };
         let e = session_lost();
         if let Some(Tab::Query(q)) = s.state.tab_mut(tab) {
             q.results = Vec::new();
@@ -631,17 +746,7 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// the dialect can write in its `USE`. A run that gets past it sets it to where it ends, so it is
 /// `Busy` while the tab runs.
 fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
-    let tab = match p::opt_tab_id(params, "tab")? {
-        Some(id) => match s.state.tab(id) {
-            Some(Tab::Query(q)) => q.id,
-            Some(Tab::Table(_)) => return Err(bad(format!("tab {} is not a query tab", id.0))),
-            None => return Err(bad(format!("no tab {} is open", id.0))),
-        },
-        None => match s.state.active_tab() {
-            Some(Tab::Query(q)) => q.id,
-            _ => return Err(disabled(NO_QUERY_TAB)),
-        },
-    };
+    let tab = query_tab(s, params)?;
     let dialect = s.state.dialect(Which::Tab(tab));
     let database = match params.get("database") {
         Some(Json::Null) => None,
@@ -657,6 +762,355 @@ fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> 
     }
     q.database = database;
     Ok(Outcome::Done(json!({ "tab": tab, "database": q.database })))
+}
+
+/// The query tab `params` names in `tab`, else the active one.
+fn query_tab(s: &Session, params: &Json) -> Result<TabId, EngineError> {
+    match p::opt_tab_id(params, "tab")? {
+        Some(id) => match s.state.tab(id) {
+            Some(Tab::Query(q)) => Ok(q.id),
+            Some(Tab::Table(_)) => Err(bad(format!("tab {} is not a query tab", id.0))),
+            None => Err(bad(format!("no tab {} is open", id.0))),
+        },
+        None => match s.state.active_tab() {
+            Some(Tab::Query(q)) => Ok(q.id),
+            _ => Err(disabled(NO_QUERY_TAB)),
+        },
+    }
+}
+
+/// What `query.commit` and `query.rollback` send, and what a close with `end` sends before it
+/// closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum End {
+    Commit,
+    Rollback,
+}
+
+impl End {
+    /// A close's `end` param: `"commit"` or `"rollback"`; `None` when not given.
+    pub(crate) fn param(params: &Json) -> Result<Option<End>, EngineError> {
+        match p::opt_str(params, "end")? {
+            None => Ok(None),
+            Some("commit") => Ok(Some(End::Commit)),
+            Some("rollback") => Ok(Some(End::Rollback)),
+            Some(_) => Err(bad("`end` must be \"commit\" or \"rollback\"")),
+        }
+    }
+
+    /// As `end` names it, and a close's `ended` says it.
+    fn name(self) -> &'static str {
+        match self {
+            End::Commit => "commit",
+            End::Rollback => "rollback",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            End::Commit => COMMIT,
+            End::Rollback => ROLLBACK,
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            End::Commit => "COMMIT",
+            End::Rollback => "ROLLBACK",
+        }
+    }
+}
+
+fn commit(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    end(s, params, End::Commit)
+}
+
+fn rollback(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    end(s, params, End::Rollback)
+}
+
+/// `{tab?}` → `{tab, sent, transaction, note?}`: ends the query session's transaction (see the
+/// module docs), asked from query tab `tab` (default: the active one), any of the connection's.
+/// `transaction` is the state after it. With none open it sends nothing: `sent: false` and
+/// `note` [`NO_TRANSACTION`], at once. A commit of a Postgres transaction that had failed is a
+/// rollback, which `note` says ([`FAILED_COMMIT`]). On a query connection found lost, a commit
+/// fails with `connectionLost` and a rollback has nothing left to do ([`ENDED_WITH_SESSION`]).
+fn end(s: &mut Session, params: &Json, end: End) -> Result<Outcome, EngineError> {
+    let tab = query_tab(s, params)?;
+    let id = s.state.connection(Which::Tab(tab)).map(|c| c.id).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    if let Some(why) = busy(s, id) {
+        return Err(EngineError::Busy(why));
+    }
+    s.browse(Which::Id(id))?;
+    let c = s.state.connection_mut(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let nothing = |note: &str| Ok(Outcome::Done(json!({ "tab": tab, "sent": false, "transaction": null, "note": note })));
+    let ending = match ending(c, Vec::new()) {
+        Ending::Lost { conn, .. } => {
+            let_go(c, &conn);
+            return match end {
+                End::Commit => Err(commit_lost()),
+                End::Rollback => nothing(ENDED_WITH_SESSION),
+            };
+        }
+        Ending::Nothing(note) => return nothing(note),
+        send => send,
+    };
+    let job = spawn_end(s, end.id(), end, ending, move |_, done| {
+        let Some(done) = done? else { return Ok(ignored()) };
+        let mut result = json!({ "tab": tab, "sent": done.sent, "transaction": done.transaction });
+        if let Some(note) = done.note {
+            result["note"] = json!(note);
+        }
+        Ok(result)
+    });
+    Ok(Outcome::Started(job))
+}
+
+/// `end` of a close of connection `id` (`None` for a query tab that has none): a job that ends the
+/// query session's transaction as [`end`] does, then runs `close` on the caller's thread. Its
+/// result is `close`'s plus `ended` (`"commit"` or `"rollback"`) and `note?` ([`NO_TRANSACTION`]
+/// when there was none, [`FAILED_COMMIT`], [`ENDED_WITH_SESSION`]). When the end fails, the job
+/// fails with its error and nothing closes. `{"ignored": true}` when the connection was closed or
+/// replaced meanwhile, or `close` finds nothing left to close (`None`).
+///
+/// Query runs going on the connection are inside the transaction: a commit is refused
+/// ([`ONLY_ROLLBACK`]), and a rollback stops them first, then waits for their results before it
+/// looks at the transaction they left and ends it. Another commit or rollback going is `Busy`.
+pub(crate) fn end_then_close(
+    s: &mut Session,
+    id: Option<ConnectionId>,
+    end: End,
+    label: &'static str,
+    close: impl FnOnce(&mut Session) -> Option<Json> + Send + 'static,
+) -> Result<Outcome, EngineError> {
+    let runs = id.map(|id| runs_going(s, id)).unwrap_or_default();
+    if let Some(id) = id
+        && let Some(why) = busy(s, id)
+        && !s.state.connection(Which::Id(id)).and_then(|c| c.query_run.as_ref()).is_some_and(|run| runs.iter().any(|(job, _)| *job == run.job))
+    {
+        return Err(EngineError::Busy(why));
+    }
+    if !runs.is_empty() && end == End::Commit {
+        return Err(bad(ONLY_ROLLBACK));
+    }
+    let mut after = Vec::new();
+    for (job, _) in &runs {
+        s.jobs.stop(*job);
+        after.extend(s.jobs.sent(*job));
+    }
+    let ending = match id.and_then(|id| s.state.connection(Which::Id(id))) {
+        Some(c) => ending(c, after),
+        None => Ending::Nothing(NO_TRANSACTION),
+    };
+    let job = spawn_end(s, label, end, ending, move |s, done| {
+        let Some(done) = done? else { return Ok(ignored()) };
+        let Some(mut result) = close(s) else { return Ok(ignored()) };
+        result["ended"] = json!(end.name());
+        if let Some(note) = done.note {
+            result["note"] = json!(note);
+        }
+        Ok(result)
+    });
+    Ok(Outcome::Started(job))
+}
+
+/// The question a close asks before it drops connection `id`'s transaction, in `state`
+/// ([`Need::EndTransaction`]): `question` is the close's own (`Close Query 1?`), `name` what it
+/// closes, `lost` what it loses besides, as its `needsConfirm` says it after the question.
+pub(crate) fn end_question(
+    s: &Session,
+    id: ConnectionId,
+    state: TransactionState,
+    about: EndAbout,
+    name: String,
+    question: &str,
+    lost: Option<String>,
+) -> EngineError {
+    let runs = runs_going(s, id);
+    let running = runs.first().map(|(_, title)| Running { title: title.clone(), count: runs.len() });
+    let why = match (&running, state, about) {
+        (Some(r), _, _) => format!("{} is still running in the transaction, so it can only be rolled back.", r.title),
+        (None, TransactionState::Failed, _) => "Its transaction failed, so it can only be rolled back.".to_owned(),
+        (None, TransactionState::Idle | TransactionState::Unknown, _) => "dbee can't tell whether it still has a transaction open.".to_owned(),
+        (None, TransactionState::Open, EndAbout::Tab) => "It opened a transaction that isn't committed yet.".to_owned(),
+        (None, TransactionState::Open, EndAbout::Connection) => "It has a transaction that isn't committed yet.".to_owned(),
+    };
+    let message = match &lost {
+        Some(lost) => format!("{question} {why} {lost}"),
+        None => format!("{question} {why}"),
+    };
+    EngineError::Needs { need: Need::EndTransaction { state, about, name, lost, running }, message }
+}
+
+/// The query runs going on connection `id`, in tab order: each one's job and its tab's title.
+fn runs_going(s: &Session, id: ConnectionId) -> Vec<(JobId, String)> {
+    s.state
+        .tabs
+        .iter()
+        .filter_map(|t| match t {
+            Tab::Query(q) if q.connection == Some(id) => q.running.filter(|job| s.jobs.is_running(*job)).map(|job| (job, q.title.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Where a commit or rollback goes: open connection `id`, while its browse connection is still
+/// `generation` (not closed, not replaced by a reconnect).
+struct At {
+    id: ConnectionId,
+    generation: Weak<InTurn>,
+}
+
+/// How a commit or rollback goes, decided on the caller's thread.
+enum Ending {
+    /// Nothing to send, for the reason the note gives.
+    Nothing(&'static str),
+    /// The query connection `conn` was found lost, and its transaction with it.
+    Lost { at: At, conn: Arc<dyn Connection> },
+    /// Send it on the query connection `conn`, where the transaction was `before`, once the
+    /// stopped runs `after` have sent their results.
+    Send { at: At, conn: Arc<dyn Connection>, before: Option<TransactionState>, after: Vec<Sent> },
+}
+
+/// How a commit or rollback goes on `c`'s query session. `after` are the runs a close stopped
+/// first: the transaction they leave is looked at once they have ended, so the query connection
+/// is reached even when the last finished run left none.
+fn ending(c: &Connected, after: Vec<Sent>) -> Ending {
+    let at = At { id: c.id, generation: Arc::downgrade(&c.browse) };
+    match (&c.query, c.transaction) {
+        (Some(q), _) if q.is_closed() => Ending::Lost { at, conn: Arc::clone(q) },
+        (Some(q), Some(t)) => Ending::Send { at, conn: Arc::clone(q), before: Some(t.state), after },
+        (Some(q), None) if !after.is_empty() => Ending::Send { at, conn: Arc::clone(q), before: None, after },
+        _ => Ending::Nothing(NO_TRANSACTION),
+    }
+}
+
+/// Lets go of `c`'s query connection `conn`, found lost, and of its transaction; the next run opens
+/// a new one.
+fn let_go(c: &mut Connected, conn: &Arc<dyn Connection>) {
+    if c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, conn)) {
+        log::info!("query: the query connection has closed, and its transaction with it; the next run opens a new one");
+        c.query = None;
+        c.transaction = None;
+    }
+}
+
+fn commit_lost() -> EngineError {
+    EngineError::Db { code: DbError::ConnectionLost.code(), message: COMMIT_SESSION_LOST.into(), data: json!({}) }
+}
+
+/// Starts the job that ends the query session's transaction as `ending` says, labelled `label`;
+/// `then` makes the job's result of what it did, on the caller's thread. A job that sends counts
+/// as the connection's run.
+fn spawn_end(
+    s: &mut Session,
+    label: &'static str,
+    end: End,
+    ending: Ending,
+    then: impl FnOnce(&mut Session, Result<Option<EndDone>, EngineError>) -> Result<Json, EngineError> + Send + 'static,
+) -> JobId {
+    let sends = match &ending {
+        Ending::Send { at, .. } => Some(at.id),
+        Ending::Nothing(_) | Ending::Lost { .. } => None,
+    };
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(label, Arc::clone(&stop), async move {
+        let ran = run_end(ending, end, &job_stop).await;
+        let apply: Apply = Box::new(move |s: &mut Session| {
+            let done = apply_end(s, end, ran);
+            then(s, done)
+        });
+        apply
+    });
+    if let Some(c) = sends.and_then(|id| s.state.connection_mut(Which::Id(id))) {
+        c.query_run = Some(QueryRun { job, stop });
+    }
+    job
+}
+
+/// What a commit or rollback job did.
+enum EndRan {
+    Nothing(&'static str),
+    Lost {
+        at: At,
+        conn: Arc<dyn Connection>,
+    },
+    /// Sent on `conn`: the state before it, whether it went through, and the state the driver
+    /// reported after it.
+    Sent {
+        at: At,
+        conn: Arc<dyn Connection>,
+        before: Option<TransactionState>,
+        sent: Result<(), DbError>,
+        state: TransactionState,
+    },
+}
+
+/// The job's part of `ending`. After the stopped runs, the query connection is looked at again:
+/// they may have lost it, or left no transaction.
+async fn run_end(ending: Ending, end: End, stop: &Stop) -> EndRan {
+    let (at, conn, mut before, after) = match ending {
+        Ending::Nothing(note) => return EndRan::Nothing(note),
+        Ending::Lost { at, conn } => return EndRan::Lost { at, conn },
+        Ending::Send { at, conn, before, after } => (at, conn, before, after),
+    };
+    if !after.is_empty() {
+        for run in &after {
+            run.wait().await;
+        }
+        if conn.is_closed() {
+            return EndRan::Lost { at, conn };
+        }
+        match conn.transaction().await {
+            TransactionState::Idle => return EndRan::Nothing(NO_TRANSACTION),
+            state => before = Some(state),
+        }
+    }
+    let sent = jobs::stoppable(conn.canceller(), conn.run(end.sql(), Limits { max_rows: 0, max_bytes: 0 }), stop).await.map(drop);
+    let state = conn.transaction().await;
+    EndRan::Sent { at, conn, before, sent, state }
+}
+
+/// What a commit or rollback did: whether it was sent, the state after it (null once it has
+/// ended), and a note.
+struct EndDone {
+    sent: bool,
+    transaction: Json,
+    note: Option<&'static str>,
+}
+
+/// Applies a commit or rollback job's `ran`: the new state, then its error, if any. `None` when
+/// the connection it went to was closed or replaced meanwhile, or the query connection is no
+/// longer the session's: nothing changes.
+fn apply_end(s: &mut Session, end: End, ran: EndRan) -> Result<Option<EndDone>, EngineError> {
+    let (at, conn, sent) = match ran {
+        EndRan::Nothing(note) => return Ok(Some(EndDone { sent: false, transaction: Json::Null, note: Some(note) })),
+        EndRan::Lost { at, conn } => (at, conn, None),
+        EndRan::Sent { at, conn, before, sent, state } => (at, conn, Some((before, sent, state))),
+    };
+    let me = s.applying_job();
+    let Some(c) = s.state.connection_mut(Which::Id(at.id)).filter(|c| same_connection(&at.generation, &c.browse)) else { return Ok(None) };
+    if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
+        c.query_run = None;
+    }
+    let Some((before, sent, state)) = sent else {
+        let_go(c, &conn);
+        return match end {
+            End::Commit => Err(commit_lost()),
+            End::Rollback => Ok(Some(EndDone { sent: false, transaction: Json::Null, note: Some(ENDED_WITH_SESSION) })),
+        };
+    };
+    if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, &conn)) {
+        return Ok(None);
+    }
+    c.transaction = Transaction::after(c.transaction, state, None);
+    let transaction = c.transaction().map_or(Json::Null, |t| t.summary());
+    if let Err(error) = sent {
+        return Err(s.db_failed(at.id, &conn, &error));
+    }
+    let failed_commit = end == End::Commit && before == Some(TransactionState::Failed) && state == TransactionState::Idle;
+    Ok(Some(EndDone { sent: true, transaction, note: failed_commit.then_some(FAILED_COMMIT) }))
 }
 
 /// `{index}` → `{tab, shown, result}`: the grid shows result `index` of the last run.

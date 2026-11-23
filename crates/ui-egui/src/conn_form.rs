@@ -1,46 +1,50 @@
 //! The connection form: its fields as typed ([`Form`]), turning them into a [`ConnectionConfig`]
 //! (port numbers, validation), and drawing it in parts, each of fixed height but the fields: the
-//! title row with the database type ([`header`]), then the fields, which scroll, and Save · Test ·
-//! Connect with the message slot under them at the bottom ([`fields_and_footer`]).
+//! pane's title row ([`title_row`]), the engine row with the database type ([`engine_row`]), then
+//! the fields in one or two [`columns`], which scroll, then the strip (an error band, a result or
+//! a note) and the form's bar along the pane's bottom: SAVE, `…`, TEST and CONNECT ([`body`]).
 //! The screen around it, with the engine cards a new connection starts with, is
 //! [`crate::connections`].
 //!
 //! The rows follow the database type's settings ([`dbee_config::KindInfo`]), never the type
 //! itself: a server type has host and port, user and password, the database, the SSL rows when
-//! it takes TLS and the SSH tunnel when it takes one; a file type has its file, with Choose… and
-//! New file…. Every type has the name and colour, Read-only, and its own on/off options as check
+//! it takes TLS and the SSH tunnel when it takes one; a file type has its file, with CHOOSE and
+//! NEW FILE. Every type has the name and colour, Read-only, and its own on/off options as check
 //! boxes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, Checkbox, CornerRadius, FontId, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
+    Align, Align2, CornerRadius, Key, Label, Layout, Modifiers, Popup, PopupCloseBehavior, RectAlign, ScrollArea, Sense, Stroke, UiBuilder, pos2,
+    vec2,
 };
 
 use crate::automation::Tags;
-use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
-use crate::filter_bar;
+use crate::components::button::{BarButton, BoxButton, TextButton};
+use crate::components::checkbox::Checkbox;
+use crate::components::error_band::Band;
+use crate::components::icon::Icon;
+use crate::components::input::{self, Field, Input};
+use crate::components::logo::Logo;
+use crate::components::menu::{self, Item};
+use crate::components::segmented::Segmented;
+use crate::components::strip::{self, Strip, Tone};
+use crate::components::swatch::{self, Swatch};
+use crate::components::tooltip::Hint;
+use crate::components::{self, status};
+use crate::connections::{Act, BUSY_CONNECT, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, line_job, tilde};
 use crate::picker::Pick;
-use crate::theme::{RADIUS, TOKENS, connection_color};
+use crate::theme::size::{
+    BAR_H, BAR_LINE, BUTTON_H, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_FIELDS_TOP, CONN_PORT_W, CONN_RUNNING_GAP,
+    CONN_SECTION_GAP, CONN_TITLE_MIN_W, CONN_TWO_COLUMNS_MIN, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, ERROR_BAND_EDGE, ERROR_BAND_GAP, ERROR_BAND_PAD,
+    FIELD_GAP, INPUT_H, INPUT_PAD_X, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
+};
+use crate::theme::{self, Text};
 
-/// The height of a label above a field.
-const LABEL_H: f32 = 16.0;
-/// The height of a field.
-const FIELD_H: f32 = 28.0;
-/// A field with its label.
-const ROW_H: f32 = LABEL_H + FIELD_H;
-/// The slot under the buttons for an error or a test result.
-const MESSAGE_H: f32 = 52.0;
-/// Save · Test · Connect and the message slot under them, with the space between.
-const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
-/// Fill from URL and Change engine, side by side.
-const SIDE_BUTTON_W: f32 = 128.0;
-/// The Database field's list button.
-const LIST_BUTTON_W: f32 = 84.0;
 /// The most of the Database field's list that shows; more names scroll.
 const LIST_H: f32 = 240.0;
 
@@ -62,10 +66,10 @@ pub(crate) struct Form {
     pub kind: DbKind,
     /// A file type's database file.
     pub file: Option<PathBuf>,
-    /// New file… chose `file`: every test and connect asks for it to be made, until a connect
+    /// NEW FILE chose `file`: every test and connect asks for it to be made, until a connect
     /// succeeds.
     pub create_file: bool,
-    /// Opened from the saved list or Recent: its database type is fixed text (design E2).
+    /// Opened from the saved list or Recent: its database type is fixed text.
     pub engine_fixed: bool,
     pub color: ConnectionColor,
     pub host: String,
@@ -84,7 +88,7 @@ pub(crate) struct Form {
     pub ssh_port: String,
     pub ssh_user: String,
     pub ssh_auth: Auth,
-    /// The key file chosen with "Change…"; `None` picks automatically.
+    /// The key file chosen with CHOOSE; `None` picks automatically.
     pub ssh_key: Option<PathBuf>,
     /// The type's own on/off settings, `"true"` when on; keys this build does not know are kept.
     pub options: BTreeMap<String, String>,
@@ -246,7 +250,7 @@ impl Form {
     }
 
     /// Makes the form one of type `to`. Everything typed stays; a port that still holds the old
-    /// type's default becomes the new one's. Another type forgets New file….
+    /// type's default becomes the new one's. Another type forgets NEW FILE.
     pub(crate) fn switch_kind(&mut self, to: DbKind) {
         if to == self.kind {
             return;
@@ -275,12 +279,12 @@ impl Form {
 
 // ---- drawing ---------------------------------------------------------------------------------
 
-/// A field's label and the field under it, `width` wide.
+/// A field's label over what `add` draws under it (the colours, the choices, a file box, an input
+/// with a button beside it), `width` wide.
 fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), TOKENS.text_muted);
+        input::label(ui, label, |_| {});
         add(ui)
     })
     .inner
@@ -297,14 +301,13 @@ fn column_noted<R>(
     id: &str,
     add: impl FnOnce(&mut egui::Ui, &mut Tags) -> R,
 ) -> R {
-    ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        let shown = ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), TOKENS.text_muted);
-        let room = Rect::from_min_max(pos2((shown.right() + 8.0).min(rect.right()), rect.top()), rect.max);
-        let note_ui = UiBuilder::new().max_rect(room).layout(Layout::left_to_right(Align::Center));
-        let r = ui.scope_builder(note_ui, |ui| ui.add(Label::new(RichText::new(note).size(12.0).color(TOKENS.text_muted)).truncate())).inner;
-        tags.tag_value(id, &r, note);
+        input::label(ui, label, |ui| {
+            ui.add_space(8.0);
+            let r = ui.add(Label::new(Text::Small.rich(note).color(theme::tokens(ui.ctx()).text_muted)).truncate());
+            tags.tag_value(id, &r, note);
+        });
         add(ui, tags)
     })
     .inner
@@ -314,147 +317,126 @@ fn column_noted<R>(
 const FORM_FIELDS: [&str; 9] =
     ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"];
 
-pub(crate) fn field_id(id: &str) -> egui::Id {
+pub fn field_id(id: &str) -> egui::Id {
     egui::Id::new(("dbee-form", id))
 }
 
-/// A one-line text field tagged `id` with its text.
-fn text_field(ui: &mut egui::Ui, tags: &mut Tags, id: &'static str, text: &mut String, hint: &str) -> egui::Response {
-    let r = ui.add(
-        TextEdit::singleline(text)
-            .id(field_id(id))
-            .hint_text(hint)
-            .desired_width(f32::INFINITY)
-            .min_size(vec2(0.0, FIELD_H))
-            .margin(Margin::symmetric(6, 5)),
-    );
+/// A field `width` wide: `label` over a one-line input of `text` (`font` is `Input::body` or
+/// `Input::data`) showing `hint` while empty; tagged `id` with its text, its text edit's id from
+/// [`field_id`].
+fn text_field(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    width: f32,
+    label: &str,
+    id: &'static str,
+    font: fn(&mut String) -> Input<'_>,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
+    let r = ui.add(Field::new(label, font(text).id(field_id(id)).placeholder(hint).desired_width(width)));
     tags.tag_value(id, &r, text.as_str());
     r
 }
 
-/// A row of exclusive choices, tagged `id` (with the chosen one's name) and `<id>-<name>` each.
-fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, tags: &mut Tags, id: &str, value: &mut T, options: &[(T, &str, &str)], width: f32) {
-    let n = options.len().max(1) as f32;
-    let gap = 4.0;
-    let each = ((width - gap * (n - 1.0)) / n).max(20.0);
-    let t = TOKENS;
-    let frame = Rect::from_min_size(ui.cursor().min, vec2(width, FIELD_H));
-    ui.painter().rect(frame, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-    let row = ui.allocate_ui_with_layout(vec2(width, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (option, label, name) in options {
-            let r = ui.add_sized(vec2(each, FIELD_H), Button::selectable(*value == *option, *label));
-            tags.tag_value(&format!("{id}-{name}"), &r, *value == *option);
-            if r.clicked() {
-                *value = *option;
-            }
-        }
-    });
-    let chosen = options.iter().find(|(o, ..)| *o == *value).map_or("", |(_, _, name)| *name);
-    tags.tag_value(id, &row.response, chosen);
-}
-
-/// A read-only path box (`id`) with the path it shows.
-fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Option<&Path>, waiting: bool) {
-    let t = TOKENS;
-    let (rect, r) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
-    let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS), t.panel, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-    let shown = path.map(|p| tilde(&p.display().to_string()));
-    let (text, color) = if waiting {
-        ("Waiting for the file picker…".to_string(), t.text_muted)
-    } else {
-        match &shown {
-            Some(s) => (s.clone(), t.text),
-            None => ("None".to_string(), t.text_muted),
-        }
-    };
-    let galley = line_galley(ui, &text, FontId::proportional(13.0), color, width - 14.0);
-    let y = rect.center().y - galley.size().y / 2.0;
-    p.galley(pos2(rect.left() + 7.0, y), galley, color);
-    let r = if text.chars().count() > 40 { r.on_hover_text(text.as_str()) } else { r };
-    tags.tag_value(id, &r, shown.map_or(Json::Null, Json::from));
-}
-
-/// The space between fields side by side.
-const GAP: f32 = 12.0;
-/// The port fields' width.
-const PORT_W: f32 = 110.0;
-
-/// A button of the title row, as wide as the other one beside it, tagged `id`; whether it was
-/// clicked.
-fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, enabled: bool) -> bool {
-    let r = ui.add_enabled_ui(enabled, |ui| ui.add_sized(vec2(SIDE_BUTTON_W, FIELD_H), Button::new(label))).inner;
-    tags.tag(id, &r);
-    r.clicked()
-}
-
-/// The narrowest the title gets before the type and Change engine move to a row of their own.
-const TITLE_MIN_W: f32 = 160.0;
-
-/// `text` in `font`, cut to `width` with "…" (then the whole text shows on hover), in a slot of
-/// that width, on its left or its `right`; tagged `id` with `value`.
-fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, FontId), value: &str, width: f32, right: bool) {
-    let t = TOKENS;
-    let galley = line_galley(ui, text, font, t.text, width);
+/// `text` in `style` and `color` on one line in `slot`, from its left, centred in its height, cut
+/// with "…" to its width (then the whole text shows on hover); tagged `id` with `value`.
+fn slot_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, style): (&str, Text), value: &str, slot: egui::Rect) {
+    let t = theme::tokens(ui.ctx());
+    let galley = line_galley(ui, text, style, t.text, slot.width());
     let elided = galley.elided;
-    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-    let x = if right { rect.right() - galley.size().x } else { rect.left() };
-    ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    let r = if elided { r.on_hover_text(text) } else { r };
+    ui.painter().galley(pos2(slot.left(), slot.center().y - galley.size().y / 2.0), galley, t.text);
+    let r = ui.interact(slot, egui::Id::new(id), Sense::hover());
+    let r = if elided { r.hint(text) } else { r };
     tags.tag_value(id, &r, value);
 }
 
-/// The title row, `w` wide: the form's title on the left; at the right end Fill from URL when
-/// `url` (a type the form can take has a URL), and on the `form`, left of it, the database type
-/// and Change engine (unless the type is fixed; not while a test or connect runs). When they
-/// would leave the title less than [`TITLE_MIN_W`], the type and Change engine take a row of their
-/// own under it, Change engine under Fill from URL.
-pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
-    let kind_font = FontId::proportional(15.0);
-    let change = form && !conn.form.engine_fixed;
-    // As wide as the widest type's name, so the layout is the same whichever type the form has.
-    let kind_w = DbKind::ALL.iter().map(|k| line_galley(ui, k.label(), kind_font.clone(), t.text, w).size().x).fold(0.0, f32::max).min(w / 3.0);
-    let spacing = ui.spacing().item_spacing.x;
-    let buttons = f32::from(u8::from(url) + u8::from(change)) * (SIDE_BUTTON_W + spacing);
-    let one_row = form && TITLE_MIN_W + GAP + kind_w + buttons <= w;
-    let kind = |ui: &mut egui::Ui, tags: &mut Tags, width: f32, right: bool| {
-        row_text(ui, tags, "conn-kind", (conn.form.kind.label(), kind_font.clone()), conn.form.kind.id(), width, right);
-    };
-    let change_engine = |ui: &mut egui::Ui, tags: &mut Tags, acts: &mut Vec<Act>| {
-        if change && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
-            acts.push(Act::ChangeEngine);
-        }
-    };
-    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
-        if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…", true) {
+/// A row of the pane, [`BAR_H`] tall across it with a 1 px `line` along its bottom; the room
+/// above the line.
+fn bar_row(ui: &mut egui::Ui) -> egui::Rect {
+    let t = theme::tokens(ui.ctx());
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+    let line = egui::Rect::from_min_max(pos2(row.left(), row.bottom() - BAR_LINE), row.max);
+    ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+    egui::Rect::from_min_max(row.min, pos2(row.right(), line.top()))
+}
+
+/// The pane's title row: the form's title in `subtitle`, 12 in, cut with "…" to the room there
+/// is; at the right end FILL FROM URL when `url` (a type the form can take has a URL), after its
+/// divider. When the title would get narrower than [`CONN_TITLE_MIN_W`], FILL FROM URL draws its
+/// icon alone, its words on hover.
+pub(crate) fn title_row(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let row = bar_row(ui);
+    let mut end = row.right();
+    if url {
+        let full = BarButton::label(Icon::Link, "Fill from URL").over_line();
+        let words = row.width() - INSET - full.width(ui) - INSET >= CONN_TITLE_MIN_W;
+        let button = full.words(words);
+        let w = button.width(ui);
+        end = row.right() - w;
+        // In a child: the row has taken its room already.
+        let r = ui.new_child(UiBuilder::new().max_rect(egui::Rect::from_min_max(pos2(end, row.top()), row.max))).add(button);
+        let r = if words { r } else { r.hint("Fill from URL…") };
+        tags.tag("conn-fill-url", &r);
+        if r.clicked() {
             acts.push(Act::FillFromUrl);
         }
-        if one_row {
-            change_engine(ui, tags, acts);
-            kind(ui, tags, kind_w, true);
+    }
+    let title = conn.form.title();
+    let slot = egui::Rect::from_min_max(pos2(row.left() + INSET, row.top()), pos2((end - INSET).max(row.left() + INSET + 1.0), row.bottom()));
+    slot_text(ui, tags, "conn-title", (&title, Text::Subtitle), &title, slot);
+}
+
+/// The form's engine row: the engine's logo and name, 12 in, the name cut with "…" to the room
+/// there is; at the right end CHANGE ENGINE after its divider (not for a type that is fixed; off
+/// while a test or connect runs).
+pub(crate) fn engine_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let t = theme::tokens(ui.ctx());
+    let row = bar_row(ui);
+    let mut end = row.right();
+    if !conn.form.engine_fixed {
+        let button = BarButton::text("Change engine").over_line();
+        end = row.right() - button.width(ui);
+        let at = egui::Rect::from_min_max(pos2(end, row.top()), row.max);
+        let enabled = conn.running.is_none();
+        let mut cell = ui.new_child(UiBuilder::new().max_rect(at));
+        if !enabled {
+            cell.disable();
         }
-        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            let title = conn.form.title();
-            let width = ui.available_width().max(1.0);
-            row_text(ui, tags, "conn-title", (&title, FontId::proportional(19.0)), &title, width, false);
-        });
-    });
-    if form && !one_row {
-        ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
-            change_engine(ui, tags, acts);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let width = ui.available_width().max(1.0);
-                kind(ui, tags, width, false);
-            });
-        });
+        let r = cell.add(button);
+        let r = if enabled { r } else { r.hint_disabled("Change engine: not now, a test or connect is running") };
+        tags.tag("conn-change-engine", &r);
+        if r.clicked() {
+            acts.push(Act::ChangeEngine);
+        }
+    }
+    let kind = conn.form.kind;
+    let logo = egui::Rect::from_center_size(pos2(row.left() + INSET + ENGINE_ROW_LOGO / 2.0, row.center().y), vec2(ENGINE_ROW_LOGO, ENGINE_ROW_LOGO));
+    Logo::of(kind).paint(ui.painter(), logo, t.text);
+    let left = logo.right() + ENGINE_ROW_GAP;
+    let slot = egui::Rect::from_min_max(pos2(left, row.top()), pos2((end - INSET).max(left + 1.0), row.bottom()));
+    slot_text(ui, tags, "conn-kind", (kind.label(), Text::Subtitle), kind.id(), slot);
+}
+
+/// How the form's sections fit in a pane `pane_w` wide: in two columns from
+/// [`CONN_TWO_COLUMNS_MIN`], else in one; and a column's width, never more than
+/// [`CONN_COLUMN_MAX_W`] (the room past the columns stays empty). The columns start [`INSET`] in
+/// from the pane's left, [`CONN_COLUMN_GAP`] apart.
+pub(crate) fn columns(pane_w: f32) -> (usize, f32) {
+    if pane_w >= CONN_TWO_COLUMNS_MIN {
+        (2, ((pane_w - 2.0 * INSET - CONN_COLUMN_GAP) / 2.0).min(CONN_COLUMN_MAX_W))
+    } else {
+        (1, (pane_w - 2.0 * INSET).clamp(1.0, CONN_COLUMN_MAX_W))
     }
 }
 
-/// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when
-/// they need more. Enter in one of them connects.
-pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+/// What is under the engine row, across the pane: the fields in [`columns`] (one column holds the
+/// second's sections under the first's), which scroll when they need more room; then the strip
+/// (an error, a result or a note), and the form's bar along the bottom. The strip takes its room
+/// from the fields' view, so neither the fields nor the bar move. `shown`: the test or connect
+/// that has run 300 ms, and how long ([`crate::quiet`]). `saved`: the form shows a saved
+/// connection (its bar has `…`). Enter in a field connects.
+pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, shown: Option<(Running, Duration)>, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
     if conn.databases.open && keyboard_left(ui, &conn.databases) {
         conn.databases.open = false;
     }
@@ -465,35 +447,407 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
     }
-    let gap = 8.0 + 2.0 * ui.spacing().item_spacing.y;
-    let fields_h = (ui.available_height() - FOOTER_H - gap).max(60.0);
-    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(fields_h).auto_shrink([false, true]).show(ui, |ui| {
-        ui.set_width(w);
-        name_row(ui, &mut conn.form, tags, w);
-        match conn.form.kind.info().settings {
-            Settings::Server { tls, ssh, .. } => {
-                server_rows(ui, conn, tags, acts, w);
-                if tls {
-                    tls_rows(ui, conn, tags, acts, w);
-                }
-                read_only_and_options(ui, &mut conn.form, tags, w);
-                if ssh {
-                    ssh_box(ui, conn, tags, acts, w);
-                }
+    let area = ui.available_rect_before_wrap();
+    let bar = egui::Rect::from_min_max(pos2(area.left(), (area.bottom() - BAR_H).max(area.top())), area.max);
+    let strip_h = conn.message.as_ref().map_or(0.0, |m| strip_h(ui, m, area.width()));
+    let strip = egui::Rect::from_min_max(pos2(area.left(), (bar.top() - strip_h).max(area.top())), pos2(area.right(), bar.top()));
+    let fields = egui::Rect::from_min_max(area.min, pos2(area.right(), strip.top()));
+    fields_in(ui, conn, shown.is_some(), tags, acts, fields);
+    if let Some(m) = &conn.message {
+        strip_in(&mut cell_ui(ui, strip), m, tags);
+    }
+    form_bar(ui, conn, saved, shown, tags, acts, bar);
+    ui.advance_cursor_after_rect(area);
+}
+
+/// The fields in `at`, [`INSET`] in from its left and [`CONN_FIELDS_TOP`] under its top; their
+/// scroll bar runs along its right edge. While a test or connect has run 300 ms (`dimmed`), they
+/// are drawn at half strength and take no input ([`components::dim`]).
+fn fields_in(ui: &mut egui::Ui, conn: &mut ConnScreen, dimmed: bool, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
+    let (n, w) = columns(at.width());
+    let room = egui::Rect::from_min_max(pos2(at.left() + INSET, (at.top() + CONN_FIELDS_TOP).min(at.bottom())), at.max);
+    let mut ui = ui.new_child(UiBuilder::new().id_salt("conn-fields").max_rect(room).layout(Layout::top_down(Align::Min)));
+    ui.set_clip_rect(at.intersect(ui.clip_rect()));
+    let guard = FORM_FIELDS.map(field_id);
+    components::dim(&mut ui, dimmed, &guard, |ui| fields_scroll(ui, conn, tags, acts, room.height(), n, w));
+}
+
+/// The fields' scroll area, `height` tall, in `n` columns `w` wide.
+fn fields_scroll(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, height: f32, n: usize, w: f32) {
+    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        if n == 2 {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = CONN_COLUMN_GAP;
+                stack(ui, w, |ui| first_column(ui, conn, tags, acts, w));
+                stack(ui, w, |ui| second_column(ui, conn, tags, acts, w));
+            });
+        } else {
+            stack(ui, w, |ui| {
+                first_column(ui, conn, tags, acts, w);
+                ui.add_space(CONN_SECTION_GAP);
+                second_column(ui, conn, tags, acts, w);
+            });
+        }
+        ui.add_space(INSET);
+    });
+}
+
+/// How tall the strip for `m` is across `w`: an error band's heading and up to three lines of its
+/// message, or a [`Strip`]'s.
+fn strip_h(ui: &egui::Ui, m: &Message, w: f32) -> f32 {
+    match m.kind {
+        Kind::Error => {
+            let words_w = w - ERROR_BAND_EDGE - 2.0 * ERROR_BAND_PAD;
+            2.0 * ERROR_BAND_PAD + Text::Subtitle.line() + ERROR_BAND_GAP + strip::lines_h(ui, Text::Body, &m.text, words_w)
+        }
+        Kind::Result | Kind::Note => strip_of(m).height(ui, w),
+    }
+}
+
+/// A result or a note as a [`Strip`].
+fn strip_of(m: &Message) -> Strip<'_> {
+    let tone = if m.kind == Kind::Result { Tone::Success } else { Tone::Neutral };
+    Strip { tone, text: &m.text }
+}
+
+/// The strip across `ui`: an error as the error band under its heading (`conn-error`, and
+/// `conn-error-heading`), a result (`conn-result`) or a note (`conn-note`) as a [`Strip`]; each
+/// tagged with its words. A long error scrolls inside it.
+fn strip_in(ui: &mut egui::Ui, m: &Message, tags: &mut Tags) {
+    let height = ui.max_rect().height();
+    let id = egui::Id::new("conn-strip");
+    let r = match m.kind {
+        Kind::Error => {
+            ScrollArea::vertical()
+                .id_salt("conn-band")
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let band = Band { heading: m.heading, message: &m.text, ..Band::default() };
+                    band.show(ui, id).response
+                })
+                .inner
+        }
+        Kind::Result | Kind::Note => strip_of(m).show(ui, id),
+    };
+    // The strip's place, also when its band scrolls.
+    let r = r.with_new_rect(ui.max_rect());
+    let tag = match m.kind {
+        Kind::Error => {
+            tags.tag_value("conn-error-heading", &r, m.heading);
+            "conn-error"
+        }
+        Kind::Result => "conn-result",
+        Kind::Note => "conn-note",
+    };
+    tags.tag_value(tag, &r, m.text.as_str());
+}
+
+/// What the form's bar shows besides SAVE, TEST, CONNECT and CANCEL (which never go): the facts'
+/// word (`CONNECTING`), the timer, `…`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BarFit {
+    pub running_words: bool,
+    pub timer: bool,
+    pub more: bool,
+}
+
+impl BarFit {
+    /// Each form, from the whole bar to the least: the facts' word goes first, then the timer,
+    /// then `…`.
+    const FORMS: [BarFit; 4] = [
+        BarFit { running_words: true, timer: true, more: true },
+        BarFit { running_words: false, timer: true, more: true },
+        BarFit { running_words: false, timer: false, more: true },
+        BarFit { running_words: false, timer: false, more: false },
+    ];
+}
+
+/// How wide the parts of a form's bar are; `None` for a part this bar doesn't have (the facts
+/// before 300 ms, `…` on a form that isn't saved, CANCEL while nothing runs).
+pub(crate) struct FormBar {
+    save: f32,
+    words: Option<f32>,
+    timer: Option<f32>,
+    more: Option<f32>,
+    test: f32,
+    connect: f32,
+    cancel: Option<f32>,
+}
+
+impl FormBar {
+    /// How wide the bar must be for `f`: [`INSET`] at both ends, SAVE, [`CONN_BESIDE_GAP`] to
+    /// what follows; the facts' word and the timer each with [`CONN_RUNNING_GAP`] after it; `…`,
+    /// TEST, CONNECT and CANCEL [`CONN_BESIDE_GAP`] apart.
+    fn width(&self, f: BarFit) -> f32 {
+        let part = |on: bool, w: Option<f32>, gap: f32| if on { w.map_or(0.0, |w| w + gap) } else { 0.0 };
+        INSET
+            + self.save
+            + CONN_BESIDE_GAP
+            + part(f.running_words, self.words, CONN_RUNNING_GAP)
+            + part(f.timer, self.timer, CONN_RUNNING_GAP)
+            + part(f.more, self.more, CONN_BESIDE_GAP)
+            + self.test
+            + CONN_BESIDE_GAP
+            + self.connect
+            + part(true, self.cancel, CONN_BESIDE_GAP)
+            + INSET
+    }
+
+    /// The first of [`BarFit::FORMS`] that fits in `room`, else the least (whose left part is
+    /// then cut off at the bar's edge). A narrower `room` never gets a fuller form.
+    pub(crate) fn fit(&self, room: f32) -> BarFit {
+        BarFit::FORMS.into_iter().find(|f| self.width(*f) <= room).unwrap_or(BarFit::FORMS[3])
+    }
+}
+
+/// The form's bar in `at`, along the pane's bottom on `card` with a 1 px `line` on top: SAVE (a
+/// text button) [`INSET`] in from the left; at the right, ending [`INSET`] from the pane's edge,
+/// `…` (a saved connection's: Duplicate, Delete), TEST and CONNECT, [`CONN_BESIDE_GAP`] apart.
+/// TEST and CONNECT are off while a test or connect runs, with their words. Once it has run
+/// 300 ms (`shown`: what runs and for how long), CANCEL comes after CONNECT, the buttons moving
+/// left for it, and the facts (`CONNECTING` or `TESTING`, then the timer) before the first button.
+/// Short of room it gives way in [`BarFit`]'s order; past that SAVE moves left and is cut off at
+/// the bar's edge. What it showed.
+fn form_bar(
+    ui: &mut egui::Ui,
+    conn: &ConnScreen,
+    saved: bool,
+    shown: Option<(Running, Duration)>,
+    tags: &mut Tags,
+    acts: &mut Vec<Act>,
+    at: egui::Rect,
+) -> BarFit {
+    let t = theme::tokens(ui.ctx());
+    // Nothing drawn past the bar.
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(at));
+    ui.set_clip_rect(at.intersect(ui.clip_rect()));
+    let ui = &mut ui;
+    let p = ui.painter();
+    p.rect_filled(at, CornerRadius::ZERO, t.card);
+    p.rect_filled(egui::Rect::from_min_size(at.min, vec2(at.width(), BAR_LINE)), CornerRadius::ZERO, t.line);
+    let row = egui::Rect::from_min_max(pos2(at.left(), at.top() + BAR_LINE), at.max);
+    let busy = conn.running.is_some();
+    let place = |x: f32, w: f32| egui::Rect::from_min_size(pos2(x, row.center().y - BUTTON_H / 2.0), vec2(w, BUTTON_H));
+
+    let facts = shown.map(|(kind, elapsed)| (if kind == Running::Test { "Testing" } else { "Connecting" }, status::timer(elapsed)));
+    let label_w = |s: &str| ui.painter().layout_job(Text::Label.job(s, t.text_muted)).size().x;
+    let more = BoxButton::outline("…");
+    let sizes = FormBar {
+        save: TextButton::new("Save").width(ui),
+        words: facts.as_ref().map(|(words, _)| label_w(words)),
+        timer: facts.as_ref().map(|(_, timer)| label_w(timer)),
+        more: saved.then(|| more.width(ui)),
+        test: BoxButton::outline("Test").width(ui),
+        connect: BoxButton::primary("Connect").width(ui),
+        cancel: shown.map(|_| BoxButton::primary("Cancel").width(ui)),
+    };
+    let fit = sizes.fit(at.width());
+
+    // From the right: CANCEL (while it shows), CONNECT, TEST, `…`, the facts; then SAVE, which
+    // moves left when they need its room.
+    let mut right = row.right() - INSET;
+    let cancel_at = sizes.cancel.map(|w| {
+        let at = place(right - w, w);
+        right = at.left() - CONN_BESIDE_GAP;
+        at
+    });
+    let connect_at = place(right - sizes.connect, sizes.connect);
+    let test_at = place(connect_at.left() - CONN_BESIDE_GAP - sizes.test, sizes.test);
+    let more_at = sizes.more.filter(|_| fit.more).map(|w| place(test_at.left() - CONN_BESIDE_GAP - w, w));
+    let mut first = more_at.unwrap_or(test_at).left();
+    let mut running = None::<egui::Rect>;
+    if let Some((words, timer)) = &facts {
+        let p = ui.painter();
+        let mut paint = |on: bool, s: &str| {
+            if on {
+                let r = Text::Label.paint(p, pos2(first - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, s, t.text_muted);
+                first = r.left();
+                running = Some(running.map_or(r, |seen| seen.union(r)));
             }
-            Settings::File { .. } => {
-                file_row(ui, conn, tags, acts, w);
-                read_only_and_options(ui, &mut conn.form, tags, w);
+        };
+        paint(fit.timer, timer);
+        paint(fit.running_words, words);
+        // Listed also when neither shows: what runs, at the place the facts would take.
+        let place = running.unwrap_or_else(|| egui::Rect::from_min_size(pos2(first, row.center().y), vec2(0.0, 0.0)));
+        let r = ui.interact(place, egui::Id::new("conn-running"), Sense::hover());
+        tags.tag_value("conn-running", &r, serde_json::json!({ "words": words, "timer": timer }));
+    }
+    let save_x = (row.left() + INSET).min(first - CONN_BESIDE_GAP - sizes.save);
+    let save_at = place(save_x, sizes.save);
+    let r = ui.new_child(UiBuilder::new().max_rect(save_at).layout(Layout::left_to_right(Align::Center))).add(TextButton::new("Save"));
+    tags.tag_value("conn-save", &r, "Save");
+    if r.clicked() {
+        acts.push(Act::Save);
+    }
+    if let Some(more_at) = more_at {
+        let r = button_in(ui, more_at, true, more).hint("Duplicate or delete this connection");
+        tags.tag("conn-more", &r);
+        more_menu(&r, conn, tags, acts);
+    }
+    let r = button_in(ui, test_at, !busy, BoxButton::outline("Test"));
+    let r = if busy { r.hint_disabled(BUSY_TEST) } else { r };
+    tags.tag_value("conn-test", &r, "Test");
+    if r.clicked() {
+        acts.push(Act::Test);
+    }
+    let r = button_in(ui, connect_at, !busy, BoxButton::primary("Connect"));
+    let r = if busy { r.hint_disabled(BUSY_CONNECT) } else { r };
+    tags.tag_value("conn-connect", &r, "Connect");
+    if r.clicked() {
+        acts.push(Act::ConnectForm);
+    }
+    if let Some(cancel_at) = cancel_at {
+        let r = button_in(ui, cancel_at, true, BoxButton::primary("Cancel"));
+        tags.tag("conn-cancel", &r);
+        if r.clicked() {
+            acts.push(Act::Cancel);
+        }
+    }
+    fit
+}
+
+/// TEST's reason while a test or connect runs.
+const BUSY_TEST: &str = "Test: not now, a test or connect is running";
+
+/// `…`'s menu, under it and right-aligned: Duplicate, then Delete (which asks first), as the
+/// row's menu has them.
+fn more_menu(button: &egui::Response, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let id = conn.form.id.clone();
+    Popup::menu(button).align(RectAlign::BOTTOM_END).style(menu::style(&button.ctx)).show(|ui| {
+        for (label, item, destructive) in [("Duplicate", "conn-more-duplicate", false), ("Delete", "conn-more-delete", true)] {
+            if destructive {
+                menu::separator(ui);
+            }
+            let r = ui.add(Item::new(label).destructive(destructive));
+            // The menu's first frame is a sizing pass, which reads every widget as disabled.
+            tags.tag_value_as(item, &r, label, true);
+            if r.clicked() {
+                acts.push(if destructive { Act::AskDelete { id: id.clone(), name: conn.form.title() } } else { Act::Duplicate(id.clone()) });
+                ui.close();
             }
         }
     });
-    ui.add_space(8.0);
-    // The footer keeps its place at the bottom, however tall the fields are.
-    let above = ui.available_height() - FOOTER_H - ui.spacing().item_spacing.y;
-    if above > 0.0 {
-        ui.add_space(above);
+}
+
+/// A column `w` wide of what `add` draws, top to bottom.
+fn stack(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(vec2(w, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.set_width(w);
+        add(ui);
+    });
+}
+
+/// A section's label (`label` caps, `text_muted`), its first field [`CONN_FIELD_GAP`] under it.
+fn section(ui: &mut egui::Ui, words: &str) {
+    let t = theme::tokens(ui.ctx());
+    ui.add(Label::new(Text::Label.rich(words).color(t.text_muted)).truncate());
+    ui.add_space(CONN_FIELD_GAP);
+}
+
+/// A field's height: its label, the gap, its input.
+fn field_h() -> f32 {
+    Text::Label.line() + FIELD_GAP + INPUT_H
+}
+
+/// A row `w` wide and `h` tall, split into a cell that takes what is left and, at the row's right
+/// end, a cell for each of `widths`, `gap` apart: the first cell and the others.
+fn cells<const N: usize>(ui: &mut egui::Ui, w: f32, h: f32, gap: f32, widths: [f32; N]) -> (egui::Rect, [egui::Rect; N]) {
+    let (row, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let mut right = row.right();
+    let mut beside = [egui::Rect::NOTHING; N];
+    for (cell, width) in beside.iter_mut().zip(widths).rev() {
+        *cell = egui::Rect::from_min_max(pos2(right - width, row.top()), pos2(right, row.bottom()));
+        right -= width + gap;
     }
-    footer(ui, conn, tags, acts, w);
+    (egui::Rect::from_min_max(row.min, pos2(right.max(row.left()), row.bottom())), beside)
+}
+
+/// A child of `ui` drawing in `at`, top to bottom.
+fn cell_ui(ui: &mut egui::Ui, at: egui::Rect) -> egui::Ui {
+    ui.new_child(UiBuilder::new().max_rect(at).layout(Layout::top_down(Align::Min)))
+}
+
+/// `button` in the cell `at`, as wide as it, on while `enabled`.
+fn button_in(ui: &mut egui::Ui, at: egui::Rect, enabled: bool, button: BoxButton<'_>) -> egui::Response {
+    cell_ui(ui, at).add_enabled(enabled, button.min_width(at.width()))
+}
+
+/// A button's width for the longer of its two words, so nothing beside it moves when they change.
+fn either_w(ui: &egui::Ui, a: &str, b: &str) -> f32 {
+    BoxButton::outline(a).width(ui).max(BoxButton::outline(b).width(ui))
+}
+
+/// A read-only box in `at` showing `text` in `color` on one line (the whole text on hover when
+/// cut); its response, as `id`. A chosen path (`path`) is data, cut in the middle keeping its
+/// file's name as the status bar cuts one; other words are `body`, cut at the end with "…".
+fn path_box(ui: &mut egui::Ui, at: egui::Rect, id: &str, text: &str, color: egui::Color32, path: bool) -> egui::Response {
+    let t = theme::tokens(ui.ctx());
+    let p = ui.painter();
+    p.rect(at, CornerRadius::same(RADIUS_CONTROL), t.bg, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
+    let room = at.width() - 2.0 * (INPUT_PAD_X + 1.0);
+    let (galley, cut) = if path {
+        let data = |text: &str| line_job(ui, Text::Data.job_as_written(text, color), f32::INFINITY);
+        match (data(text).size().x > room).then(|| status::cut_middle(text, |cut| data(cut).size().x <= room)).flatten() {
+            Some(cut) => (data(&cut), true),
+            None => (line_job(ui, Text::Data.job_as_written(text, color), room), false),
+        }
+    } else {
+        (line_galley(ui, text, Text::Body, color, room), false)
+    };
+    let elided = galley.elided || cut;
+    ui.painter().galley(pos2(at.left() + INPUT_PAD_X + 1.0, at.center().y - galley.size().y / 2.0), galley, color);
+    let r = ui.interact(at, egui::Id::new(("dbee-form-box", id)), Sense::hover());
+    if elided { r.hint(text) } else { r }
+}
+
+/// A file box's words: `Waiting for the file picker…` while its picker is open, else the path (the
+/// home folder as `~`), else `None`.
+fn path_words(path: Option<&Path>, waiting: bool, t: &theme::Tokens) -> (String, egui::Color32) {
+    if waiting {
+        return ("Waiting for the file picker…".to_string(), t.text_muted);
+    }
+    match path {
+        Some(p) => (tilde(&p.display().to_string()), t.text),
+        None => ("None".to_string(), t.text_muted),
+    }
+}
+
+/// CONNECTION's rows (name, colour, then a server's host, port and database and AUTHENTICATION,
+/// or a file type's file).
+fn first_column(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    section(ui, "Connection");
+    let f = &mut conn.form;
+    text_field(ui, tags, w, "Name", "conn-name", Input::body, &mut f.name, "Optional");
+    ui.add_space(CONN_FIELD_GAP);
+    colour_row(ui, f, tags, w);
+    ui.add_space(CONN_FIELD_GAP);
+    match conn.form.kind.info().settings {
+        Settings::Server { .. } => server_rows(ui, conn, tags, acts, w),
+        Settings::File { .. } => file_row(ui, conn, tags, acts, w),
+    }
+}
+
+/// SECURITY (a server's SSL rows when it takes TLS, Read-only and the type's options), then SSH
+/// TUNNEL when the type takes one.
+fn second_column(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    section(ui, "Security");
+    match conn.form.kind.info().settings {
+        Settings::Server { tls, ssh, .. } => {
+            if tls {
+                tls_rows(ui, conn, tags, acts, w);
+                ui.add_space(CONN_FIELD_GAP);
+            }
+            read_only_and_options(ui, &mut conn.form, tags, w);
+            if ssh {
+                ui.add_space(CONN_SECTION_GAP);
+                section(ui, "SSH tunnel");
+                ssh_rows(ui, conn, tags, acts, w);
+            }
+        }
+        Settings::File { .. } => read_only_and_options(ui, &mut conn.form, tags, w),
+    }
 }
 
 /// The picker the form waits for (not one the user stopped waiting for).
@@ -501,111 +855,90 @@ fn picking(conn: &ConnScreen) -> Option<Pick> {
     conn.picker.as_ref().filter(|p| !p.stopped).map(|p| p.target)
 }
 
-/// Name and colour.
-fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    let t = TOKENS;
-    let colors: [(ConnectionColor, &str); 8] = [
-        (ConnectionColor::None, "none"),
-        (ConnectionColor::Red, "red"),
-        (ConnectionColor::Orange, "orange"),
-        (ConnectionColor::Yellow, "yellow"),
-        (ConnectionColor::Green, "green"),
-        (ConnectionColor::Blue, "blue"),
-        (ConnectionColor::Purple, "purple"),
-        (ConnectionColor::Gray, "gray"),
-    ];
-    let dot = 20.0;
-    let dots_w = dot * colors.len() as f32 + 6.0 * (colors.len() as f32 - 1.0);
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, w - dots_w - GAP, "Name", |ui| text_field(ui, tags, "conn-name", &mut f.name, "Optional"));
-        column(ui, dots_w, "Colour", |ui| {
-            let row = ui.allocate_ui_with_layout(vec2(dots_w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for (color, name) in colors {
-                    let (rect, r) = ui.allocate_exact_size(vec2(dot, dot), Sense::click());
-                    let chosen = f.color == color;
-                    let p = ui.painter();
-                    match connection_color(color) {
-                        Some(c) => {
-                            p.circle_filled(rect.center(), dot / 2.0 - 2.0, c);
-                        }
-                        None => {
-                            p.circle_stroke(rect.center(), dot / 2.0 - 3.0, Stroke::new(1.5, t.border));
-                        }
-                    }
-                    if chosen || r.hovered() {
-                        p.circle_stroke(rect.center(), dot / 2.0, Stroke::new(1.5, if chosen { t.text } else { t.border }));
-                    }
-                    let r = r.on_hover_text(name);
-                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, chosen, name));
-                    tags.tag_value(&format!("conn-color-{name}"), &r, chosen);
-                    if r.clicked() {
-                        f.color = color;
-                    }
+/// The colours: none and the seven, as swatches.
+fn colour_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
+    let n = swatch::COLOURS.len() as f32;
+    let swatches_w = SWATCH * n + SWATCH_GAP * (n - 1.0);
+    column(ui, w, "Colour", |ui| {
+        let row = ui.allocate_ui_with_layout(vec2(swatches_w, INPUT_H), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = SWATCH_GAP;
+            for colour in swatch::COLOURS {
+                let (name, chosen) = (swatch::name(colour), f.color == colour);
+                let r = ui.add(Swatch::new(colour, chosen)).hint(name);
+                tags.tag_value(&format!("conn-color-{name}"), &r, chosen);
+                if r.clicked() {
+                    f.color = colour;
                 }
-            });
-            let chosen = colors.iter().find(|(c, _)| *c == f.color).map_or("none", |(_, n)| *n);
-            tags.tag_value("conn-color", &row.response, chosen);
+            }
         });
+        tags.tag_value("conn-color", &row.response, swatch::name(f.color));
     });
 }
 
-/// Host and port, user and password, "Save passwords", and the database.
+/// `label` over an input in the cell `at` (as [`text_field`]).
+#[allow(clippy::too_many_arguments)]
+fn field_in(
+    ui: &mut egui::Ui,
+    at: egui::Rect,
+    tags: &mut Tags,
+    label: &str,
+    id: &'static str,
+    font: fn(&mut String) -> Input<'_>,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
+    text_field(&mut cell_ui(ui, at), tags, at.width(), label, id, font, text, hint)
+}
+
+/// Host and port, the database, then AUTHENTICATION: user, password with SHOW, "Save passwords".
+/// Tab reaches them in that order, as they read.
 fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let has_store = conn.has_store;
     let f = &mut conn.form;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, w - PORT_W - GAP, "Host", |ui| text_field(ui, tags, "conn-host", &mut f.host, "localhost"));
-        column(ui, PORT_W, "Port", |ui| text_field(ui, tags, "conn-port", &mut f.port, &default_port(f.kind)));
-    });
+    let (host, [port]) = cells(ui, w, field_h(), CONN_FIELD_GAP, [CONN_PORT_W]);
+    field_in(ui, host, tags, "Host", "conn-host", Input::data, &mut f.host, "localhost");
+    field_in(ui, port, tags, "Port", "conn-port", Input::data, &mut f.port, &default_port(f.kind));
+    ui.add_space(CONN_FIELD_GAP);
+    let (database, _) = ui.allocate_exact_size(vec2(w, field_h()), Sense::hover());
+    database_row(&mut cell_ui(ui, database), conn, tags, acts, w);
+    let f = &mut conn.form;
 
-    let half = (w - GAP) / 2.0;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, half, "User", |ui| text_field(ui, tags, "conn-user", &mut f.user, ""));
-        column(ui, half, "Password", |ui| {
-            ui.allocate_ui_with_layout(vec2(half, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let show_w = 52.0;
-                let r = ui.add(
-                    TextEdit::singleline(&mut f.password)
-                        .id(field_id("conn-password"))
-                        .password(!f.show_password)
-                        .desired_width(half - show_w - 6.0)
-                        .min_size(vec2(0.0, FIELD_H))
-                        .margin(Margin::symmetric(6, 5)),
-                );
-                tags.tag_secret("conn-password", &r, !f.password.is_empty());
-                let label = if f.show_password { "Hide" } else { "Show" };
-                let s = ui.add_sized(vec2(show_w, FIELD_H), Button::new(label));
-                tags.tag_value("conn-password-show", &s, f.show_password);
-                if s.clicked() {
-                    f.show_password = !f.show_password;
-                }
-            });
-        });
+    ui.add_space(CONN_SECTION_GAP);
+    section(ui, "Authentication");
+    text_field(ui, tags, w, "User", "conn-user", Input::data, &mut f.user, "");
+    ui.add_space(CONN_FIELD_GAP);
+    column(ui, w, "Password", |ui| {
+        // As wide for both words, so the field keeps its width; it ends where the column ends.
+        let show_w = either_w(ui, "Show", "Hide");
+        let (field, [show]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [show_w]);
+        let password = Input::data(&mut f.password).id(field_id("conn-password")).password(!f.show_password);
+        let r = cell_ui(ui, field).add(password.desired_width(field.width()));
+        tags.tag_secret("conn-password", &r, !f.password.is_empty());
+        let label = if f.show_password { "Hide" } else { "Show" };
+        let s = button_in(ui, show, true, BoxButton::outline(label));
+        tags.tag_value("conn-password-show", &s, f.show_password);
+        if s.clicked() {
+            f.show_password = !f.show_password;
+        }
     });
-
+    ui.add_space(CONN_FIELD_GAP);
     // Save passwords, or why it cannot.
-    ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+    ui.horizontal(|ui| {
+        ui.set_width(w);
+        ui.spacing_mut().item_spacing.x = CONN_BESIDE_GAP;
         if has_store {
-            let r = ui.checkbox(&mut f.save_secrets, "Save passwords in the keyring");
+            let r = ui.add(Checkbox::new(&mut f.save_secrets, "Save passwords in the keyring"));
             tags.tag_value("conn-save-secrets", &r, f.save_secrets);
         } else {
             let mut off = false;
             let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save passwords"));
             tags.tag_value("conn-save-secrets", &r, false);
             let note = "No keyring found, so passwords are asked each time.";
-            let r = ui.label(RichText::new(note).size(12.0).color(t.text_muted));
+            let r = ui.add(Label::new(Text::Small.rich(note).color(t.text_muted)).truncate());
             tags.tag_value("conn-no-keyring", &r, note);
         }
     });
-    ui.add_space(4.0);
-
-    database_row(ui, conn, tags, acts, w);
 }
 
 /// The keyboard is on a widget other than the Database field and the list's button. On none at
@@ -645,8 +978,8 @@ fn list_keys(ui: &egui::Ui, list: &mut DatabaseList, acts: &mut Vec<Act>) {
 /// The scroll offset that brings row `n` of a list into a view `view_h` tall, scrolled to
 /// `offset`, moving it as little as it can.
 fn reveal_offset(n: usize, offset: f32, view_h: f32) -> f32 {
-    let top = n as f32 * (filter_bar::ITEM_H + filter_bar::ITEM_GAP);
-    let bottom = top + filter_bar::ITEM_H;
+    let top = n as f32 * MENU_ITEM_H;
+    let bottom = top + MENU_ITEM_H;
     if top < offset {
         top
     } else if bottom > offset + view_h {
@@ -666,64 +999,56 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
     let can_list = conn.running.is_none() && !listing;
     let ConnScreen { form, databases, .. } = conn;
     column(ui, w, "Database", |ui| {
-        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let field_w = w - LIST_BUTTON_W - 6.0;
-            let field = ui.add(
-                TextEdit::singleline(&mut form.database)
-                    .id(field_id("conn-database"))
-                    .desired_width(field_w)
-                    .min_size(vec2(0.0, FIELD_H))
-                    .margin(Margin::symmetric(6, 5)),
-            );
-            tags.tag_value("conn-database", &field, form.database.as_str());
-            if field.changed() {
+        let list_w = either_w(ui, "List…", "Listing…");
+        let (cell, [list]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [list_w]);
+        let field_w = cell.width();
+        let field = cell_ui(ui, cell).add(Input::data(&mut form.database).id(field_id("conn-database")).desired_width(field_w));
+        tags.tag_value("conn-database", &field, form.database.as_str());
+        if field.changed() {
+            databases.open = false;
+        }
+        if std::mem::take(&mut databases.take_keyboard) && databases.open && ui.memory(|m| m.focused()).is_none() {
+            field.request_focus();
+        }
+        let label = if listing { "Listing…" } else { "List…" };
+        let button = button_in(ui, list, can_list, BoxButton::outline(label)).hint("Choose from the server's databases");
+        tags.tag_value("conn-database-list", &button, label);
+        databases.button = Some(button.id);
+        if button.clicked() {
+            if databases.open {
                 databases.open = false;
+            } else {
+                acts.push(Act::ListDatabases);
             }
-            if std::mem::take(&mut databases.take_keyboard) && databases.open && ui.memory(|m| m.focused()).is_none() {
-                field.request_focus();
-            }
-            let label = if listing { "Listing…" } else { "List…" };
-            let button = ui
-                .add_enabled(can_list, Button::new(label).min_size(vec2(LIST_BUTTON_W, FIELD_H)))
-                .on_hover_text("Choose from the server's databases");
-            tags.tag_value("conn-database-list", &button, label);
-            databases.button = Some(button.id);
-            if button.clicked() {
-                if databases.open {
-                    databases.open = false;
-                } else {
-                    acts.push(Act::ListDatabases);
-                }
-            }
-            let DatabaseList { names, open, highlight, offset, view_h, reveal, .. } = databases;
-            let mut scroll = ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]);
-            if std::mem::take(reveal) {
-                let view = if *view_h > 0.0 { *view_h } else { LIST_H };
-                scroll = scroll.vertical_scroll_offset(reveal_offset(*highlight, *offset, view));
-            }
-            Popup::from_response(&field)
-                .open_bool(open)
-                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                .sense(Sense::CLICK)
-                .align(RectAlign::BOTTOM_START)
-                .width(field_w)
-                .show(|ui| {
-                    ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
-                    let shown = scroll.show_rows(ui, filter_bar::ITEM_H, names.len(), |ui, rows| {
-                        for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
-                            let r = filter_bar::item_sensing(ui, n == *highlight, name, Sense::CLICK);
-                            // A popup's first frame is a sizing pass, which reads every widget as disabled.
-                            tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
-                            if r.clicked() {
-                                acts.push(Act::ChooseDatabase(name.clone()));
-                            }
+        }
+        let DatabaseList { names, open, highlight, offset, view_h, reveal, .. } = databases;
+        let mut scroll = ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]);
+        if std::mem::take(reveal) {
+            let view = if *view_h > 0.0 { *view_h } else { LIST_H };
+            scroll = scroll.vertical_scroll_offset(reveal_offset(*highlight, *offset, view));
+        }
+        Popup::from_response(&field)
+            .open_bool(open)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .sense(Sense::CLICK)
+            .align(RectAlign::BOTTOM_START)
+            .width(field_w)
+            .style(menu::style(ui.ctx()))
+            .show(|ui| {
+                ui.set_min_width(ui.available_width());
+                let shown = scroll.show_rows(ui, MENU_ITEM_H, names.len(), |ui, rows| {
+                    for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
+                        let r = ui.add(Item::new(name).highlighted(n == *highlight).focusable(false));
+                        // A popup's first frame is a sizing pass, which reads every widget as disabled.
+                        tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
+                        if r.clicked() {
+                            acts.push(Act::ChooseDatabase(name.clone()));
                         }
-                    });
-                    *offset = shown.state.offset.y;
-                    *view_h = shown.inner_rect.height();
+                    }
                 });
-        });
+                *offset = shown.state.offset.y;
+                *view_h = shown.inner_rect.height();
+            });
     });
 }
 
@@ -738,206 +1063,254 @@ fn ssl_note(mode: SslMode) -> &'static str {
     }
 }
 
-/// SSL mode, what it checks, and the CA file.
+/// SSL mode, what it checks, and the CA file with CHOOSE (STOP while its picker is open) and
+/// CLEAR.
 fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let t = theme::tokens(ui.ctx());
     let picking = picking(conn);
     let f = &mut conn.form;
+    // Each mode's words are its name.
     let modes = [
-        (SslMode::Disable, "disable", "disable"),
-        (SslMode::Prefer, "prefer", "prefer"),
-        (SslMode::Require, "require", "require"),
-        (SslMode::VerifyCa, "verify-ca", "verify-ca"),
-        (SslMode::VerifyFull, "verify-full", "verify-full"),
+        (SslMode::Disable, "disable"),
+        (SslMode::Prefer, "prefer"),
+        (SslMode::Require, "require"),
+        (SslMode::VerifyCa, "verify-ca"),
+        (SslMode::VerifyFull, "verify-full"),
     ];
     let note = ssl_note(f.ssl_mode);
-    column_noted(ui, w, "SSL mode", note, tags, "conn-ssl-note", |ui, tags| segments(ui, tags, "conn-ssl", &mut f.ssl_mode, &modes, w));
-    column(ui, w, "CA file (optional)", |ui| {
-        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let button_w = 84.0;
-            let waiting = picking == Some(Pick::Ca);
-            path_box(ui, tags, "conn-ca", w - 2.0 * (button_w + 6.0), f.ca_file.as_deref(), waiting);
-            let choose =
-                ui.add_enabled(picking.is_none() || waiting, Button::new(if waiting { "Stop" } else { "Choose…" }).min_size(vec2(button_w, FIELD_H)));
-            tags.tag("conn-ca-choose", &choose);
-            if choose.clicked() {
-                acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Ca) });
-            }
-            let clear = ui.add_enabled(f.ca_file.is_some(), Button::new("Clear").min_size(vec2(button_w, FIELD_H)));
-            tags.tag("conn-ca-clear", &clear);
-            if clear.clicked() {
-                acts.push(Act::ClearCa);
-            }
-        });
+    column_noted(ui, w, "SSL mode", note, tags, "conn-ssl-note", |ui, tags| {
+        let shown = Segmented::small(&mut f.ssl_mode, &modes).width(w).show(ui);
+        for ((mode, name), r) in modes.iter().zip(&shown.segments) {
+            tags.tag_value(&format!("conn-ssl-{name}"), r, f.ssl_mode == *mode);
+        }
+        let chosen = modes.iter().find(|(m, _)| *m == f.ssl_mode).map_or("", |(_, name)| *name);
+        tags.tag_value("conn-ssl", &shown.row, chosen);
     });
-    ui.add_space(4.0);
+    ui.add_space(CONN_FIELD_GAP);
+    column(ui, w, "CA file (optional)", |ui| {
+        let waiting = picking == Some(Pick::Ca);
+        let (cell, [choose, clear]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), BoxButton::outline("Clear").width(ui)]);
+        let (text, color) = path_words(f.ca_file.as_deref(), waiting, t);
+        let r = path_box(ui, cell, "conn-ca", &text, color, f.ca_file.is_some() && !waiting);
+        tags.tag_value("conn-ca", &r, f.ca_file.as_ref().map_or(Json::Null, |p| Json::from(tilde(&p.display().to_string()))));
+        let label = if waiting { "Stop" } else { "Choose" };
+        let b = button_in(ui, choose, picking.is_none() || waiting, BoxButton::outline(label));
+        tags.tag("conn-ca-choose", &b);
+        if b.clicked() {
+            acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Ca) });
+        }
+        let b = button_in(ui, clear, f.ca_file.is_some(), BoxButton::outline("Clear"));
+        tags.tag("conn-ca-clear", &b);
+        if b.clicked() {
+            acts.push(Act::ClearCa);
+        }
+    });
 }
 
-/// The database file, with Choose… and New file…: the pickers show the type's extensions first.
+/// The database file, with CHOOSE and NEW FILE (each STOP while its picker is open): the pickers
+/// show the type's extensions first.
 fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let t = theme::tokens(ui.ctx());
     let picking = picking(conn);
     let f = &conn.form;
     column(ui, w, "File", |ui| {
-        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let button_w = 84.0;
-            let waiting = picking.filter(|p| matches!(p, Pick::File | Pick::NewFile));
-            path_box(ui, tags, "conn-file", w - 2.0 * (button_w + 6.0), f.file.as_deref(), waiting.is_some());
-            for (pick, id, label) in [(Pick::File, "conn-file-choose", "Choose…"), (Pick::NewFile, "conn-file-new", "New file…")] {
-                let this = waiting == Some(pick);
-                let b = ui.add_enabled(picking.is_none() || this, Button::new(if this { "Stop" } else { label }).min_size(vec2(button_w, FIELD_H)));
-                tags.tag(id, &b);
-                if b.clicked() {
-                    acts.push(if this { Act::StopPicking } else { Act::Pick(pick) });
-                }
+        let waiting = picking.filter(|p| matches!(p, Pick::File | Pick::NewFile));
+        let (cell, buttons) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), either_w(ui, "New file", "Stop")]);
+        let (text, color) = path_words(f.file.as_deref(), waiting.is_some(), t);
+        let r = path_box(ui, cell, "conn-file", &text, color, f.file.is_some() && waiting.is_none());
+        tags.tag_value("conn-file", &r, f.file.as_ref().map_or(Json::Null, |p| Json::from(tilde(&p.display().to_string()))));
+        for ((pick, id, label), at) in
+            [(Pick::File, "conn-file-choose", "Choose"), (Pick::NewFile, "conn-file-new", "New file")].into_iter().zip(buttons)
+        {
+            let this = waiting == Some(pick);
+            let b = button_in(ui, at, picking.is_none() || this, BoxButton::outline(if this { "Stop" } else { label }));
+            tags.tag(id, &b);
+            if b.clicked() {
+                acts.push(if this { Act::StopPicking } else { Act::Pick(pick) });
             }
-        });
+        }
     });
-    ui.add_space(4.0);
 }
 
 /// What Read-only does, and what it is not.
 const READ_ONLY_NOTE: &str = "Read-only guards against mistakes: dbee refuses edits, and the statements that would turn read-only off. It is \
                               not a lock: to be sure nothing is written, connect as a database user without write rights.";
 
-/// Read-only, then the type's own on/off settings, one check box each (`conn-option-<id>`), on one
-/// line while they fit; while Read-only is ticked, what it guards against, under them
-/// (`conn-readonly-note`).
+/// Read-only, while it is ticked what it guards against (`conn-readonly-note`), then the type's
+/// own on/off settings, one check box a line (`conn-option-<id>`).
 fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0 * GAP;
-        let r = ui.checkbox(&mut f.read_only, "Read-only");
-        tags.tag_value("conn-readonly", &r, f.read_only);
-        for option in f.kind.info().options {
-            let mut on = f.option_on(option.id);
-            let r = ui.checkbox(&mut on, option.label);
-            if r.changed() {
-                f.set_option(option.id, on);
-            }
-            tags.tag_value(&format!("conn-option-{}", option.id), &r, on);
-        }
-    });
+    let r = ui.add(Checkbox::new(&mut f.read_only, "Read-only"));
+    tags.tag_value("conn-readonly", &r, f.read_only);
     if f.read_only {
-        let r = ui.add(Label::new(RichText::new(READ_ONLY_NOTE).size(12.0).color(TOKENS.text_muted)).wrap());
+        ui.add_space(FIELD_GAP);
+        let note = Label::new(Text::Small.rich(READ_ONLY_NOTE).color(theme::tokens(ui.ctx()).text_muted)).wrap();
+        let r = ui.allocate_ui(vec2(w, 0.0), |ui| ui.add(note)).inner;
         tags.tag_value("conn-readonly-note", &r, READ_ONLY_NOTE);
     }
+    for option in f.kind.info().options {
+        ui.add_space(CONN_FIELD_GAP);
+        let mut on = f.option_on(option.id);
+        let r = ui.add(Checkbox::new(&mut on, option.label));
+        if r.changed() {
+            f.set_option(option.id, on);
+        }
+        tags.tag_value(&format!("conn-option-{}", option.id), &r, on);
+    }
 }
 
-/// The SSH tunnel: on or off, then host, port, user, the login and what it will use.
-fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+/// The SSH tunnel: on or off, then host, port, user, the login, and one row of fixed height for
+/// what the login uses: KEY FILE with CHOOSE and CLEAR for a key, USES and the key line for the
+/// agent and a password. `conn-ssh-key` holds the key line's words whatever the login.
+fn ssh_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let t = theme::tokens(ui.ctx());
     let picking = picking(conn);
     let ConnScreen { form: f, key, .. } = conn;
-    Frame::new().fill(t.panel).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::same(10)).show(ui, |ui| {
-        let w = w - 20.0;
-        ui.set_width(w);
-        ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
-            let r = ui.checkbox(&mut f.ssh_on, RichText::new("SSH tunnel").strong());
-            tags.tag_value("conn-ssh-on", &r, f.ssh_on);
-        });
-        if !f.ssh_on {
-            return;
-        }
-        ui.add_space(4.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = GAP;
-            column(ui, w - PORT_W - GAP, "SSH host", |ui| text_field(ui, tags, "conn-ssh-host", &mut f.ssh_host, "bastion.example.com"));
-            column(ui, PORT_W, "SSH port", |ui| text_field(ui, tags, "conn-ssh-port", &mut f.ssh_port, "22"));
-        });
-        column(ui, w, "SSH user", |ui| text_field(ui, tags, "conn-ssh-user", &mut f.ssh_user, ""));
-        let auths = [(Auth::Key, "Key", "key"), (Auth::Agent, "Agent", "agent"), (Auth::Password, "Password", "password")];
-        column(ui, w, "Login", |ui| segments(ui, tags, "conn-ssh-auth", &mut f.ssh_auth, &auths, w));
-        // What the login will use: one fixed slot for every choice.
-        ui.add_space(2.0);
-        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let button_w = 92.0;
-            let line_w = w - 2.0 * (button_w + 6.0);
-            let waiting = picking == Some(Pick::Key);
-            let wanted = f.ssh_auth();
-            let (text, color) = if waiting {
-                ("Waiting for the file picker…".to_string(), t.text_muted)
-            } else if key.for_auth.as_ref() == Some(&wanted) {
-                (key.text.clone(), t.text)
-            } else {
-                ("Looking for the key…".to_string(), t.text_muted)
-            };
-            let (rect, r) = ui.allocate_exact_size(vec2(line_w, FIELD_H), Sense::hover());
-            let galley = line_galley(ui, &text, FontId::proportional(13.0), color, line_w);
-            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
-            let r = if text.chars().count() > 50 { r.on_hover_text(text.as_str()) } else { r };
-            tags.tag_value("conn-ssh-key", &r, text.as_str());
-            if f.ssh_auth == Auth::Key {
-                let change = ui.add_enabled(
-                    picking.is_none() || waiting,
-                    Button::new(if waiting { "Stop" } else { "Change…" }).min_size(vec2(button_w, FIELD_H)),
-                );
-                tags.tag("conn-ssh-change", &change);
-                if change.clicked() {
-                    acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Key) });
-                }
-                if f.ssh_key.is_some() {
-                    let auto = ui
-                        .add(Button::new("Automatic").min_size(vec2(button_w, FIELD_H)))
-                        .on_hover_text("Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa");
-                    tags.tag("conn-ssh-auto", &auto);
-                    if auto.clicked() {
-                        acts.push(Act::AutoKey);
-                    }
-                }
-            }
-        });
-    });
-}
-
-/// Save · Test · Connect, `w` wide, then the reserved slot under them for an error, a result or
-/// a note.
-fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
-    let running = conn.running.map(|(_, kind)| kind);
-    ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::left_to_right(Align::Center), |ui| {
-        let save = ui.add(Button::new("Save").min_size(vec2(88.0, 30.0)));
-        tags.tag_value("conn-save", &save, "Save");
-        if save.clicked() {
-            acts.push(Act::Save);
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
-            let connect = Button::new(RichText::new(label).color(t.accent_text)).fill(t.accent).min_size(vec2(112.0, 30.0));
-            let connect = ui.add_enabled(running.is_none(), connect);
-            tags.tag_value("conn-connect", &connect, label);
-            if connect.clicked() {
-                acts.push(Act::ConnectForm);
-            }
-            let label = if running == Some(Running::Test) { "Testing…" } else { "Test" };
-            let test = ui.add_enabled(running.is_none(), Button::new(label).min_size(vec2(96.0, 30.0)));
-            tags.tag_value("conn-test", &test, label);
-            if test.clicked() {
-                acts.push(Act::Test);
-            }
-        });
-    });
-    ui.add_space(6.0);
-
-    let (rect, slot) = ui.allocate_exact_size(vec2(w, MESSAGE_H), Sense::hover());
-    if let Some(m) = &conn.message {
-        let (color, tint, id) = match m.kind {
-            Kind::Error => (t.danger, t.danger.gamma_multiply(0.08), "conn-error"),
-            Kind::Result => (t.success, t.success.gamma_multiply(0.08), "conn-result"),
-            Kind::Note => (t.text_muted, t.panel, "conn-note"),
-        };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), tint);
-        let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 6.0))).layout(Layout::top_down(Align::Min)));
-        ScrollArea::vertical().id_salt("conn-message").max_height(MESSAGE_H - 12.0).auto_shrink([false, true]).show(&mut inner, |ui| {
-            ui.add(Label::new(RichText::new(m.text.as_str()).color(color)).wrap().selectable(true));
-        });
-        tags.tag_value(id, &slot, m.text.as_str());
+    let r = ui.add(Checkbox::new(&mut f.ssh_on, "Connect through an SSH tunnel"));
+    tags.tag_value("conn-ssh-on", &r, f.ssh_on);
+    if !f.ssh_on {
+        return;
     }
+    ui.add_space(CONN_FIELD_GAP);
+    let (host, [port]) = cells(ui, w, field_h(), CONN_FIELD_GAP, [CONN_PORT_W]);
+    field_in(ui, host, tags, "SSH host", "conn-ssh-host", Input::data, &mut f.ssh_host, "bastion.example.com");
+    field_in(ui, port, tags, "Port", "conn-ssh-port", Input::data, &mut f.ssh_port, "22");
+    ui.add_space(CONN_FIELD_GAP);
+    text_field(ui, tags, w, "User", "conn-ssh-user", Input::data, &mut f.ssh_user, "");
+    ui.add_space(CONN_FIELD_GAP);
+    // Each login's words are its name.
+    let auths = [(Auth::Key, "key"), (Auth::Agent, "agent"), (Auth::Password, "password")];
+    column(ui, w, "Login", |ui| {
+        let shown = Segmented::small(&mut f.ssh_auth, &auths).width(w).show(ui);
+        for ((auth, name), r) in auths.iter().zip(&shown.segments) {
+            tags.tag_value(&format!("conn-ssh-auth-{name}"), r, f.ssh_auth == *auth);
+        }
+        let chosen = auths.iter().find(|(a, _)| *a == f.ssh_auth).map_or("", |(_, name)| *name);
+        tags.tag_value("conn-ssh-auth", &shown.row, chosen);
+    });
+    ui.add_space(CONN_FIELD_GAP);
+    let waiting = picking == Some(Pick::Key);
+    let wanted = f.ssh_auth();
+    let line = if waiting {
+        "Waiting for the file picker…".to_string()
+    } else if key.for_auth.as_ref() == Some(&wanted) {
+        key.text.clone()
+    } else {
+        "Looking for the key…".to_string()
+    };
+    if f.ssh_auth != Auth::Key {
+        column(ui, w, "Uses", |ui| {
+            let (slot, _) = ui.allocate_exact_size(vec2(w, INPUT_H), Sense::hover());
+            let galley = line_galley(ui, &line, Text::Body, t.text_muted, slot.width());
+            let elided = galley.elided;
+            ui.painter().galley(pos2(slot.left(), slot.center().y - galley.size().y / 2.0), galley, t.text_muted);
+            let r = ui.interact(slot, egui::Id::new(("dbee-form-box", "conn-ssh-key")), Sense::hover());
+            let r = if elided { r.hint(line.as_str()) } else { r };
+            tags.tag_value("conn-ssh-key", &r, line.as_str());
+        });
+        return;
+    }
+    column(ui, w, "Key file", |ui| {
+        let (cell, [choose, clear]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), BoxButton::outline("Clear").width(ui)]);
+        // The chosen file as it is; with none chosen, the key that will be found.
+        let (text, color, path) = match (&f.ssh_key, waiting) {
+            (Some(p), false) => (tilde(&p.display().to_string()), t.text, true),
+            _ => (line.clone(), t.text_muted, false),
+        };
+        let r = path_box(ui, cell, "conn-ssh-key", &text, color, path);
+        tags.tag_value("conn-ssh-key", &r, line.as_str());
+        let b = button_in(ui, choose, picking.is_none() || waiting, BoxButton::outline(if waiting { "Stop" } else { "Choose" }));
+        tags.tag("conn-ssh-change", &b);
+        if b.clicked() {
+            acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Key) });
+        }
+        let chosen = f.ssh_key.is_some();
+        let b = button_in(ui, clear, chosen, BoxButton::outline("Clear"));
+        let auto = "Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa";
+        let b = if chosen { b.hint(auto) } else { b.hint_disabled(auto) };
+        tags.tag("conn-ssh-auto", &b);
+        if b.clicked() {
+            acts.push(Act::AutoKey);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_form_takes_two_columns_from_664() {
+        assert_eq!(columns(840.0), (2, 396.0));
+        assert_eq!(columns(664.0), (2, 308.0));
+        assert_eq!(columns(663.0), (1, 480.0));
+        assert_eq!(columns(380.0), (1, 356.0));
+        assert_eq!(columns(2000.0).1, 480.0);
+    }
+
+    /// Narrowing the bar of a saved connection that is connecting: the facts' word goes first, then
+    /// the timer, then `…`, and a form once gone never comes back; SAVE, TEST, CONNECT and CANCEL
+    /// stay whole, inside the bar while there is room for them, and nothing ever runs past its
+    /// right end.
+    #[test]
+    fn the_form_bar_gives_way_in_its_order() {
+        use crate::components::{harness_in, texts};
+        use dbee_engine::JobId;
+        let forms = [
+            BarFit { running_words: true, timer: true, more: true },
+            BarFit { running_words: false, timer: true, more: true },
+            BarFit { running_words: false, timer: false, more: true },
+            BarFit { running_words: false, timer: false, more: false },
+        ];
+        let rect = |tags: &Tags, id: &str| tags.rect(id).unwrap_or_else(|| panic!("{id} drawn: {}", tags.to_json()));
+        let (mut last, mut whole, mut seen) = (0, None::<[f32; 4]>, [false; 4]);
+        for w in (200..=900).rev().step_by(10).map(|w| w as f32) {
+            let at = egui::Rect::from_min_size(pos2(20.0, 20.0), vec2(w, BAR_H));
+            let mut h = harness_in(vec2(w + 40.0, 80.0), egui::Theme::Light, (Tags::default(), None), move |ui, (tags, fit)| {
+                tags.begin_frame();
+                let mut conn = ConnScreen::new(true);
+                conn.running = Some((JobId(1), Running::Connect));
+                let shown = Some((Running::Connect, Duration::from_millis(1200)));
+                *fit = Some(form_bar(ui, &conn, true, shown, tags, &mut Vec::new(), at));
+            });
+            h.run();
+            let fit = h.state().1.unwrap_or_else(|| panic!("{w}: drawn"));
+            let n = forms.iter().position(|f| *f == fit).unwrap_or_else(|| panic!("{w}: {fit:?} is one of the forms"));
+            assert!(n >= last, "{w}: {fit:?} took room back from {:?}", forms[last]);
+            (last, seen[n]) = (n, true);
+            let tags = &h.state().0;
+            let words = texts(&h.output().shapes).into_iter().map(|(t, ..)| t.to_lowercase()).collect::<Vec<_>>();
+            assert_eq!(words.contains(&"connecting".to_string()), fit.running_words, "{w}: the facts' word as {fit:?}: {words:?}");
+            assert_eq!(words.contains(&"00:01.2".to_string()), fit.timer, "{w}: the timer as {fit:?}: {words:?}");
+            assert_eq!(tags.rect("conn-more").is_some(), fit.more, "{w}: `…` as {fit:?}");
+            let ids = ["conn-save", "conn-test", "conn-connect", "conn-cancel"];
+            // Their widths at 900, where everything shows.
+            let whole = *whole.get_or_insert_with(|| ids.map(|id| rect(tags, id).width()));
+            let room = INSET + whole.iter().sum::<f32>() + CONN_RUNNING_GAP + 2.0 * CONN_BESIDE_GAP + INSET;
+            if w >= room {
+                for (id, want) in ids.into_iter().zip(whole) {
+                    let r = rect(tags, id);
+                    assert!(at.expand(0.5).contains_rect(r), "{w}: {id} {r:?} inside the bar {at:?}");
+                    assert!((r.width() - want).abs() <= 0.5, "{w}: {id} whole: {r:?}");
+                }
+            }
+            for (id, r) in tags.ids().into_iter().filter_map(|id| tags.rect(id).map(|r| (id, r))) {
+                assert!(r.right() <= at.right() + 0.5, "{w}: {id} {r:?} past the bar {at:?}");
+            }
+            let mut drawn: Vec<(&str, egui::Rect)> = tags.ids().into_iter().filter_map(|id| tags.rect(id).map(|r| (id, r))).collect();
+            drawn.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+            for pair in drawn.windows(2) {
+                assert!(
+                    pair[0].1.right() <= pair[1].1.left() + 0.5 || w < room,
+                    "{w}: {} {:?} over {} {:?}",
+                    pair[0].0,
+                    pair[0].1,
+                    pair[1].0,
+                    pair[1].1
+                );
+            }
+        }
+        assert_eq!(seen, [true; 4], "every form shows somewhere from 900 to 200");
+    }
 
     #[test]
     fn saving_keeps_the_options() {

@@ -440,8 +440,45 @@ async fn a_cancelled_sleep_is_cancelled() {
         until_sleeping(&open(s, db).await, id).await;
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-        assert_eq!(result.unwrap_err(), DbError::Cancelled, "{}", s.name);
+        // MySQL's sleep still returns its row, which dbee's KILL makes `cancelled`; MariaDB's ends
+        // in the server's interrupt, which the engine reads as its cancel.
+        let e = result.unwrap_err();
+        assert!(e.is_interrupted(), "{}: {e:?}", s.name);
         assert!(!c.is_closed(), "{}", s.name);
         assert_eq!(c.scalar_u64("SELECT 3").await.unwrap(), 3, "{}", s.name);
+    }
+}
+
+/// The session's transaction, as the OK and EOF packets' status says, and after an error, whose
+/// packet says nothing, as the server answers a ping.
+#[tokio::test]
+async fn the_transaction_state_follows_the_servers_status() {
+    use dbee_driver::TransactionState::*;
+    let db = require_testdb!();
+    for s in mysql_servers(db) {
+        let c = open_for(s, db, Purpose::Query).await;
+        let t = format!("scratch.`{}`", unique("tx"));
+        let state = async |c: &MySqlConnection| dbee_driver::Connection::transaction(c).await;
+        assert_eq!(state(&c).await, Idle, "{}", s.name);
+        ok(&c, &format!("CREATE TABLE {t} (id INT PRIMARY KEY)"), QUERY_LIMITS).await;
+        ok(&c, "BEGIN", QUERY_LIMITS).await;
+        assert_eq!(state(&c).await, Open, "{}", s.name);
+        ok(&c, &format!("INSERT INTO {t} VALUES (1)"), QUERY_LIMITS).await;
+        // A failed statement keeps the transaction.
+        assert!(c.run(&format!("INSERT INTO {t} VALUES (1)"), QUERY_LIMITS).await.is_err());
+        assert_eq!(state(&c).await, Open, "{}: a duplicate key", s.name);
+        // A statement that commits on its own commits before it runs, also when it then fails.
+        assert!(c.run(&format!("CREATE TABLE {t} (id INT)"), QUERY_LIMITS).await.is_err());
+        assert_eq!(state(&c).await, Idle, "{}: a CREATE that failed after its commit", s.name);
+        assert_eq!(c.scalar_u64(&format!("SELECT COUNT(*) FROM {t}")).await, Ok(1), "{}", s.name);
+        // Without autocommit, the first statement opens one.
+        ok(&c, "SET autocommit = 0", QUERY_LIMITS).await;
+        assert_eq!(state(&c).await, Idle, "{}", s.name);
+        ok(&c, &format!("INSERT INTO {t} VALUES (2)"), QUERY_LIMITS).await;
+        assert_eq!(state(&c).await, Open, "{}", s.name);
+        ok(&c, "ROLLBACK", QUERY_LIMITS).await;
+        assert_eq!(state(&c).await, Idle, "{}", s.name);
+        ok(&c, "SET autocommit = 1", QUERY_LIMITS).await;
+        ok(&c, &format!("DROP TABLE {t}"), QUERY_LIMITS).await;
     }
 }

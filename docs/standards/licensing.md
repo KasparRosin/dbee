@@ -20,7 +20,7 @@ Every new dependency gets a one-line justification in its commit and, for a sign
 
 No Beekeeper Studio (or any other vendor's) iconography, images, artwork, fonts, templates, themes, sample databases or help text. One exception: the logos of the database engines dbee connects to, shown to name that engine, following each owner's trademark guidelines. See the asset rule in [`AGENTS.md`](../../AGENTS.md). Every asset file has a row in [`ATTRIBUTION.md`](../../ATTRIBUTION.md), enforced by `cargo xtask assets`.
 
-The binaries embed egui's default fonts through the `epaint_default_fonts` crate (OFL-1.1, Ubuntu Font Licence 1.0, MIT), listed in ATTRIBUTION.md. Their licence texts, and those of the statically linked crates, ship with the binaries from the first release on ([releasing](../releasing.md)).
+The binaries embed egui's default fonts through the `epaint_default_fonts` crate (OFL-1.1, Ubuntu Font Licence 1.0, MIT), listed in ATTRIBUTION.md. Their licence texts, and those of the statically linked crates, ship with the binaries from the first release on ([releasing](../releasing.md)). The binaries also embed four font files from `assets/fonts/` (Inter Regular and Medium, JetBrains Mono Regular and Medium, SIL OFL 1.1); their licence texts sit beside them (`OFL-Inter.txt`, `OFL-JetBrainsMono.txt`) and ship with the binaries from the first release on too.
 
 ## Clean-room
 

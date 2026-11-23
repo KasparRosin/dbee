@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (import and export are M4) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-08 · **Change:** minor (import and export are M4) · **Target:** Beekeeper Studio 5.5.7
 
 | Format | Beekeeper Studio | dbee import | dbee export | Fidelity / notes | Tests |
 |---|---|---|---|---|---|

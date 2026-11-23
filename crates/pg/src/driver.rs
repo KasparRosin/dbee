@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use dbee_config::DbKind;
-use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target};
+use dbee_core::{Catalog, ResultSet, TableRef, TableStructure};
+use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target, TransactionState};
 use dbee_sql::Dialect;
 
-use crate::{Canceller, PgConnection, apply, catalog, connect, query};
+use crate::{Canceller, PgConnection, apply, catalog, connect, query, structure};
 
 /// The Postgres driver.
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,12 +67,20 @@ impl Connection for PgConnection {
         Box::pin(catalog::load_catalog(self))
     }
 
+    fn table_structure<'a>(&'a self, table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(structure::table_structure(self, table))
+    }
+
     fn list_databases(&self) -> DbFuture<'_, Vec<String>> {
         Box::pin(catalog::list_databases(self))
     }
 
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
         Box::pin(apply::apply_gated(self, statements, gate))
+    }
+
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(PgConnection::transaction(self))
     }
 }
 

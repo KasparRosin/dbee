@@ -9,14 +9,18 @@
 //! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
 //! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
 //! page's columns. A value is text or `null`; a number or a boolean is taken as its text, except
-//! that a boolean in a Bool column takes the connection's own spelling (its dialect's
-//! `bool_literals`: Postgres `t` and `f`).
+//! that in a Bool column a boolean, or text that reads as one (`true`, `false`, `t`, `f`, `yes`,
+//! `no`, `on`, `off`, `1`, `0`, in any case, spaces around it ignored), takes the connection's own
+//! spelling (its dialect's `bool_literals`: Postgres `t` and `f`, MySQL and SQLite `1` and `0`).
+//! Other text in a Bool column is staged as given, for the database to judge at Apply.
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
 //! build are `BadParams` and change nothing), then runs one job on the browse connection: its
 //! `apply` writes them all or none in one transaction, and on success the page loads
 //! again in the same job. Then the edits and their history go (writes are not undone), the page
-//! shows what was written, and an exact total that the writes may have changed is forgotten. When
+//! shows what was written, the cells written are the tab's `saved` (found on it by their rows'
+//! keys, `Edits::written`), and an exact total that the writes may have changed is forgotten. An
+//! Apply that starts takes the last one's `saved` away. When
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
 //! change that failed (its column when that change wrote one), the message and the error's code
 //! (`inspect()` shows `{row, column, message, code}`). When the
@@ -140,7 +144,6 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         journal: false,
         undoable: true,
     },
-    // The Edit menu lists them in this order: Undo, Redo, then Apply, Reset.
     CommandSpec {
         id: UNDO,
         label: "Undo",
@@ -274,20 +277,41 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
 }
 
 /// `value` for a cell of class `class`: text, or `null` for NULL; a number or a boolean is taken
-/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it. Text with a NUL
+/// as its text, but a boolean, or text that reads as one ([`bool_word`]), for a Bool column as
+/// `dialect`'s spelling of it. Text with a NUL
 /// character only where `dialect` can write one.
 fn value(params: &Json, class: TypeClass, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
         Some(Json::String(t)) if t.contains('\0') && !dialect.statement_may_hold_nul() => Err(bad(NUL)),
-        Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
-        Some(Json::Bool(b)) if class == TypeClass::Bool => {
-            let (yes, no) = dialect.bool_literals();
-            Ok(NewValue::Text(if *b { yes } else { no }.to_owned()))
-        }
+        Some(Json::String(t)) => Ok(NewValue::Text(match bool_word(t) {
+            Some(b) if class == TypeClass::Bool => spelled(b, dialect),
+            _ => t.clone(),
+        })),
+        Some(Json::Bool(b)) if class == TypeClass::Bool => Ok(NewValue::Text(spelled(*b, dialect))),
         Some(v @ (Json::Number(_) | Json::Bool(_))) => Ok(NewValue::Text(v.to_string())),
         Some(_) => Err(bad("`value` must be text or null")),
+    }
+}
+
+/// `b` as `dialect` spells a boolean (Postgres `t` and `f`, MySQL and SQLite `1` and `0`).
+fn spelled(b: bool, dialect: Dialect) -> String {
+    let (yes, no) = dialect.bool_literals();
+    if b { yes } else { no }.to_owned()
+}
+
+/// The boolean `text` reads as: `true`, `false`, `t`, `f`, `yes`, `no`, `on`, `off`, `1` or `0`,
+/// in any case, with spaces around it.
+fn bool_word(text: &str) -> Option<bool> {
+    let word = text.trim();
+    let is = |w: &str| word.eq_ignore_ascii_case(w);
+    if ["true", "t", "yes", "on", "1"].into_iter().any(is) {
+        Some(true)
+    } else if ["false", "f", "no", "off", "0"].into_iter().any(is) {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -354,8 +378,11 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     };
     let e = edits_mut(s, tab)?;
     e.stage(&data, row, col, value, info).map_err(bad)?;
-    let staged = e.shown(&data, row, col).is_some();
-    Ok(Outcome::Done(json!({ "tab": tab, "row": row, "column": col, "staged": staged, "count": e.count() })))
+    let (staged, count) = (e.shown(&data, row, col).is_some(), e.count());
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.saved.retain(|&cell| cell != (row, col));
+    }
+    Ok(Outcome::Done(json!({ "tab": tab, "row": row, "column": col, "staged": staged, "count": count })))
 }
 
 fn edit(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
@@ -392,9 +419,13 @@ fn delete_rows(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "tab": tab, "count": e.count() })))
 }
 
-/// `{}` → `{tab, count, canUndo, canRedo}` after `f` changed the edits.
+/// `{}` → `{tab, count, canUndo, canRedo}` after `f` changed the edits. The saved cells lose
+/// their mark.
 fn history(s: &mut Session, f: fn(&mut Edits) -> bool) -> Result<Outcome, EngineError> {
     let (tab, _) = target(s)?;
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.saved.clear();
+    }
     let e = edits_mut(s, tab)?;
     f(e);
     Ok(Outcome::Done(json!({ "tab": tab, "count": e.count(), "canUndo": e.can_undo(), "canRedo": e.can_redo() })))
@@ -473,6 +504,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     });
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
+        t.saved.clear();
     }
     if let Some(c) = s.state.connection_mut(Which::Id(id)) {
         c.apply_gate = Some((job, gate, stop));
@@ -506,13 +538,14 @@ fn applied(
     t.applying = None;
     match written {
         Ok(n) => {
+            let cells = t.data.as_deref().map(|data| t.edits.written(reload.info(), data, &t.hidden)).unwrap_or_default();
             // Written: the edits and their history go, and a count the writes may have changed.
             t.edits = Arc::default();
             if matches!(t.total, Total::Exact(_)) && (applying.reshaped || t.applied != Condition::None) {
                 t.total = Total::Unknown;
             }
             let shown = match page {
-                Some(page) => reload.finish(s, id, conn, tab, page),
+                Some(page) => reload.finish(s, id, conn, tab, page, &cells),
                 None => Err(bad("the page was not loaded again")),
             };
             Ok(match shown {
@@ -536,7 +569,11 @@ fn applied(
                 UNKNOWN_OUTCOME.to_owned()
             } else {
                 let message = ApplyError { index, error: error.clone() }.to_string();
-                edits.failed = Some(Failed { row, column, message: message.clone(), code: error.code() });
+                let (detail, hint) = match &error {
+                    DbError::Server(e) => (e.detail.clone(), e.hint.clone()),
+                    _ => (None, None),
+                };
+                edits.failed = Some(Failed { row, column, message: message.clone(), code: error.code(), detail, hint });
                 message
             };
             let column = if lost { None } else { column };

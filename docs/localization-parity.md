@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (Work filled in) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-10-27 · **Change:** minor (Work filled in) · **Target:** Beekeeper Studio 5.5.7
 
 | Language | UI | Docs | Notes |
 |---|---|---|---|

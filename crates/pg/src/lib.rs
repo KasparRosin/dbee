@@ -15,6 +15,8 @@ pub mod driver;
 mod error;
 mod guard;
 pub mod query;
+pub mod structure;
+mod tap;
 pub mod tls;
 mod watch;
 

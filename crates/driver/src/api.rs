@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_core::{Catalog, Cell, Column, ResultSet};
+use dbee_core::{Catalog, Cell, Column, ResultSet, TableRef, TableStructure};
 use dbee_sql::Dialect;
 use dbee_ssh::Tunnel;
 pub use futures_util::future::BoxFuture;
@@ -154,6 +154,20 @@ pub struct ServerInfo {
     pub local: bool,
 }
 
+/// Whether a connection's session is in a transaction, as the server last reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    /// No transaction is open: each statement commits on its own.
+    Idle,
+    /// A transaction is open.
+    Open,
+    /// A transaction is open and a statement in it failed, so the server refuses every statement
+    /// until a ROLLBACK (Postgres only).
+    Failed,
+    /// The driver cannot tell.
+    Unknown,
+}
+
 /// What a connection is for. A driver may set its session up differently for each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
@@ -223,6 +237,11 @@ pub trait Connection: Send + Sync + 'static {
     /// The first cell of the first row as an unsigned integer (a count).
     fn scalar_u64<'a>(&'a self, sql: &'a str) -> DbFuture<'a, u64>;
     fn load_catalog(&self) -> DbFuture<'_, Catalog>;
+    /// The indexes and triggers of `table`, which the catalog does not hold: read when asked, with
+    /// the catalog's budget ([`crate::structure`]). A table that does not exist has none.
+    fn table_structure<'a>(&'a self, _table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(async { Err(DbError::Other("this connection cannot read a table's indexes and triggers".into())) })
+    }
     /// The databases of the server this connection reached, by name, to choose one from. A
     /// connection that is one database lists none.
     fn list_databases(&self) -> DbFuture<'_, Vec<String>> {
@@ -230,6 +249,11 @@ pub trait Connection: Send + Sync + 'static {
     }
     /// All or nothing; each statement must change exactly one row. Stops before COMMIT if `gate` is cancelled.
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>>;
+    /// Whether the session is in a transaction, as the server reported it at the end of the last
+    /// operation: Postgres in each ReadyForQuery, MySQL and MariaDB in each OK and EOF packet (an
+    /// error's packet has no report, so the driver asks with a ping), SQLite in its autocommit flag.
+    /// No statement is sent. `Unknown` when the driver cannot tell, as on a closed connection.
+    fn transaction(&self) -> BoxFuture<'_, TransactionState>;
 }
 
 /// The error of a cancel request that was not delivered within [`CONNECT_TIMEOUT`].
@@ -239,8 +263,9 @@ pub fn cancel_not_delivered() -> DbError {
 
 /// Stops the statement running on one connection, from outside it. Holds no lock.
 pub trait Cancel: Send + Sync + 'static {
-    /// `Ok` means the cancel was delivered; the statement then fails with
-    /// [`DbError::Cancelled`], unless it finished first.
+    /// `Ok` means the cancel was delivered; the statement then fails with the server's interrupt
+    /// (a [`DbError::Server`] marked [`Meaning::Interrupted`](crate::Meaning::Interrupted)) or
+    /// with [`DbError::Cancelled`], unless it finished first.
     fn cancel(&self) -> DbFuture<'_, ()>;
 }
 

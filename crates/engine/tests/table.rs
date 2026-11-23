@@ -363,18 +363,113 @@ fn count_estimate_then_exact() {
         let r = s.wait(job, T).unwrap();
         assert_eq!(r["total"], json!({ "exact": n }));
         assert_eq!(read(s)["total"], json!({ "exact": n }));
-        // Filtered: no estimate, and a new filter forgets the count.
-        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "10" }] }));
+        // Filtered: no estimate, and a new filter forgets the count (two pages: the first one
+        // shown does not tell it).
+        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "150" }] }));
         assert_eq!(s.inspect()["table"]["total"], "unknown");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
-        assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 10 }));
+        assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 150 }));
         // A view has no estimate.
         open_table(s, t.schema("shop"), "order_totals");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
         assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 500 }));
     });
+}
+
+/// `scratch.<name> (id int PRIMARY KEY)` with ids 1 to `rows`, dropped with the guard.
+fn numbered_table<'a>(t: &'a TestTarget, name: &str, rows: u64) -> Scratch<'a> {
+    let values: Vec<String> = (1..=rows).map(|i| format!("({i})")).collect();
+    let insert = if values.is_empty() { String::new() } else { format!("; INSERT INTO {{t}} VALUES {}", values.join(", ")) };
+    scratch_table(t, name, &format!("CREATE TABLE {{t}} (id int PRIMARY KEY){insert}"))
+}
+
+#[test]
+fn an_empty_table_counts_as_zero() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_empty");
+        let _drop = numbered_table(&t, &name, 0);
+        let mut s = connected_to(&t);
+        let r = open_table(&mut s, t.schema("scratch"), &name);
+        assert_eq!((r["rows"].as_u64(), &r["total"]), (Some(0), &json!({ "exact": 0 })), "{}: {r}", t.name());
+        assert_eq!(s.inspect()["table"]["total"], json!({ "exact": 0 }), "{}", t.name());
+    }
+}
+
+#[test]
+fn a_one_page_filter_counts_its_rows() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "42" }] }));
+        assert_eq!((r["rows"].as_u64(), &r["total"]), (Some(42), &json!({ "exact": 42 })), "{}: {r}", t.name());
+        let tab = s.inspect()["table"].clone();
+        assert_eq!((&tab["total"], &tab["counting"]), (&json!({ "exact": 42 }), &Json::Null), "{}", t.name());
+        assert!(s.journal().iter().all(|(id, _)| id != "table.count"), "{}: nothing counted", t.name());
+    });
+}
+
+/// Review focus: the count is set only from a page that is whole, that holds rows (or is the
+/// first), and that nothing follows.
+#[test]
+fn only_a_whole_last_page_tells_the_count() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_last_page");
+        let _drop = numbered_table(&t, &name, 150);
+        let mut s = connected_to(&t);
+        let first = open_table(&mut s, t.schema("scratch"), &name);
+        assert!(first["total"].get("exact").is_none(), "{}: more rows follow page 1: {first}", t.name());
+        assert_eq!(page(&mut s, json!("next"))["total"], json!({ "exact": 150 }), "{}", t.name());
+        // Going back keeps it.
+        assert_eq!(page(&mut s, json!("first"))["total"], json!({ "exact": 150 }), "{}", t.name());
+        // Rows deleted elsewhere: page 2 is now empty, and says nothing of the count.
+        q(&t, &format!("DELETE FROM {}.{name} WHERE id > 90", t.schema("scratch")));
+        let r = page(&mut s, json!(2));
+        assert_eq!((r["page"].as_u64(), r["rows"].as_u64()), (Some(1), Some(0)), "{}: {r}", t.name());
+        assert_eq!(r["total"], json!({ "exact": 150 }), "{}: an empty page past the end tells nothing", t.name());
+        // Page 1, now whole and the last, tells it again.
+        assert_eq!(page(&mut s, json!("first"))["total"], json!({ "exact": 90 }), "{}", t.name());
+    }
+}
+
+/// Review focus: a count that runs when a last page lands agrees with it, and a new condition
+/// takes neither.
+#[test]
+fn a_last_page_and_a_running_count_agree() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let mut s = connected_to(&t);
+    open_table(&mut s, t.schema("shop"), "orders");
+    let key = unique("dbee_gate");
+    let gate = hold_gate(&t, &key);
+    let condition = format!("({}) AND id <= 42", gated(&t, &key));
+    // The page waits for the gate; the count runs behind it on the browse connection.
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": condition, "rawMode": true })).unwrap() else { panic!("a job") };
+    until_running(&t, &key);
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
+    drop(gate);
+    assert_eq!(s.wait(load, T).unwrap()["total"], json!({ "exact": 42 }));
+    assert_eq!(s.wait(count, T).unwrap()["total"], json!({ "exact": 42 }));
+    let tab = s.inspect()["table"].clone();
+    assert_eq!((&tab["total"], &tab["counting"]), (&json!({ "exact": 42 }), &Json::Null));
+    // A new condition while both run: the stale page and count change nothing.
+    let gate = hold_gate(&t, &key);
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": format!("({}) AND id <= 7", gated(&t, &key)) })).unwrap() else {
+        panic!("a job")
+    };
+    until_running(&t, &key);
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    let Outcome::Started(wide) = s.execute("table.setFilters", json!({ "raw": "id <= 500" })).unwrap() else { panic!("a job") };
+    assert_eq!(s.inspect()["table"]["total"], "unknown");
+    drop(gate);
+    assert_eq!(s.wait(load, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(s.wait(count, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(s.wait(wide, T).unwrap()["total"], "unknown");
+    assert_eq!(s.inspect()["table"]["total"], "unknown");
 }
 
 #[test]
@@ -760,6 +855,8 @@ fn a_page_cut_by_the_byte_cap_says_so() {
         // 13 values fit (260 MB); the 14th is read but not kept.
         assert_eq!(open_table(&mut s, t.schema("scratch"), &name)["rows"], 13, "{}", t.name());
         assert_eq!(s.inspect()["table"]["pageComplete"], false, "the page was cut");
+        // Nothing follows it, but it was cut: it tells no count.
+        assert_eq!(s.inspect()["table"]["total"], "unknown", "{}", t.name());
         let d = run(&mut s, "table.read", json!({ "limit": 0 }));
         assert_eq!((d["pageComplete"].as_bool(), d["hasNext"].as_bool()), (Some(false), Some(false)));
         // A page under the cap is whole, and so is a full page followed by more rows.
@@ -778,8 +875,8 @@ fn a_load_stopped_in_the_queue_stops_no_other_tab() {
         open_table(s, t.schema("shop"), "orders");
         let key = unique("dbee_gate");
         let gate = hold_gate(t, &key);
-        // Tab A's load holds the connection: it waits for the lock, or on a file counts for about 5 s.
-        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        // Tab A's load holds the connection: it waits for the lock, or on a file counts for about 1 s.
+        let slow = if t.is_file() { t.slow_condition_sql(1) } else { t.waits_for_lock_sql(&key) };
         let Outcome::Started(a) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
         until_running(t, &key);
         // Tab B's first page waits behind it, and is stopped there.
@@ -795,7 +892,8 @@ fn a_load_stopped_in_the_queue_stops_no_other_tab() {
         let b = s.wait(b, T);
         assert_eq!(s.browse_waiting(), 0, "{}: tab B's load left the queue", t.name());
         drop(gate);
-        let a = s.wait(a, T).unwrap_or_else(|e| panic!("{}: tab A's load: {e}", t.name()));
+        // A's own time is not what this tests: a count can take long on a loaded machine.
+        let a = s.wait(a, WATCHDOG).unwrap_or_else(|e| panic!("{}: tab A's load: {e}", t.name()));
         assert_eq!(a["rows"], 100, "{}: {a}", t.name());
         assert_eq!(b.map_err(|e| e.code()), Err("cancelled"), "{}: tab B's load", t.name());
     });
@@ -838,6 +936,45 @@ fn cancel_stops_a_slow_page() {
         // The connection works.
         assert_eq!(page(s, json!("next"))["page"], 1);
     });
+}
+
+/// A page load that dbee's Cancel stops while its statement sleeps reads as cancelled: the
+/// server's interrupt is dbee's own cancel here, and the tab's error has no server code.
+#[test]
+fn a_table_read_cancelled_by_dbee_reads_as_cancelled() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let m = unique("dbee_marker");
+        let slow = format!("'{m}' <> '' AND {}", t.slow_condition_sql(30));
+        let Outcome::Started(job) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+        until_running(t, &m);
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        let e = s.wait(job, Duration::from_secs(60)).unwrap_err();
+        assert_eq!((e.code(), &e.data()["serverCode"]), ("cancelled", &Json::Null), "{}: {e} {}", t.name(), e.data());
+        assert_eq!(summary(s)["error"], "the statement was cancelled", "{}", t.name());
+        // The rows from before stay.
+        assert_eq!((rows(&read(s)), &summary(s)["applied"]), (100, &json!("none")), "{}", t.name());
+    });
+}
+
+/// Postgres: a page load the server's `statement_timeout` stopped fails with the server's code
+/// and words, not as cancelled, and the rows from before stay.
+#[test]
+fn a_table_read_stopped_by_the_server_reads_as_an_error() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "orders");
+    // The browse connection's own timeout, which a page load's condition sets for the statements
+    // after it.
+    run(&mut s, "table.setFilters", json!({ "raw": "set_config('statement_timeout', '100', false) <> ''", "rawMode": true }));
+    let e = run_err(&mut s, "table.setFilters", json!({ "raw": "(SELECT true FROM pg_sleep(2))", "rawMode": true }));
+    assert_eq!((e.code(), &e.data()["serverCode"]), ("server", &json!("57014")), "{e} {}", e.data());
+    assert!(e.to_string().contains("statement timeout") && e.to_string().ends_with("(SQLSTATE 57014)"), "{e}");
+    assert_eq!(summary(&s)["error"], json!(e.to_string()));
+    assert_eq!(rows(&read(&mut s)), 100);
+    run(&mut s, "table.setFilters", json!({ "raw": "set_config('statement_timeout', '0', false) <> ''", "rawMode": true }));
+    assert_eq!(summary(&s)["error"], Json::Null);
 }
 
 #[test]
@@ -944,4 +1081,255 @@ fn a_raw_filter_on_a_read_only_connection_writes_nothing() {
         assert_eq!(rows(&read(&mut s)), 1, "{}: the browse session is read-only again", t.name());
         assert_eq!(objects.made(), "0", "{}: no large object", t.name());
     }
+}
+
+/// `table.structure`: the catalog's columns and keys, the foreign keys that reference the table,
+/// and its indexes and triggers read from the database, for a named table or the active tab's.
+#[test]
+fn structure_of_a_table() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let shop = t.schema("shop");
+        let r = run(s, "table.structure", json!({ "schema": shop, "table": "orders" }));
+        assert_eq!(r["table"], json!({ "schema": shop, "name": "orders" }), "{}", t.name());
+        assert_eq!(r["kind"], "table");
+        assert_eq!(r["columns"][0]["name"], "id");
+        let default = r["columns"][0].get("default").unwrap_or_else(|| panic!("{}: no default in {}", t.name(), r["columns"][0]));
+        assert!(default.is_string() || default.is_null(), "{}: {}", t.name(), r["columns"][0]);
+        let want = match t.kind() {
+            dbee_testkit::Kind::MySql | dbee_testkit::Kind::MariaDb => json!("auto_increment"),
+            _ if t.is_file() => Json::Null, // SQLite's rowid key has no default
+            _ => {
+                assert!(default.is_string(), "{}: the seed's key has a default: {default}", t.name());
+                default.clone()
+            }
+        };
+        assert_eq!(*default, want, "{}", t.name());
+        assert_eq!(r["primaryKey"], json!(["id"]));
+        let fk = &r["foreignKeys"][0];
+        assert_eq!((&fk["columns"], &fk["target"]["name"]), (&json!(["customer_id"]), &json!("customers")), "{}", t.name());
+        // The seed's key names no action: MySQL 5.7 and MariaDB call that RESTRICT, as they report it.
+        let plain = if t.kind() == dbee_testkit::Kind::MariaDb || t.name() == "mysql57" { "restrict" } else { "noAction" };
+        assert_eq!((&fk["onDelete"], &fk["onUpdate"]), (&json!(plain), &json!(plain)), "{}: {fk}", t.name());
+        let referenced: Vec<&Json> = r["referencedBy"].as_array().unwrap().iter().map(|f| &f["table"]["name"]).collect();
+        assert_eq!(referenced, [&json!("order_items")], "{}", t.name());
+        assert_eq!(r["referencedBy"][0]["columns"], json!(["order_id"]));
+        assert_eq!(r["referencedBy"][0]["targetColumns"], json!(["id"]));
+        let indexes = r["indexes"].as_array().unwrap();
+        // SQLite's INTEGER PRIMARY KEY is the rowid, which has no index.
+        if !t.is_file() {
+            assert_eq!((&indexes[0]["primary"], &indexes[0]["parts"][0]["column"]), (&json!(true), &json!("id")), "{}: {indexes:?}", t.name());
+        }
+        assert_eq!(r["triggers"], json!([]), "the seed has no triggers");
+        assert!(s.state().tabs.is_empty(), "no tab opens");
+
+        // No table named: the active table tab's.
+        open_table(s, shop, "order_items");
+        let mine = run(s, "table.structure", json!({}));
+        assert_eq!(mine["table"]["name"], "order_items");
+        assert_eq!(mine["referencedBy"][0]["table"]["name"], "shipments", "{}", t.name());
+
+        for bad in [
+            json!({ "table": "orders" }),
+            json!({ "schema": shop }),
+            json!({ "schema": shop, "table": "nope" }),
+            json!({ "schema": 3, "table": "x" }),
+        ] {
+            assert_eq!(s.execute("table.structure", bad.clone()).unwrap_err().code(), "badParams", "{bad}");
+        }
+        run(s, "tab.newQuery", json!({}));
+        assert_eq!(s.execute("table.structure", json!({})).unwrap_err().code(), "badParams", "a query tab is active");
+    });
+}
+
+// ---- the tab's view: DATA or STRUCTURE ---------------------------------------------------------
+
+/// Waits until a job waits for its turn on the browse connection.
+fn until_queued(t: &TestTarget, s: &Session) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while s.browse_waiting() == 0 {
+        assert!(Instant::now() < deadline, "{}: nothing waited for its turn", t.name());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Holds the browse connection with a page load of the active tab that cannot end before the
+/// gate is dropped (a file's takes about 3 s), and waits until it runs.
+fn hold_the_queue(t: &TestTarget, s: &mut Session) -> (Option<Held>, dbee_engine::JobId) {
+    let key = unique("dbee_gate");
+    let gate = hold_gate(t, &key);
+    let slow = if t.is_file() { t.slow_condition_sql(3) } else { t.waits_for_lock_sql(&key) };
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+    until_running(t, &key);
+    (gate, load)
+}
+
+/// `table.view {view: "structure"}` reads the structure into the tab without loading a page;
+/// `table.view {view: "data"}` shows the rows as they were, loading nothing.
+#[test]
+fn switching_to_structure_reads_it() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let before = read(s);
+        assert_eq!(summary(s)["view"], "data", "a tab opens in DATA");
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": null, "shown": null }));
+        let Outcome::Started(job) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        assert_eq!((&summary(s)["view"], &summary(s)["structure"]["loading"]), (&json!("structure"), &json!(job)));
+        assert_eq!(summary(s)["loading"], Json::Null, "{}: no page load", t.name());
+        let r = s.wait(job, T).unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        assert_eq!((&r["tab"], &r["view"], &r["table"]["name"]), (&summary(s)["tab"], &json!("structure"), &json!("orders")), "{r}");
+        assert_eq!(r["columns"][1]["name"], "customer_id");
+        let st = summary(s)["structure"].clone();
+        assert_eq!((&st["loading"], &st["error"]), (&Json::Null, &Json::Null), "{}: {st}", t.name());
+        assert_eq!(st["shown"], json!({ "columns": 9, "indexes": st["shown"]["indexes"], "foreignKeys": 1, "referencedBy": 1, "triggers": 0 }));
+        assert!(st["shown"]["indexes"].as_u64().is_some(), "{st}");
+        assert_eq!(read(s), before, "{}: the rows stay", t.name());
+        let tab = summary(s)["tab"].clone();
+        assert_eq!(run(s, "table.view", json!({ "view": "data" })), json!({ "tab": tab, "view": "data", "job": null }));
+        assert_eq!((&summary(s)["view"], &summary(s)["loading"]), (&json!("data"), &Json::Null));
+        assert_eq!(read(s), before, "{}: DATA loads nothing", t.name());
+        assert_eq!(summary(s)["structure"], st, "the structure read stays with the tab");
+    });
+}
+
+/// REFRESH in STRUCTURE reads the structure again, staged changes or not; in DATA it is still
+/// refused while changes are staged.
+#[test]
+fn refresh_in_structure_rereads_it_even_with_staged_changes() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        set_cell(s, 0, "dealer_id", "7");
+        let edits = summary(s)["edits"].clone();
+        run(s, "table.view", json!({ "view": "structure" }));
+        let Outcome::Started(job) = s.execute("table.refresh", json!({})).unwrap() else { panic!("a job") };
+        assert_eq!((&summary(s)["structure"]["loading"], &summary(s)["loading"]), (&json!(job), &Json::Null), "{}: not a page load", t.name());
+        assert_eq!(s.wait(job, T).unwrap()["view"], "structure");
+        assert_eq!(summary(s)["structure"]["shown"]["columns"], 9);
+        run(s, "table.view", json!({ "view": "data" }));
+        assert_eq!(summary(s)["edits"], edits, "{}: the change is still staged", t.name());
+        let e = s.execute("table.refresh", json!({})).unwrap_err();
+        assert_eq!((e.code(), e.data()["why"].as_str()), ("disabled", Some("apply or reset your changes first")));
+    });
+}
+
+/// Only the newest structure read lands: one that a newer read replaced, or whose tab closed,
+/// is ignored.
+#[test]
+fn only_the_newest_structure_read_lands() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(first) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        let Outcome::Started(second) = s.execute("table.refresh", json!({})).unwrap() else { panic!("a job") };
+        assert_eq!(summary(s)["structure"]["loading"], json!(second));
+        assert_eq!(summary(s)["structure"]["shown"], Json::Null);
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        assert_eq!(s.wait(first, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        assert_eq!(summary(s)["structure"]["loading"], json!(second), "{}: the older read leaves the newer's mark", t.name());
+        assert_eq!(s.wait(second, T).unwrap()["view"], "structure");
+        let st = &summary(s)["structure"];
+        assert_eq!((&st["loading"], &st["shown"]["columns"]), (&Json::Null, &json!(9)), "{}: {st}", t.name());
+
+        // A tab closed while its read waits ignores the read.
+        run(s, "table.view", json!({ "view": "data" }));
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(orphan) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        run(s, "tab.close", json!({}));
+        drop(gate);
+        let _ = s.wait(load, WATCHDOG);
+        assert_eq!(s.wait(orphan, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        assert!(s.state().tabs.is_empty());
+    });
+}
+
+/// CANCEL in STRUCTURE stops the structure read: it leaves the queue, nothing reads as an error,
+/// and nothing lands.
+#[test]
+fn cancelling_a_structure_read() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(job) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        assert_eq!(s.wait(job, T).map_err(|e| e.code()), Err("cancelled"), "{}", t.name());
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": null, "shown": null }), "{}", t.name());
+        assert_eq!(summary(s)["loading"], json!(load), "{}: the page load goes on", t.name());
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        assert_eq!(summary(s)["structure"]["shown"], Json::Null, "{}: nothing landed", t.name());
+        // Nothing runs: nothing to cancel.
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false }));
+    });
+}
+
+/// A structure read replaced by a newer one (another switch to STRUCTURE, or its
+/// REFRESH) is stopped: it ends at once (ignored, or cancelled), leaving the browse connection's
+/// queue, and the newer one runs and lands.
+#[test]
+fn a_replaced_structure_read_is_stopped() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(old) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        let Outcome::Started(new) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        assert_ne!(old, new);
+        // It ends while the gate still holds the queue: stopped, and ignored as no longer the tab's.
+        let ended = s.wait(old, T).map_err(|e| e.code());
+        assert!(matches!(&ended, Err("cancelled")) || ended == Ok(json!({ "ignored": true })), "{}: the replaced read stopped: {ended:?}", t.name());
+        assert_eq!(summary(s)["structure"]["loading"], json!(new), "{}", t.name());
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        let r = s.wait(new, T).unwrap_or_else(|e| panic!("{}: the newer read: {e}", t.name()));
+        assert_eq!(r["table"]["name"], "orders", "{}", t.name());
+        assert_eq!(summary(s)["structure"]["shown"]["columns"], 9, "{}: the newer read landed", t.name());
+    });
+}
+
+/// On a lost connection STRUCTURE shows why it has nothing, and DATA is still reachable.
+#[test]
+fn structure_on_a_lost_connection() {
+    let _db = require_testdb!();
+    for_each_engine_exclusive(|t, s| {
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        open_table(s, t.schema("shop"), "orders");
+        kill_dbee_connections(t, s);
+        assert_eq!(run_err(s, "table.page", json!({ "to": "next" })).code(), "connectionLost");
+        let tab = summary(s)["tab"].clone();
+        assert_eq!(run(s, "table.view", json!({ "view": "structure" })), json!({ "tab": tab, "view": "structure", "job": null }));
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": "connection lost — reconnect", "shown": null }));
+        assert_eq!(s.execute("table.refresh", json!({})).unwrap_err().code(), "disabled");
+        assert_eq!(run(s, "table.view", json!({ "view": "data" }))["view"], "data");
+        assert_eq!((&summary(s)["view"], &summary(s)["rows"]), (&json!("data"), &json!(100)), "{}: the rows stay", t.name());
+        run(s, "connection.reconnect", json!({}));
+        assert_eq!(run(s, "table.view", json!({ "view": "structure" }))["view"], "structure");
+        assert_eq!(summary(s)["structure"]["error"], Json::Null, "{}: a read that lands clears the error", t.name());
+    });
+}
+
+#[test]
+fn table_view_refuses_garbage() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    assert_eq!(s.execute("table.view", json!({ "view": "data" })).unwrap_err().code(), "disabled", "no tab");
+    open_table(&mut s, "shop", "orders");
+    for bad in [json!({ "view": "rows" }), json!({ "view": 1 }), json!({}), json!({ "view": "STRUCTURE" })] {
+        assert_eq!(s.execute("table.view", bad.clone()).unwrap_err().code(), "badParams", "{bad}");
+    }
+    assert_eq!(summary(&s)["view"], "data");
+    run(&mut s, "tab.newQuery", json!({}));
+    let e = s.execute("table.view", json!({ "view": "structure" })).unwrap_err();
+    assert_eq!((e.code(), e.data()["why"].as_str()), ("disabled", Some("no table tab is active")));
 }

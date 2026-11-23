@@ -1,5 +1,5 @@
 //! A stored secret goes only where the settings kept with it allow, whatever the connections file
-//! or a window's copy of it says (the security review's C-2 and C-4).
+//! or a window's copy of it says.
 //!
 //! A stand-in driver records what each connect receives and takes only the password it is told to
 //! take, so no server is reached. Every session keeps its connections file in a throwaway home and
@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretError, SecretKind, SecretStore, SslMode};
 use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Driver, Drivers, Limits, ServerInfo, Target};
+use dbee_driver::{
+    ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Driver, Drivers, Limits, ServerInfo, Target, TransactionState,
+};
 use dbee_engine::{Session, SessionOptions};
 use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv};
@@ -119,6 +121,9 @@ impl Connection for LoggedIn {
     }
     fn apply<'a>(&'a self, _: &'a [String], _: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
         Box::pin(async { Err(ApplyError { index: 0, error: DbError::Other("not in this test".into()) }) })
+    }
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(async { TransactionState::Idle })
     }
 }
 
@@ -564,4 +569,26 @@ fn a_save_forgets_a_value_it_cannot_read_when_the_settings_change() {
     assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap().as_deref(), Some(text), "a rename touches no secret");
     save(&mut w, &config(2002), None);
     assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap(), None);
+}
+
+/// `connection.open {save: true}` stores the typed password for the connection it saves only when
+/// its `saveSecrets` says so, and the connections file never holds it.
+#[test]
+fn an_open_with_save_keeps_the_password_only_when_asked() {
+    for keep in [true, false] {
+        let mut rig = Rig::new();
+        rig.accepts = Some("typed-pw");
+        let mut window = rig.window();
+        let given = ConnectionConfig { save_secrets: keep, ..config(2001) };
+        assert_eq!(rig.open(&mut window, json!({ "config": given, "password": "typed-pw", "save": true })), tried(2001, Some("typed-pw"), "ok"));
+        let file = std::fs::read_to_string(rig.file()).unwrap();
+        let body: Json = serde_json::from_str(&file).unwrap();
+        assert_eq!((&body["saved"][0]["id"], &body["saved"][0]["saveSecrets"]), (&json!(ID), &json!(keep)), "{file}");
+        assert!(!file.contains("typed-pw"), "{file}");
+        if keep {
+            assert_eq!(rig.stored()["secret"], "typed-pw");
+        } else {
+            assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap(), None);
+        }
+    }
 }

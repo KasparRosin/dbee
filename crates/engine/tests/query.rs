@@ -334,6 +334,168 @@ fn cancel_stops_the_statements_after_it() {
     });
 }
 
+/// A statement of about 30 s whose text holds `marker`, stopped in a `WHERE` condition: on MySQL
+/// a cancel then ends it with an error, where its `SLEEP` in the select list returns a row.
+fn slow_condition_with(t: &TestTarget, marker: &str) -> String {
+    format!("SELECT '{marker}' AS tag FROM {}.orders WHERE {} LIMIT 1", t.schema("shop"), t.slow_condition_sql(30))
+}
+
+/// The active query tab's error as `inspect()` shows it: `(code, serverCode, meaning)`.
+fn error_codes(s: &Session) -> (Json, Json, Json) {
+    let e = &shown(s)["error"];
+    (e["code"].clone(), e["serverCode"].clone(), e["meaning"].clone())
+}
+
+/// dbee's own Cancel reads as cancelled, however the engine stops the statement: a sleep that
+/// returns a row when stopped, and one that ends in the server's interrupt error.
+#[test]
+fn own_cancel_reads_as_cancelled() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let m = marker();
+        for sql in [slow_with(t, &m), slow_condition_with(t, &m)] {
+            tab(s, &sql);
+            let job = start(s, json!({}));
+            until_running(t, &m);
+            assert_eq!(run(s, "query.cancel", json!({}))["sent"], true);
+            let e = s.wait(job, T).unwrap_err();
+            assert_eq!((e.code(), &e.data()["serverCode"]), ("cancelled", &Json::Null), "{}: {sql}: {e} {}", t.name(), e.data());
+            assert_eq!(error_codes(s), (json!("cancelled"), Json::Null, Json::Null), "{}: {sql}", t.name());
+            stopped_running(t, &m);
+        }
+    });
+}
+
+/// Postgres: a statement the server's `statement_timeout` stopped fails with the server's code
+/// and words, not as cancelled; and stays so when Cancel comes after the timeout ended it.
+#[test]
+fn a_statement_timeout_reads_as_an_error() {
+    let _db = require_testdb!();
+    let (mut s, results) = connected_counting(&pg14_target());
+    tab(&mut s, "SET statement_timeout = 100; SELECT pg_sleep(2)");
+    for cancel_after_the_end in [false, true] {
+        let job = start(&mut s, json!({}));
+        if cancel_after_the_end {
+            // The timeout has ended the statement; the job's result is not applied yet.
+            results.until_in(job);
+            assert_eq!(run(&mut s, "query.cancel", json!({}))["sent"], true);
+        }
+        let e = s.wait(job, T).unwrap_err();
+        assert_eq!((e.code(), &e.data()["serverCode"], e.data()["statement"].as_u64()), ("server", &json!("57014"), Some(1)), "{e} {}", e.data());
+        assert!(e.to_string().contains("statement timeout") && e.to_string().ends_with("(SQLSTATE 57014)"), "{e}");
+        assert_eq!(error_codes(&s), (json!("server"), json!("57014"), json!("interrupted")));
+        assert_eq!(shown(&s)["error"]["message"], json!(e.to_string()));
+    }
+}
+
+/// A statement another session cancelled (Postgres's `pg_cancel_backend`, MySQL's and MariaDB's
+/// `KILL QUERY`) fails with the server's code and words, not as cancelled.
+#[test]
+fn a_cancel_from_another_session_reads_as_an_error() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        // A file has no other session.
+        if t.is_file() {
+            return;
+        }
+        let (code, words) = t.kind().info().cancel_error;
+        let m = marker();
+        tab(s, &slow_condition_with(t, &m));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        assert_eq!(t.cancel_running(&m), Ok(1), "{}", t.name());
+        let e = s.wait(job, T).unwrap_err();
+        assert_eq!((e.code(), &e.data()["serverCode"]), ("server", &json!(code)), "{}: {e} {}", t.name(), e.data());
+        assert!(e.to_string().starts_with(words), "{}: {e}", t.name());
+        assert_eq!(error_codes(s), (json!("server"), json!(code), json!("interrupted")), "{}", t.name());
+        // The connection takes the next run.
+        run(s, "query.setText", json!({ "text": "select 1 as one" }));
+        assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["one"]);
+        assert_eq!(shown(s)["error"], Json::Null);
+    });
+}
+
+/// A Cancel that comes after the statement ended, while its result waits to be applied, changes
+/// nothing: the run keeps its result, and the next run is not cancelled.
+#[test]
+fn a_cancel_after_the_end_changes_nothing() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let (mut s, results) = connected_counting(&t);
+        let s = &mut s;
+        // The query connection is open: the run goes straight to its statement.
+        tab(s, "select 1 as one");
+        run(s, "query.run", json!({}));
+        let job = start(s, json!({}));
+        results.until_in(job);
+        assert_eq!(run(s, "query.cancel", json!({}))["sent"], true, "{}: the run counts as running until it is applied", t.name());
+        let r = s.wait(job, T).unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        assert_eq!(names(&r["results"][0]), ["one"], "{}", t.name());
+        assert_eq!(shown(s)["error"], Json::Null);
+        run(s, "query.setText", json!({ "text": "select 2 as two" }));
+        assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["two"], "{}", t.name());
+        assert_eq!(shown(s)["error"], Json::Null);
+    }
+}
+
+/// Each result says how long its own statement took, in milliseconds from sending it to its
+/// result: a quick statement, then one of about a second.
+#[test]
+fn each_statement_says_how_long_it_took() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, &format!("select 1 as one; {}", t.sleep_sql(1)));
+        let r = run(s, "query.run", json!({}));
+        let ms: Vec<Option<u64>> = r["results"].as_array().unwrap().iter().map(|o| o["ms"].as_u64()).collect();
+        let [Some(quick), Some(slow)] = ms[..] else { panic!("{}: every result says its time: {r}", t.name()) };
+        assert!(quick < slow && slow >= 200, "{}: {quick} ms, then {slow} ms", t.name());
+        assert_eq!(shown(s)["results"][1]["ms"], json!(slow), "inspect() says the same");
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        assert_eq!(qt.results.iter().map(|o| o.ms).collect::<Vec<_>>(), [quick, slow]);
+    });
+}
+
+/// A statement the server turned down says how long it took; a run refused before anything was
+/// sent says no time.
+#[test]
+fn a_failed_statement_says_how_long_it_took() {
+    let _db = require_testdb!();
+    let mut s = connected_to(&pg14_target());
+    tab(&mut s, "select 1; select nope");
+    run_fails(&mut s, json!({}));
+    let e = &shown(&s)["error"];
+    assert_eq!((&e["code"], &e["statement"]), (&json!("server"), &json!(1)), "{e}");
+    assert!(e["ms"].as_u64().is_some_and(|ms| ms < 30_000), "{e}");
+    // A NUL outside a literal: dbee sends nothing.
+    run(&mut s, "query.setText", json!({ "text": "select 1;\nselect 2\u{0} + 1" }));
+    run_fails(&mut s, json!({}));
+    let e = &shown(&s)["error"];
+    assert_eq!((&e["statement"], &e["ms"]), (&json!(1), &Json::Null), "{e}");
+    assert!(e.as_object().is_some_and(|o| o.contains_key("ms")), "{e}");
+}
+
+/// A statement dbee cancelled says how long it ran until it stopped.
+#[test]
+fn a_cancelled_statement_says_how_long_it_ran() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let mut s = connected_to(&t);
+    let m = marker();
+    tab(&mut s, &slow_with(&t, &m));
+    let job = start(&mut s, json!({}));
+    until_running(&t, &m);
+    let seen = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    let before_cancel = u64::try_from(seen.elapsed().as_millis()).unwrap();
+    assert_eq!(run(&mut s, "query.cancel", json!({}))["sent"], true);
+    assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled");
+    let e = &shown(&s)["error"];
+    assert_eq!(e["code"], json!("cancelled"), "{e}");
+    let ms = e["ms"].as_u64().unwrap_or_else(|| panic!("a time: {e}"));
+    assert!(ms + 50 >= before_cancel && ms < 30_000, "{ms} ms, running at least {before_cancel} ms");
+}
+
 #[test]
 fn second_run_while_running_is_busy() {
     let _db = require_testdb!();
@@ -754,7 +916,7 @@ fn read_only_mysql_keeps_sql_mode() {
         run_text(&mut s, "SELECT @@SESSION.sql_mode").unwrap();
         let mode = first_value(&s);
         let write = |n: u32| format!("START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES ({n}); COMMIT");
-        // Fix round 4's concern 1: none of these may run.
+        // None of these may run.
         for sql in [
             "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')".to_owned(),
             format!("BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; {}; END -- '\"", write(1)),

@@ -121,8 +121,23 @@ impl App {
 
     /// [`App::start`] with `args` after `--control <port>` on the command line (`dbee <file>`).
     pub fn start_with(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr]) -> App {
+        App::launch(root, home, db, shots, args, &[])
+    }
+
+    /// [`App::start`] that may also connect to `127.0.0.1` on each of `ports` (a listener of the
+    /// test's own).
+    pub fn start_allowing(root: &Path, home: &Path, db: &TestDb, shots: &'static str, ports: &[u16]) -> App {
+        App::launch(root, home, db, shots, &[], ports)
+    }
+
+    fn launch(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr], ports: &[u16]) -> App {
         let port = free_port();
-        let child = command(root, home, db, shots, port).args(args).spawn().unwrap();
+        let mut command = command(root, home, db, shots, port);
+        if !ports.is_empty() {
+            let also = ports.iter().map(|p| format!("127.0.0.1:{p}"));
+            command.env("DBEE_ALLOW_TARGETS", std::iter::once(allowed(db)).chain(also).collect::<Vec<_>>().join(","));
+        }
+        let child = command.args(args).spawn().unwrap();
         let child = Running(child);
         // The channel listens before the window opens, and the file comes once it does.
         let token_file = token_file(home);
@@ -180,7 +195,42 @@ impl App {
     }
 
     pub fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
+        if let Some(tag) = self.tag(id) {
+            return tag["value"].clone();
+        }
+        // What the window said instead, for a failure that shows only on a slower machine.
+        let notice = self.tag("notice").map(|t| t["value"].clone());
+        let table = self.table();
+        panic!(
+            "no widget `{id}` was drawn (notice: {notice:?}; table loading: {}, applying: {}, editable: {}, why not: {})",
+            table["loading"], table["applying"], table["editable"], table["noEditReason"]
+        )
+    }
+
+    /// Widget `inner` lies inside widget `outer` (to half a point).
+    pub fn inside(&mut self, inner: &str, outer: &str) -> bool {
+        let ([x, y, w, h], [ox, oy, ow, oh]) = (self.rect(inner), self.rect(outer));
+        x >= ox - 0.5 && y >= oy - 0.5 && x + w <= ox + ow + 0.5 && y + h <= oy + oh + 0.5
+    }
+
+    /// In a table tab with the value panel shown: the panel's top is the table bar's bottom,
+    /// its foot the paging bar's top; the panel's and the bars' controls don't overlap.
+    #[allow(dead_code)]
+    pub fn panel_between_the_bars(&mut self, at: &str) {
+        let bar_h = f64::from(dbee_ui_egui::theme::size::BAR_H);
+        let (panel, toggle, first) = (self.rect("value-panel"), self.rect("value-toggle"), self.rect("page-first"));
+        assert!((panel[1] - (toggle[1] + toggle[3] + 1.0)).abs() <= 1.0, "{at}: the panel from the table bar's bottom: {panel:?}, {toggle:?}");
+        let paging_top = first[1] + first[3] / 2.0 - bar_h / 2.0;
+        assert!((panel[1] + panel[3] - paging_top).abs() <= 1.0, "{at}: the panel down to the paging bar's top {paging_top}: {panel:?}");
+        let ids = ["value-copy", "value-wrap", "value-toggle", "table-export", "page-last"];
+        let rects: Vec<[f64; 4]> = ids.iter().map(|id| self.rect(id)).collect();
+        for (i, a) in rects.iter().enumerate() {
+            for (j, b) in rects.iter().enumerate().skip(i + 1) {
+                let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+                let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+                assert!(w <= 0.0 || h <= 0.0 || w * h <= 0.5, "{at}: `{}` {a:?} over `{}` {b:?}", ids[i], ids[j]);
+            }
+        }
     }
 
     /// `[x, y, width, height]` of widget `id`, in window points.
@@ -194,12 +244,67 @@ impl App {
         self.ok("ui.click", json!({ "id": id }));
     }
 
+    /// The widgets of `ids` that were drawn lie inside the window, and no two overlap (by more
+    /// than half a point).
+    pub fn assert_apart(&mut self, ids: &[&str], at: &str) {
+        let i = self.inspect();
+        let window: Vec<f64> = i["window"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let drawn: Vec<(&str, [f64; 4])> = ids
+            .iter()
+            .filter_map(|id| {
+                let tag = i["automation"].as_array().unwrap().iter().find(|a| a["id"] == *id && a["visible"] != false)?;
+                let r: Vec<f64> = tag["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+                Some((*id, [r[0], r[1], r[2], r[3]]))
+            })
+            .collect();
+        for (id, [x, y, w, h]) in &drawn {
+            assert!(
+                *x >= -0.5 && *y >= -0.5 && x + w <= window[0] + 0.5 && y + h <= window[1] + 0.5,
+                "{at}: `{id}` {:?} inside the window {window:?}",
+                [x, y, w, h]
+            );
+        }
+        for (n, (a, [ax, ay, aw, ah])) in drawn.iter().enumerate() {
+            for (b, [bx, by, bw, bh]) in &drawn[n + 1..] {
+                let (w, h) = ((ax + aw).min(bx + bw) - ax.max(*bx), (ay + ah).min(by + bh) - ay.max(*by));
+                assert!(w <= 0.0 || h <= 0.0 || w * h <= 0.5, "{at}: `{a}` over `{b}`");
+            }
+        }
+    }
+
+    /// Presses widget `id` from the keyboard (`ui.focus`, then Space), as a click does but
+    /// without one: egui would count a click shortly before a double-click towards a triple one.
+    pub fn press(&mut self, id: &str) {
+        self.ok("ui.focus", json!({ "id": id }));
+        self.key("Space");
+    }
+
     pub fn double_click(&mut self, id: &str) {
         self.ok("ui.click", json!({ "id": id, "count": 2 }));
     }
 
     pub fn right_click(&mut self, id: &str) {
         self.ok("ui.click", json!({ "id": id, "button": "right" }));
+    }
+
+    /// Selects the whole of a line of the value panel's text the way a user does: a click at its
+    /// first row's start, then a shift-click at the right end of each row below until the
+    /// selection ends where the line does (a line wider than the panel wraps onto more rows).
+    /// `row` is the line's first row, `start` its byte offset and `len` its length in bytes.
+    pub fn select_value_line(&mut self, row: usize, start: usize, len: usize, pad: f64, line_h: f64) {
+        let [x, y, w, _] = self.rect("value-text");
+        let at = |r: usize| y + line_h * (r as f64 + 0.5);
+        self.click_at(x + 1.0, at(row), false);
+        let mut seen = Vec::new();
+        for r in row..row + 6 {
+            self.click_at(x + w - pad, at(r), true);
+            let selection = self.value("value-text")["selection"].clone();
+            if selection == json!([start, start + len]) {
+                return;
+            }
+            seen.push(selection);
+        }
+        panic!("no row's right end selected the line at {start}..{}: {seen:?}", start + len);
     }
 
     /// A click at window point `(x, y)`, with Shift held when `shift`.

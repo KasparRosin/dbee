@@ -17,7 +17,8 @@
 //!   as `clipboard` ([`Clipboard::Memory`]; set by `cargo xtask run-isolated`).
 //! - `DBEE_SCREENSHOT_DIR` is the one folder `ui.screenshot` writes files in (set by `cargo xtask
 //!   run-isolated`); without it, `screenshots` in the settings folder ([`screenshot_dir`]).
-//! - `DBEE_NO_PREFS` keeps no connections file and no log file.
+//! - `DBEE_NO_PREFS` keeps no connections file, no settings file (the theme starts at System) and
+//!   no log file.
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
 //! - `DBEE_ALLOW_DIRS` (folders joined as the system joins paths, set by `cargo xtask
@@ -62,8 +63,8 @@ fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Runs without preferences (`DBEE_NO_PREFS`, agents' test runs) keep no log file and no
-/// connections file.
+/// Runs without preferences (`DBEE_NO_PREFS`, agents' test runs) keep no log file, no connections
+/// file and no settings file.
 fn prefs_enabled() -> bool {
     std::env::var_os("DBEE_NO_PREFS").is_none()
 }
@@ -294,6 +295,7 @@ fn main() -> ExitCode {
     };
     #[cfg(target_os = "windows")]
     let retry_options = options.clone();
+    let desktop_mode = dbee_ui_egui::theme::desktop_mode();
     let created = std::cell::Cell::new(false);
     let run = |options: eframe::NativeOptions| {
         eframe::run_native(
@@ -305,7 +307,11 @@ fn main() -> ExitCode {
                 let ctx = cc.egui_ctx.clone();
                 let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
                 let shots = screenshot_dir(std::env::var_os("DBEE_SCREENSHOT_DIR"), config_dir());
-                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard).with_screenshot_dir(shots);
+                let app = DbeeApp::new(session, control.take())
+                    .with_clipboard(clipboard)
+                    .with_screenshot_dir(shots)
+                    .with_settings_dir(config_dir().filter(|_| prefs_enabled()))
+                    .with_desktop_mode(desktop_mode);
                 Ok(Box::new(match file.take() {
                     Some(path) => app.with_file(path),
                     None => app,

@@ -1,20 +1,20 @@
 {
   "schema": 1,
   "repo": "KasparRosin/dbee",
-  "branch": "main",
-  "head": "57ecd9797feffd1ebf46f778efbbe73d3a85386e",
-  "head_date": "2026-10-27T18:18:08Z",
-  "commits": 80,
+  "branch": "m3",
+  "head": "4a5bc2416263b1ed59ee8f9bea4b368c9039fe86",
+  "head_date": "2026-11-23T12:13:18Z",
+  "commits": 514,
   "contributors": [
     {
       "login": "Kaspar Rosin",
       "people_entry": false,
-      "commits": 80,
-      "lines_added": 59955,
-      "lines_deleted": 4884,
-      "binary_changes": 15,
+      "commits": 514,
+      "lines_added": 168739,
+      "lines_deleted": 31911,
+      "binary_changes": 44,
       "first_commit": "2026-10-16T10:37:08Z",
-      "last_commit": "2026-10-27T18:18:08Z"
+      "last_commit": "2026-11-23T12:13:18Z"
     }
   ],
   "models": []

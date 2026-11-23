@@ -1,27 +1,46 @@
 //! The query tab's body ([`show`]), from top to bottom:
 //!
-//! - the SQL editor ([`editor`]), with line numbers in a gutter at its left;
-//! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
-//!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
-//! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
+//! - the SQL editor ([`editor`]), edge to edge from the strip's line, with no frame, with line
+//!   numbers in a gutter at its left ([`crate::components::editor::LineNumber`]: the cursor's line
+//!   in `text`, the line the last run's error points at in `danger`);
+//! - the split, the run row's top line: dragged, it moves the line between the editor and the
+//!   results. Where it is lasts for the window's run, in memory, and is the same for every query
+//!   tab (`View::query_split`);
+//! - the run row ([`RunRow`]): on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
 //!   the database the tab's next run starts in, as the engine knows it (`Connected::starts_in`:
 //!   the tab's own, else where the query connection is), in the engine's word for one
 //!   ([`database_chip`]); a click lists the catalog's databases, the server's own left out, and
 //!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
-//!   Then Run (`query.run`), Run current (`query.run` with `current` and the cursor) and Cancel
-//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs (with its words
-//!   when the selector keeps room), and with several results the selector `1 · 2 · 3`
-//!   (`query.showResult`; with more than fit, those around the shown one and a `…` that lists
-//!   every result, its label only where it fits whole, [`selector_fit`]); at its right, what the
-//!   shown result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
-//! - the last run's error card, when it stopped early ([`card`]);
+//!   Then RUN (`query.run`), CANCEL (`query.cancel`) and RUN CURRENT (`query.run` with `current`
+//!   and the cursor). Once the tab's run has gone 300 ms (the window's job clock,
+//!   [`crate::quiet`]), RUN and RUN CURRENT are off and CANCEL shows, until it ends;
+//! - the result bar ([`ResultBar`], [`result_bar`]), once there are results, an error, or the run
+//!   has gone 300 ms (none before the first run): a tab per result, titled for what its statement
+//!   works on ([`result_title`]; a click shows it, `query.showResult`), scrolling behind the ⌄
+//!   list while they don't fit; the facts ([`run_state`]): `Running 00:02.4` from 300 ms (the
+//!   last run's tabs and grid kept), else `Cancelled 3.2 s` after dbee's cancel, else
+//!   `Failed 12 ms` with no result before the failure, else what the shown result holds with how
+//!   long its statement took: `13 rows 24 ms`, the cap notice `First 10,000 of 25,000 rows 80 ms`
+//!   ([`rows_text`], its hover the caps), `2 rows affected 5 ms` ([`affected_text`]), or the time
+//!   alone when the database gave no count; EXPORT, off until a later version, while the shown
+//!   result has rows or a run goes; and at its right end the value panel's toggle
+//!   (`ui.toggleValuePanel`);
+//! - the last run's error band, when it failed ([`band`], [`crate::components::error_band`]), a
+//!   hairline under it: none after dbee's own cancel, which the bar says; with ROLLBACK while the
+//!   connection's transaction has failed (`query.rollback`, off while a run, a commit or a
+//!   rollback goes on the connection: [`can_end`]), whose outcome is a toast;
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
-//!   selecting and copying work, and the value panel follows the selected cell), or for a
-//!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
-//!   saying how to run.
+//!   selecting and copying work, and the value panel follows the selected cell). A statement
+//!   without rows draws nothing there: the bar says what it did. With no result yet, nothing.
+//!
+//! The editor and the run row take the body's whole width. The result bar, the band and the grid
+//! are the results column: they take it too while the value panel is shut, and stand beside it
+//! while it shows ([`crate::value_panel`]: at the column's right, from the result bar's top to the
+//! body's bottom, filled after the grid so a click on a cell shows its value in the same frame).
+//! Before the first result there is no result bar, so no toggle and no panel.
 //!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
-//! dialect, Postgres's when none is open ([`Tokens::job`], colours [`crate::theme::SqlSyntax`]; a
+//! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
 //! new dialect lexes the text again from scratch), with no soft wrap: a long line scrolls
 //! sideways, so each row of the layout is a line and the gutter's numbers are line numbers. The
 //! text lives in the window, a buffer per tab ([`EditorState`]), so a frame does not copy it: the
@@ -46,13 +65,17 @@
 //! one it is the start. A tab's editor takes the keyboard when the tab becomes the active one (a
 //! new tab too), unless a dialog or the quick search is open.
 //!
-//! **Errors.** The card shows the server's message (with its code), detail and hint, and
-//! where the server points, as a line and column of the text (as it is now: the position is a
-//! byte offset into the text the run started with, kept within the text). A click on it puts the
-//! cursor there, with the keyboard; an error without a position offers no click. A cancelled run shows
-//! the same card in neutral colours. The results of the statements before the failing one stay,
-//! and can be picked in the selector. The card says the error, so it shows as no notice too
-//! (`DbeeApp::start`).
+//! **Errors.** The band shows the server's message (with its code), hint and detail, and where
+//! the server points, as a line and column of the text (as it is now: the position is a byte
+//! offset into the text the run started with, kept within the text), whose number turns `danger`
+//! in the gutter too. A click on the band, or Enter or Space with the keyboard on it, puts the
+//! cursor there, with the keyboard; an error without a position offers no click, and its words can
+//! be selected. The token the position falls in ([`error_token`]: a dotted name whole) is
+//! underlined in `danger` while the text is the one the run started with: the first edit takes it
+//! away, and an undo doesn't bring it back; the red line number stays until the next run. A run
+//! dbee cancelled shows no band. The results of the statements
+//! before the failing one stay, and can be picked in the result bar. The band says the error, so it
+//! shows as no notice too (`DbeeApp::start`).
 //!
 //! **Run buttons** follow the engine's own enabled check for `query.run` (`cmd::query::can_run`:
 //! connected, the connection not lost), with its reason on hover. What the run itself refuses (a
@@ -62,19 +85,25 @@
 //! It reads the tab from the engine each frame and acts only through commands, run after drawing.
 //! The window keeps a [`QueryState`] per tab, dropped with the tab.
 //!
-//! Automation ids: `query-editor` (value `{cursor, focused, lines, length, highlighted}`: the
-//! cursor as a byte offset, whether the editor has the keyboard, the lines, the text's length in
-//! bytes, and whether some token is coloured), `query-split` (value: the editor's share of the
-//! height), `query-database` (value: the database shown, or null for none; while its list is open
-//! the choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel`,
-//! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`), `result-more`
-//! (the `…` when not all fit; value: the number of results) and, while its list is open,
-//! `result-list-<n>` (value as `result-<n>`; only those in view),
-//! `query-rows` (value: what the shown result holds, e.g. `First 10,000 of 25,000 rows`),
-//! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
-//! detail, hint, note, position, statement, line, column, jump}`, `note` the card's line that a
-//! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
-//! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
+//! Automation ids: `query-editor` (the editor's whole area; value `{cursor, focused, lines,
+//! length, highlighted, errorLine, underline}`: the cursor as a byte offset, whether the editor
+//! has the keyboard, the lines, the text's length in bytes, whether some token is coloured, the
+//! line number in `danger` or null, and the bytes `[start, end]` of the underlined token or null), `query-split` (value: the editor's share of the height),
+//! `query-database` (value: the database shown, or null for none; while its list is open the
+//! choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel` (only while
+//! the run has gone 300 ms),
+//! `result-<n>` (a result's tab, 1-based, also for a single result, listed out of view while
+//! scrolled away; value `{shown, rows, rowsAffected}`), `result-more` (the ⌄ list button while not
+//! all fit; value: the number of results) and, while its list is open, `result-list-<n>` (value
+//! as `result-<n>`; only those in view), `query-facts` (the facts as written before capitals:
+//! `13 rows 24 ms`, `Running 00:02.4`, `Failed 12 ms`, `Cancelled 3.2 s`, `5 ms`),
+//! `query-rows` (the facts, while they say what the shown result with rows holds; value e.g.
+//! `First 10,000 of 25,000 rows`), `query-affected` (the facts, while they say what a statement
+//! without rows did; value: `2 rows affected`), `query-export` (EXPORT, off), `query-error` (value `{code, heading, message,
+//! detail, hint, rollback, position, statement, line, column, jump}`, `rollback` whether ROLLBACK
+//! shows, `jump` whether a click moves the cursor; not drawn after dbee's own cancel),
+//! `query-rollback` (ROLLBACK in the band; value `Rollback`), `value-toggle` (the value panel's
+//! toggle at the result bar's right end; value: whether the panel shows).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -82,26 +111,37 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
-use dbee_engine::cmd::query::{can_run, can_set_database};
+use dbee_engine::cmd::query::{can_end, can_run, can_set_database};
 use dbee_engine::state::NO_CONNECTION_DIALECT;
-use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId, Which};
+use dbee_engine::{CurrentDatabase, JobId, Json, QueryError, StatementOutcome, Tab, TabId, Which};
 use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
 use egui::{
-    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText,
-    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
+    Align, Color32, CornerRadius, CursorIcon, Event, Frame, Id, Key, Layout, Margin, Popup, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind,
+    TextEdit, UiBuilder, pos2, vec2,
 };
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::editor::{ErrorToken, LineNumber};
+use crate::components::error_band::{Action, Band};
+use crate::components::icon::Icon;
+use crate::components::menu::{self, Item};
+use crate::components::results::{ResultAsked, ResultBar, ResultTab, RunAsked, RunRow, RunState};
+use crate::components::toast::Kind;
+use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
-use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
+use crate::quiet::Watch;
+use crate::theme::{
+    self, Text,
+    size::{self, BAR_H, BAR_LINE, EDITOR_INSET, RADIUS_CONTROL, SPLIT_ZONE_H},
+};
 use crate::tree::thousands;
-use crate::{DbeeApp, filter_bar, icons};
+use crate::{DbeeApp, value_panel};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
@@ -111,42 +151,38 @@ pub const DATABASE: &str = "query-database";
 pub const RUN: &str = "query-run";
 pub const RUN_CURRENT: &str = "query-run-current";
 pub const CANCEL: &str = "query-cancel";
-/// The selector's buttons: `result-1`, `result-2`, … (`query.showResult` takes the 0-based index).
+/// The result bar's tabs: `result-1`, `result-2`, … (`query.showResult` takes the 0-based index).
 pub const RESULT: &str = "result-";
-/// The selector's `…` when not all results fit, and its list's items `result-list-1`, ….
+/// The result bar's ⌄ list button while not all tabs fit, and its list's items `result-list-1`, ….
 pub const RESULT_MORE: &str = "result-more";
 pub const RESULT_LIST: &str = "result-list-";
+pub const FACTS: &str = "query-facts";
 pub const ROWS: &str = "query-rows";
 pub const AFFECTED: &str = "query-affected";
+pub const EXPORT: &str = "query-export";
 pub const ERROR: &str = "query-error";
-pub const HINT: &str = "query-hint";
+/// ROLLBACK in the error band, while the connection's transaction has failed.
+pub const ROLLBACK: &str = "query-rollback";
 
-/// The editor's text size, in the monospace font, and the height of a line.
-const FONT_SIZE: f32 = 13.0;
-const LINE_H: f32 = 18.0;
+/// ROLLBACK's hover; off, `Roll back the transaction: not now, <why>`.
+pub(crate) const ROLLBACK_HOVER: &str = "End the failed transaction with ROLLBACK";
+
+/// The height of an editor line.
+const LINE_H: f32 = Text::Code.line();
 /// What Tab inserts.
 const INDENT: &str = "    ";
 /// The editor's share of the tab's height until the split is dragged.
 pub(crate) const DEFAULT_SPLIT: f32 = 0.45;
 
-/// The run command, whose job errors the card shows.
+/// The run command, whose job errors the band shows.
 const QUERY_RUN: &str = "query.run";
 /// The editor's height at least (three lines), and the room kept for the results.
 const MIN_EDITOR_H: f32 = 3.0 * LINE_H + 10.0;
 const MIN_RESULTS_H: f32 = 90.0;
-/// The space above the editor, the split's height and the toolbar's.
-const TOP_PAD: f32 = 6.0;
-const SPLIT_H: f32 = 8.0;
-const TOOLBAR_H: f32 = 36.0;
-/// The toolbar's buttons' height, the database chip's too, and the chip's width.
-const BUTTON_H: f32 = 26.0;
+/// The database chip's width; it is as tall as the toolbar's buttons.
 const CHIP_W: f32 = 150.0;
 /// How tall the chip's list gets before it scrolls.
 const CHIP_LIST_H: f32 = 320.0;
-/// The gutter's inset at each side of its numbers.
-const GUTTER_PAD: f32 = 8.0;
-/// The text's inset in the editor.
-const TEXT_MARGIN: Margin = Margin { left: 6, right: 6, top: 4, bottom: 4 };
 
 /// The id of tab `tab`'s editor (egui keeps its cursor and undo under it).
 pub fn editor_id(tab: TabId) -> Id {
@@ -211,7 +247,78 @@ fn cap_hover() -> String {
 fn affected_text(rows: Option<u64>) -> String {
     match rows {
         Some(n) => format!("{} affected", rows_word(n)),
-        None => "The statement ran; the database gave no row count.".into(),
+        None => NO_COUNT.into(),
+    }
+}
+
+/// What a statement without rows says when the database gave no count: the time's hover.
+const NO_COUNT: &str = "The statement ran; the database gave no row count.";
+
+/// The most characters a statement on one line has to be its own result tab's title.
+const TITLE_WHOLE: usize = 24;
+
+/// The keywords whose next name a result tab's title names.
+const TITLE_KEYWORDS: [&str; 5] = ["from", "into", "update", "table", "join"];
+
+/// The words a name can follow a title keyword with: `create table if not exists t`.
+const TITLE_SKIPPED: [&str; 4] = ["if", "not", "exists", "only"];
+
+/// A result tab's title for statement `sql` in `dialect`: a statement of at most [`TITLE_WHOLE`]
+/// characters on one line is its own title; else its first word, ` … `, and the first name after
+/// one of [`TITLE_KEYWORDS`], its last dotted part with its quotes dropped (`select … orders`);
+/// with no such name, the first word and ` …`. Always as written, never upper-cased.
+pub(crate) fn result_title(dialect: Dialect, sql: &str) -> String {
+    let sql = sql.trim();
+    if sql.chars().count() <= TITLE_WHOLE && !sql.contains('\n') {
+        return sql.to_owned();
+    }
+    let tokens: Vec<Token> =
+        lexer::tokenize(dialect, sql).into_iter().filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment)).collect();
+    let text = |t: &Token| sql.get(t.range.clone()).unwrap_or_default();
+    let Some(first) = tokens.first() else { return String::new() };
+    let is_word = |t: &Token| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident);
+    let name = tokens.iter().enumerate().find_map(|(i, t)| {
+        if !(is_word(t) && TITLE_KEYWORDS.iter().any(|k| text(t).eq_ignore_ascii_case(k))) {
+            return None;
+        }
+        let rest = tokens.get(i.saturating_add(1)..)?;
+        let skip = rest.iter().take_while(|t| is_word(t) && TITLE_SKIPPED.iter().any(|k| text(t).eq_ignore_ascii_case(k))).count();
+        name_at(rest.get(skip..)?, &text)
+    });
+    let word = text(first);
+    match name {
+        Some(name) => format!("{word} … {name}"),
+        None => format!("{word} …"),
+    }
+}
+
+/// The name `tokens` start with, its last dotted part with its quotes dropped; `None` when they
+/// start with no name.
+fn name_at<'s>(tokens: &[Token], text: &impl Fn(&Token) -> &'s str) -> Option<String> {
+    let mut last = None;
+    let mut parts = tokens.iter();
+    while let Some(t) = parts.next() {
+        if !matches!(t.kind, TokenKind::Keyword | TokenKind::Ident | TokenKind::QuotedIdent) {
+            break;
+        }
+        last = Some(unquoted(text(t)));
+        if parts.next().is_none_or(|dot| text(dot) != ".") {
+            break;
+        }
+    }
+    last.filter(|name| !name.is_empty())
+}
+
+/// A name with its quotes dropped: `"Odd"` → `Odd`, `` `a b` `` → `a b`, `[x]` → `x`.
+fn unquoted(name: &str) -> String {
+    let mut chars = name.chars();
+    match (chars.next(), name.chars().last()) {
+        (Some(open @ ('"' | '`')), Some(close)) if close == open && name.len() >= 2 => {
+            let doubled: String = [open, open].iter().collect();
+            name.get(1..name.len() - 1).unwrap_or_default().replace(&doubled, &open.to_string())
+        }
+        (Some('['), Some(']')) if name.len() >= 2 => name.get(1..name.len() - 1).unwrap_or_default().to_owned(),
+        _ => name.to_owned(),
     }
 }
 
@@ -232,13 +339,13 @@ fn colour_window(view: Range<usize>) -> Range<usize> {
 }
 
 /// The colour and slant of a token of `kind`; `None` for whitespace, which joins the text before it.
-fn style(kind: TokenKind, syntax: &SqlSyntax, plain: Color32) -> Option<(Color32, bool)> {
+fn style(kind: TokenKind, syntax: &theme::Tokens, plain: Color32) -> Option<(Color32, bool)> {
     Some(match kind {
-        TokenKind::Keyword => (syntax.keyword, false),
-        TokenKind::String => (syntax.string, false),
-        TokenKind::Number | TokenKind::Param => (syntax.number, false),
-        TokenKind::Comment => (syntax.comment, true),
-        TokenKind::QuotedIdent => (syntax.quoted, false),
+        TokenKind::Keyword => (syntax.syn_keyword, false),
+        TokenKind::String => (syntax.syn_string, false),
+        TokenKind::Number | TokenKind::Param => (syntax.syn_number, false),
+        TokenKind::Comment => (syntax.text_muted, true),
+        TokenKind::QuotedIdent => (syntax.syn_literal, false),
         TokenKind::Whitespace => return None,
         TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other | TokenKind::ExecutableMark => (plain, false),
     })
@@ -401,13 +508,12 @@ impl Tokens {
     /// section per run of the same colour (whitespace joins the run before it), the rest of the
     /// text plain; monospace and unwrapped. Sections that would not cover the text exactly (which
     /// the tokens never make) give one plain section rather than a job egui could not lay out.
-    fn job(&self, lines: Range<usize>, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+    fn job(&self, lines: Range<usize>, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
         let text = self.text.as_str();
-        let font = FontId::monospace(FONT_SIZE);
         let section = |start: usize, end: usize, color: Color32, italics: bool| LayoutSection {
             leading_space: 0.0,
             byte_range: ByteIndex(start)..ByteIndex(end),
-            format: TextFormat { font_id: font.clone(), color, italics, line_height: Some(LINE_H), ..TextFormat::default() },
+            format: TextFormat { italics, ..Text::Code.format(color) },
         };
         let mut job = LayoutJob { text: text.to_owned(), keep_trailing_whitespace: true, ..LayoutJob::default() };
         let from = self.line_starts.get(lines.start).copied().unwrap_or(text.len());
@@ -435,7 +541,7 @@ impl Tokens {
                 break;
             }
             let (start, end) = (t.range.start.max(from), t.range.end.min(to));
-            push(&mut job, &mut open, start, end, style(t.kind, &syntax, plain));
+            push(&mut job, &mut open, start, end, style(t.kind, syntax, plain));
         }
         if to < text.len() {
             push(&mut job, &mut open, to, text.len(), Some((plain, false)));
@@ -460,7 +566,7 @@ impl Tokens {
 
 /// `text` as a layout job for the editor, every token coloured (see [`Tokens::job`]).
 #[cfg(test)]
-fn highlight(text: &str, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+fn highlight(text: &str, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
     let mut tokens = Tokens::default();
     tokens.update(text);
     tokens.job(0..usize::MAX, syntax, plain)
@@ -472,9 +578,9 @@ struct Highlighter {
     tokens: Tokens,
     /// The lines to colour in the next job (see [`colour_window`]).
     window: Range<usize>,
-    /// What the job is for (dark visuals, the text colour, the coloured lines), and the job, whose
-    /// text is the text it is for.
-    job: Option<((bool, Color32, Range<usize>), LayoutJob)>,
+    /// What the job is for (the mode's tokens, the text colour, the coloured lines), and the job,
+    /// whose text is the text it is for.
+    job: Option<((theme::Tokens, Color32, Range<usize>), LayoutJob)>,
     /// Some token of the job is coloured.
     coloured: bool,
 }
@@ -489,9 +595,10 @@ impl Highlighter {
         }
     }
 
-    /// The job for `text` in the theme given: the last one again when nothing changed.
-    fn job(&mut self, text: &str, dark: bool, plain: Color32) -> LayoutJob {
-        let key = (dark, plain, self.window.clone());
+    /// The job for `text` in the mode whose tokens are `syntax`: the last one again when nothing
+    /// changed.
+    fn job(&mut self, text: &str, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
+        let key = (*syntax, plain, self.window.clone());
         if let Some((made_for, job)) = &self.job
             && *made_for == key
             && job.text == text
@@ -499,7 +606,7 @@ impl Highlighter {
             return job.clone();
         }
         self.tokens.update(text);
-        let job = self.tokens.job(self.window.clone(), sql_syntax(dark), plain);
+        let job = self.tokens.job(self.window.clone(), syntax, plain);
         self.coloured = job.sections.iter().any(|s| s.format.color != plain);
         self.job = Some((key, job.clone()));
         job
@@ -526,8 +633,11 @@ pub struct EditorState {
     lines: usize,
     /// The lines in view in the last frame, around which the text is coloured.
     view: Range<usize>,
-    /// The line and column of a byte offset (the error card's), for text `version`.
+    /// The line and column of a byte offset (the error band's), for text `version`.
     place: Option<(u64, usize, (usize, usize))>,
+    /// The bytes of the token the last run's error points at, underlined in `danger` (set each
+    /// frame by the tab, only while the text is the run's).
+    underline: Option<Range<usize>>,
 }
 
 /// Leaves out the text: query text never reaches the logs.
@@ -628,23 +738,22 @@ fn take_tabs(ui: &egui::Ui) {
     });
 }
 
-/// The width of the gutter for `lines` lines.
+/// The width of the gutter for `lines` lines: the numbers' box and the inset before it.
 fn gutter_width(ui: &egui::Ui, lines: usize) -> f32 {
-    let digits = lines.max(1).ilog10().saturating_add(1).max(2);
-    let font = FontId::monospace(FONT_SIZE - 1.0);
-    let digit = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-    digits as f32 * digit + 2.0 * GUTTER_PAD
+    EDITOR_INSET + LineNumber::room(ui, lines)
 }
 
-/// Draws editor `id` over the rest of `ui`: the gutter with the line numbers, then the text in a
-/// scroll area both ways.
-pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
-    let t = TOKENS;
+/// Draws editor `id` over the rest of `ui`, on `card` with no frame or edge: the gutter with the
+/// line numbers flush right in their box [`EDITOR_INSET`] in, then the text [`EDITOR_INSET`]
+/// after the box and under the top, in a scroll area both ways. `error_line` (1-based) is the
+/// line the last run's error points at.
+pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Option<usize>) -> EditorOutput {
+    let t = theme::tokens(ui.ctx());
     let rect = ui.available_rect_before_wrap();
     if ui.memory(|m| m.has_focus(id)) {
         take_tabs(ui);
     }
-    // The card's jump, or the tab just became the active one: the keyboard, and the cursor.
+    // The band's jump, or the tab just became the active one: the keyboard, and the cursor.
     let mut scroll_to = None;
     if ed.focus || ed.jump.is_some() {
         ui.memory_mut(|m| m.request_focus(id));
@@ -657,21 +766,21 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
         TextEdit::store_state(ui.ctx(), id, state);
         scroll_to = Some(chars);
     }
-    let focused = ui.memory(|m| m.has_focus(id));
     let gutter_w = gutter_width(ui, ed.lines);
-    let p = ui.painter().clone();
-    p.rect(rect, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, if focused { t.accent } else { t.border }), StrokeKind::Inside);
-    let inner = rect.shrink(1.0);
-    let gutter = Rect::from_min_max(inner.min, pos2((inner.left() + gutter_w).min(inner.right()), inner.bottom()));
-    p.rect_filled(gutter, CornerRadius { nw: RADIUS, sw: RADIUS, ne: 0, se: 0 }, t.grid_header);
-    p.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0, t.border));
-    let text_rect = Rect::from_min_max(pos2(gutter.right() + 1.0, inner.top()), inner.max);
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.card);
+    let gutter = Rect::from_min_max(
+        pos2((rect.left() + EDITOR_INSET).min(rect.right()), rect.top()),
+        pos2((rect.left() + gutter_w).min(rect.right()), rect.bottom()),
+    );
+    // The 12 between the numbers and the text stay put: the scroll area starts after them, so a
+    // line scrolled sideways is cut there, not under the numbers.
+    let text_rect = Rect::from_min_max(pos2((gutter.right() + EDITOR_INSET).min(rect.right()), rect.top()), rect.max);
     let mut text_ui = ui.new_child(UiBuilder::new().id_salt(id.with("dbee-editor-area")).max_rect(text_rect).layout(Layout::top_down(Align::Min)));
     let (out, view, offset) = {
         let EditorState { text, highlight, view, .. } = &mut *ed;
         highlight.window = colour_window(view.clone());
         let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap_width: f32| {
-            let job = highlight.job(buf.as_str(), ui.visuals().dark_mode, ui.visuals().text_color());
+            let job = highlight.job(buf.as_str(), theme::tokens(ui.ctx()), ui.visuals().text_color());
             ui.fonts_mut(|f| f.layout_job(job))
         };
         // Not animated: a jump to an error far down lands at once (and the colours follow it at once).
@@ -680,8 +789,8 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
             let out = TextEdit::multiline(text)
                 .id(id)
                 .code_editor()
-                .font(FontId::monospace(FONT_SIZE))
-                .frame(Frame::NONE.inner_margin(TEXT_MARGIN))
+                .font(Text::Code.font())
+                .frame(Frame::NONE.inner_margin(Margin { left: 0, ..Margin::same(EDITOR_INSET as i8) }))
                 .hint_text("Write or paste SQL here.")
                 .desired_width(f32::INFINITY)
                 .min_size(size)
@@ -707,21 +816,29 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
     let chars = out.state.cursor.char_range().map_or(0, |r| r.primary.index.0);
     let cursor = ed.cursor_bytes(chars);
     let focused = ui.memory(|m| m.has_focus(id));
-    // The line numbers of the rows in view, the cursor's in the text colour.
+    // The line numbers of the rows in view: the cursor's and the error's marked.
     let cursor_row = out.cursor_range.filter(|_| focused).map(|r| galley.layout_from_cursor(r.primary).row);
     let gutter_p = ui.painter_at(Rect::from_min_max(pos2(gutter.left(), view.top()), pos2(gutter.right(), view.bottom())));
     let origin = out.galley_pos;
     let first = galley.rows.partition_point(|row| origin.y + row.pos.y + row.row.size.y < view.top());
-    let font = FontId::monospace(FONT_SIZE - 1.0);
     for (i, row) in galley.rows.iter().enumerate().skip(first) {
         let top = origin.y + row.pos.y;
         if top > view.bottom() {
             break;
         }
-        let colour = if cursor_row == Some(i) { t.text } else { t.text_muted };
-        let number = gutter_p.layout_no_wrap(i.saturating_add(1).to_string(), font.clone(), colour);
-        let at = pos2(gutter.right() - GUTTER_PAD - number.size().x, top + (row.row.size.y - number.size().y) / 2.0);
-        gutter_p.galley(at, number, colour);
+        let n = i.saturating_add(1);
+        let slot = Rect::from_min_max(pos2(gutter.left(), top), pos2(gutter.right(), top + row.row.size.y));
+        LineNumber { n, current: cursor_row == Some(i), error: error_line == Some(n) }.paint(&gutter_p, slot);
+    }
+    // The error's token, underlined: on its first line, as wide as it is there.
+    if let Some(range) = ed.underline.clone() {
+        let start = CCursor::new(char_index(&ed.text, range.start));
+        let at = galley.pos_from_cursor(start);
+        let end = galley.pos_from_cursor(CCursor::new(char_index(&ed.text, range.end)));
+        let row = galley.layout_from_cursor(start).row;
+        let right = if (end.top() - at.top()).abs() < 0.5 { end.left() } else { galley.rows.get(row).map_or(at.left(), |r| r.pos.x + r.row.size.x) };
+        let token = Rect::from_min_max(pos2(at.left(), at.top()), pos2(right.max(at.left()), at.top() + LINE_H)).translate(origin.to_vec2());
+        ErrorToken::underline(&ui.painter_at(view), token);
     }
     EditorOutput { response: out.response.response, changed, cursor, focused, lines: ed.lines }
 }
@@ -738,19 +855,24 @@ struct ResultGrids {
     /// run's grid.
     run: u64,
     grids: Vec<GridState>,
+    /// Each result's tab title ([`result_title`]), from the text as the window first saw the
+    /// run's results, so an edit after the run doesn't rename them.
+    titles: Vec<String>,
 }
 
 /// Runs seen, for [`ResultGrids::run`].
 static RUNS: AtomicU64 = AtomicU64::new(0);
 
 impl ResultGrids {
-    /// Fresh grids when `results` are another run's.
-    fn follow(&mut self, results: &[StatementOutcome]) {
+    /// Fresh grids and titles when `results` are another run's, the titles from `text` in
+    /// `dialect`.
+    fn follow(&mut self, results: &[StatementOutcome], text: &str, dialect: Dialect) {
         let same = self.of.len() == results.len() && self.of.iter().zip(results).all(|(w, o)| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&o.result)));
         if !same {
             self.of = results.iter().map(|o| Arc::downgrade(&o.result)).collect();
             self.run = RUNS.fetch_add(1, Ordering::Relaxed);
             self.grids = results.iter().map(|_| GridState::default()).collect();
+            self.titles = results.iter().map(|o| result_title(dialect, text.get(o.range.clone()).unwrap_or_default())).collect();
         }
     }
 }
@@ -760,27 +882,55 @@ impl ResultGrids {
 pub(crate) struct QueryState {
     pub editor: EditorState,
     results: ResultGrids,
+    /// The tab's last run the window knows of: seen running, or started by its run row.
+    last_run: Option<JobId>,
+    /// The last run's error as the window first saw it: that run, the editor's text version
+    /// then, and the bytes of the token its position falls in ([`error_token`]).
+    seen: Option<SeenError>,
+}
+
+/// See [`QueryState::seen`].
+#[derive(Debug)]
+struct SeenError {
+    run: Option<JobId>,
+    version: u64,
+    token: Option<Range<usize>>,
+}
+
+/// The bytes of the token of `text` (lexed in `dialect`) that byte `at` falls in, a dotted name
+/// whole (`o.totl`); `None` in whitespace, a comment, or past the text.
+fn error_token(dialect: Dialect, text: &str, at: usize) -> Option<Range<usize>> {
+    let tokens = lexer::tokenize(dialect, text);
+    let k = tokens.iter().position(|t| t.range.start <= at && at < t.range.end)?;
+    let token = tokens.get(k)?;
+    let name = |t: &Token| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident | TokenKind::QuotedIdent);
+    let dot = |t: &Token| text.get(t.range.clone()) == Some(".");
+    match token.kind {
+        TokenKind::Whitespace | TokenKind::Comment => None,
+        _ if name(token) => {
+            let (mut first, mut last) = (k, k);
+            while first >= 2 && tokens.get(first - 1).is_some_and(dot) && tokens.get(first - 2).is_some_and(name) {
+                first -= 2;
+            }
+            while tokens.get(last + 1).is_some_and(dot) && tokens.get(last + 2).is_some_and(name) {
+                last += 2;
+            }
+            Some(tokens.get(first)?.range.start..tokens.get(last)?.range.end)
+        }
+        _ => Some(token.range.clone()),
+    }
 }
 
 /// The query tabs' states, by tab.
 pub(crate) type Queries = HashMap<TabId, QueryState>;
 
-/// A button for the toolbar; true when clicked.
-fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover, why_not): (&str, Option<&str>), main: bool) -> bool {
-    let t = TOKENS;
-    let enabled = why_not.is_none();
-    let text = if main && enabled { RichText::new(label).color(t.accent_text) } else { RichText::new(label) };
-    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, BUTTON_H));
-    if main && enabled {
-        button = button.fill(t.accent);
-    }
-    let r = ui.add_enabled(enabled, button);
+/// A run row button `r` tagged `id` with `label`, its hover `hover` or why it is off.
+fn tag_run_button(tags: &mut Tags, r: &Response, id: &str, label: &str, (hover, why_not): (&str, Option<&str>)) {
     let r = match why_not {
-        Some(why) => r.on_disabled_hover_text(format!("{hover}: not now, {why}")),
-        None => r.on_hover_text(hover),
+        Some(why) => r.clone().hint_disabled(format!("{hover}: not now, {why}")),
+        None => r.clone().hint(hover),
     };
-    tags.tag_value_as(id, &r, label, enabled);
-    r.clicked()
+    tags.tag_value_as(id, &r, label, why_not.is_none());
 }
 
 /// What the database chip shows: the database the tab's next run starts in, as the engine knows
@@ -793,23 +943,25 @@ struct Chip<'a> {
     why_not: Option<String>,
 }
 
-/// The database chip, as tall as the toolbar's buttons and of a fixed width, so nothing beside
-/// it moves when the database changes (a long name is cut, and reads whole on hover). A click
-/// opens the list of `chip.choices` under its heading; returns the one chosen.
-fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<String> {
-    let t = TOKENS;
+/// The database chip, as tall as the run row's buttons and `width` wide ([`CHIP_W`] while the
+/// row has room), so nothing beside it moves when the database changes (a long name is cut, and
+/// reads whole on hover). A click opens the list of `chip.choices` under its heading; returns the
+/// one chosen.
+fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>, width: f32) -> Option<String> {
+    let t = theme::tokens(ui.ctx());
     let (one, many) = chip.word;
     let enabled = chip.why_not.is_none();
     let mut chosen = None;
     ui.add_enabled_ui(enabled, |ui| {
-        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, BUTTON_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(width, size::BUTTON_H), Sense::click());
         let p = ui.painter();
         let fill = if enabled && r.hovered() { t.hover } else { t.card };
-        p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
+        let muted = if enabled { t.text_muted } else { t.text_faint };
         let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
-        icons::schema(p, icon, if enabled { t.icon_schema } else { t.border });
+        Icon::Schema.paint(p, icon.center(), muted);
         let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
-        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
+        Icon::ChevronDown.paint(p, arrow.center(), muted);
         let none = format!("No {one} chosen");
         let unknown = format!("{} not known", capitalized(one));
         let shown = chip.database.database.as_deref().filter(|_| chip.database.known);
@@ -820,7 +972,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             None => (unknown.as_str(), t.text_muted),
         };
         let left = icon.right() + 6.0;
-        let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
+        let g = line_galley(ui, text, Text::Body, ink, (arrow.left() - 4.0 - left).max(1.0));
         ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
         let hover = match shown {
             Some(name) => format!("The next run starts in the {one} {name}. Click to choose another."),
@@ -830,24 +982,26 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             ),
         };
         let r = match &chip.why_not {
-            Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
-            None => r.on_hover_text(hover),
+            Some(why) => r.hint_disabled(format!("Choose the {one}: not now, {why}")),
+            None => r.hint(hover),
         };
         tags.tag_value_as(DATABASE, &r, shown, enabled);
         if !enabled {
             // egui closes a popup that is not drawn: no list while the chip waits.
             return;
         }
-        Popup::menu(&r).width(CHIP_W).show(|ui| {
-            ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
+        Popup::menu(&r).width(CHIP_W.max(width)).style(menu::style(ui.ctx())).show(|ui| {
+            // At least as wide as the chip.
+            ui.set_min_width(ui.available_width());
+            menu::heading(ui, many);
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                 for name in &chip.choices {
-                    let r = filter_bar::item(ui, shown == Some(*name), name);
+                    let r = ui.add(Item::new(name).choice(Some(shown == Some(*name))));
                     // A menu's first frame is a sizing pass, which reads every widget as disabled.
                     tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
                     if r.clicked() {
                         chosen = Some((*name).to_owned());
+                        ui.close();
                     }
                 }
             });
@@ -862,60 +1016,48 @@ fn capitalized(word: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The card's line under an error that means the transaction failed earlier.
-pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
-
-/// The error card's heading for `e` of a run that kept `kept` results.
+/// The error band's heading for `e` of a run that kept `kept` results.
 fn heading(e: &QueryError, kept: usize) -> String {
-    if e.code == "cancelled" {
-        "The run was cancelled".into()
-    } else if kept > 0 || e.statement > 0 {
-        format!("Statement {} failed", e.statement.saturating_add(1))
-    } else {
-        "The query failed".into()
-    }
+    if kept > 0 || e.statement > 0 { format!("Statement {} failed", e.statement.saturating_add(1)) } else { "Query failed".into() }
 }
 
-/// The error card of `e`, a run that kept `kept` results; `at` is the line and column of its
-/// position in the editor's text. True when a click on it asks to go to the error's position.
-fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
-    let t = TOKENS;
-    let cancelled = e.code == "cancelled";
-    let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
-    let jump = at.is_some();
+/// What a click on the error band asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BandAsked {
+    /// To go to the error's position.
+    pub jump: bool,
+    /// ROLLBACK.
+    pub rollback: bool,
+}
+
+/// The error band of `e`, a run that kept `kept` results; `at` is the line and column of its
+/// position in the editor's text; `rollback` ROLLBACK under it, while the transaction has failed.
+pub(crate) fn band(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    tab: TabId,
+    e: &QueryError,
+    kept: usize,
+    at: Option<(usize, usize)>,
+    rollback: Option<Action<'_>>,
+) -> BandAsked {
     let title = heading(e, kept);
-    let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
-    let frame =
-        Frame::new().fill(t.card).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
-    let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
-    let r = frame
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add(Label::new(RichText::new(title.as_str()).strong().color(ink)).selectable(false));
-                if let Some((line, column)) = at {
-                    ui.add(Label::new(RichText::new(format!("line {line}, column {column}")).size(12.0).color(t.text_muted)).selectable(false));
-                }
-            });
-            label(ui, RichText::new(e.message.as_str()).color(if cancelled { t.text_muted } else { t.danger }));
-            if let Some(detail) = &e.detail {
-                label(ui, RichText::new(format!("Detail: {detail}")).size(12.0).color(t.text));
-            }
-            if let Some(hint) = &e.hint {
-                label(ui, RichText::new(format!("Hint: {hint}")).size(12.0).color(t.text));
-            }
-            if note.is_some() {
-                label(ui, RichText::new(ROLLBACK_NOTE).size(12.0).color(t.text));
-            }
-            if jump {
-                ui.add(Label::new(RichText::new("Click to put the cursor there.").size(11.5).color(t.text_muted)).selectable(false));
-            }
-        })
-        .response;
-    let r = ui.interact(r.rect, Id::new(("dbee-query-error", tab.0)), if jump { Sense::click() } else { Sense::hover() });
-    if jump && r.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    let actions: Vec<Action<'_>> = rollback.into_iter().collect();
+    let band = Band {
+        heading: &title,
+        position: at,
+        message: &e.message,
+        detail: e.detail.as_deref(),
+        hint: e.hint.as_deref(),
+        note: None,
+        actions: &actions,
+    };
+    let shown = band.show(ui, Id::new(("dbee-query-error", tab.0)));
+    let r = &shown.response;
+    if let (Some(action), Some(b)) = (rollback, shown.actions.first()) {
+        tags.tag_value_as(ROLLBACK, b, "Rollback", action.enabled);
     }
+    let jump = at.is_some();
     let (line, column) = at.unzip();
     let value = json!({
         "code": e.code,
@@ -923,118 +1065,131 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
         "message": e.message,
         "detail": e.detail,
         "hint": e.hint,
-        "note": note,
+        "rollback": rollback.is_some(),
         "position": e.position,
         "statement": e.statement,
         "line": line,
         "column": column,
         "jump": jump,
     });
-    tags.tag_value(ERROR, &r, value);
-    jump && r.clicked()
+    tags.tag_value(ERROR, r, value);
+    BandAsked { jump: jump && r.clicked(), rollback: shown.clicked() == Some(0) }
 }
 
-/// The room a result's button takes in the selector, with the dot before it, when there are
-/// `results` of them: its number's digits (about 7.5 points each at the selector's size, plus the
-/// button's padding, at least 22 points), and 12 for the dot and the spacing.
-fn result_width(results: usize) -> f32 {
-    let digits = results.max(1).ilog10().saturating_add(1) as f32;
-    (7.5 * digits + 20.0).max(22.0) + 12.0
-}
-
-/// The selector's `…` button with its spacing, and its list's width.
-const MORE_W: f32 = 26.0;
-const RESULT_LIST_W: f32 = 220.0;
-
-/// What the selector draws: its label, the results from `from` to `to`, and the `…` that lists
-/// them all when some are left out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SelectorFit {
-    label: bool,
-    from: usize,
-    to: usize,
-    more: bool,
-}
-
-/// The selector in `room` points, its label `label_w` wide: all results and the label when they
-/// fit; else as many as fit around the shown one beside the `…`, and the label only if it and one
-/// result fit too, so it is never cut.
-fn selector_fit(results: usize, shown: usize, room: f32, label_w: f32) -> SelectorFit {
-    let per = result_width(results);
-    let room = if room.is_finite() { room } else { 0.0 };
-    if results as f32 * per + label_w <= room {
-        return SelectorFit { label: true, from: 0, to: results, more: false };
+/// What the result bar says of tab `q`'s run, or `None` when there is nothing to say yet (no
+/// bar): running once it has gone 300 ms (`elapsed`); else cancelled by dbee; else failed with no
+/// result before it; else what the shown result holds.
+fn run_state(q: &dbee_engine::QueryTab, elapsed: Option<std::time::Duration>) -> Option<RunState> {
+    if let Some(elapsed) = elapsed {
+        return Some(RunState::Running { elapsed });
     }
-    let label = room >= label_w + MORE_W + per;
-    let left = room - MORE_W - if label { label_w } else { 0.0 };
-    let fit = if left > 0.0 { ((left / per).floor() as usize).min(results) } else { 0 };
-    let from = shown.min(results.saturating_sub(1)).saturating_sub(fit / 2).min(results.saturating_sub(fit));
-    SelectorFit { label, from, to: from.saturating_add(fit).min(results), more: true }
-}
-
-/// The results selector, `room` points wide: one button per result, `n` from 1 (with more than
-/// fit, those around the shown one, and a `…` listing every result); the index of the one chosen.
-fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], shown: usize, room: f32) -> Option<usize> {
-    let t = TOKENS;
-    let mut picked = None;
-    let muted = |text: &str| RichText::new(text).size(12.0).color(t.text_muted);
-    let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(muted(text)).selectable(false));
-    let label_w = ui.painter().layout_no_wrap("Results".to_owned(), FontId::proportional(12.0), t.text_muted).size().x + ui.spacing().item_spacing.x;
-    let fit = selector_fit(results.len(), shown, room, label_w);
-    if fit.label {
-        label(ui, "Results");
-    }
-    let what = |o: &StatementOutcome| if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) };
-    let value = |i: usize, o: &StatementOutcome| json!({ "shown": i == shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
-    for (i, o) in results.iter().enumerate().take(fit.to).skip(fit.from) {
-        if i > fit.from {
-            label(ui, "·");
+    if let Some(e) = &q.error {
+        if e.code == "cancelled" {
+            return Some(RunState::Cancelled { elapsed: e.ms.map(std::time::Duration::from_millis) });
         }
+        if q.results.is_empty() {
+            return Some(RunState::Failed { ms: e.ms });
+        }
+    }
+    let o = q.shown_result()?;
+    Some(if o.result.columns.is_empty() {
+        RunState::Affected { rows: o.result.rows_affected, ms: Some(o.ms) }
+    } else {
+        RunState::Done { rows: o.result.rows.len() as u64, ms: Some(o.ms) }
+    })
+}
+
+/// What a result's tab and list item say of it: `3 rows`, `2 rows affected`.
+fn result_holds(o: &StatementOutcome) -> String {
+    if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) }
+}
+
+/// The result bar of tab `q` saying `says` (its tabs named `titles`; `running`: the run has gone
+/// 300 ms, so EXPORT shows; `open`: the value panel is asked for, its toggle at the bar's right end
+/// on; `narrow`: it has no room, its toggle off); tags what it drew. What its click asked for.
+fn result_bar(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    q: &dbee_engine::QueryTab,
+    titles: &[String],
+    (says, running, open, narrow): (RunState, bool, bool, bool),
+) -> Option<ResultAsked> {
+    let shown = q.shown_result();
+    let cut = shown.filter(|o| !o.result.complete && !o.result.columns.is_empty());
+    let first_of = cut.map(|o| (o.result.rows.len() as u64, o.result.rows_seen));
+    let rows = shown.is_some_and(|o| !o.result.columns.is_empty());
+    let no_count = matches!(says, RunState::Affected { rows: None, .. });
+    let bar = ResultBar {
+        tabs: titles.iter().enumerate().map(|(i, title)| ResultTab::new(title).active(i == q.shown)).collect(),
+        state: says,
+        first_of: first_of.filter(|_| matches!(says, RunState::Done { .. })),
+        export: running || rows,
+        value: Some(open && !narrow),
+        time_hover: no_count.then_some(NO_COUNT),
+        value_off: narrow,
+    };
+    let drawn = bar.show(ui);
+    let value =
+        |i: usize, o: &StatementOutcome| json!({ "shown": i == q.shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
+    for ((i, o), r) in q.results.iter().enumerate().zip(&drawn.tabs) {
         let n = i.saturating_add(1);
-        let r = ui.add(Button::selectable(i == shown, RichText::new(n.to_string()).size(12.5)).min_size(vec2(22.0, 22.0)));
-        let r = r.on_hover_text(format!("Statement {n}: {}", what(o)));
+        let r = r.clone().hint(format!("Statement {n}: {}", result_holds(o)));
         tags.tag_value(&format!("{RESULT}{n}"), &r, value(i, o));
-        if r.clicked() && i != shown {
-            picked = Some(i);
+    }
+    if let Some(r) = &drawn.list {
+        let r = r.clone().hint(format!("Choose one of the {} results", q.results.len()));
+        tags.tag_value(RESULT_MORE, &r, q.results.len());
+    }
+    for (i, r) in &drawn.listed {
+        if let Some(o) = q.results.get(*i) {
+            // A menu's first frame is a sizing pass, which reads every widget as disabled.
+            tags.tag_value_as(&format!("{RESULT_LIST}{}", i.saturating_add(1)), r, value(*i, o), true);
         }
     }
-    if fit.more {
-        let r = ui.add(Button::new(RichText::new("…").size(12.5)).min_size(vec2(22.0, 22.0)));
-        let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
-        tags.tag_value(RESULT_MORE, &r, results.len());
-        Popup::menu(&r).width(RESULT_LIST_W).show(|ui| {
-            ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
-            ScrollArea::vertical().max_height(CHIP_LIST_H).show_rows(ui, filter_bar::ITEM_H, results.len(), |ui, rows| {
-                for (i, o) in results.iter().enumerate().take(rows.end).skip(rows.start) {
-                    let n = i.saturating_add(1);
-                    let r = filter_bar::item(ui, i == shown, &format!("Statement {n}: {}", what(o)));
-                    // A menu's first frame is a sizing pass, which reads every widget as disabled.
-                    tags.tag_value_as(&format!("{RESULT_LIST}{n}"), &r, value(i, o), true);
-                    if r.clicked() && i != shown {
-                        picked = Some(i);
-                    }
-                }
-            });
-        });
+    // Cut words read whole on hover, with the cap's sentence when the run's cap cut the result.
+    let cap = (first_of.is_some() && matches!(says, RunState::Done { .. })).then(cap_hover);
+    let words = match (drawn.cut, cap) {
+        (true, Some(cap)) => drawn.facts.clone().hint(format!("{}. {cap}", drawn.says)),
+        (true, None) => drawn.facts.clone().hint(drawn.says.as_str()),
+        (false, Some(cap)) => drawn.facts.clone().hint(cap),
+        (false, None) => drawn.facts.clone(),
+    };
+    let facts = match &drawn.time {
+        Some(time) => words.union(time.clone()),
+        None => words,
+    };
+    tags.tag_value(FACTS, &facts, drawn.says.as_str());
+    match (says, shown) {
+        (RunState::Done { .. }, Some(o)) => tags.tag_value(ROWS, &facts, rows_text(&o.result)),
+        (RunState::Affected { rows, .. }, Some(_)) => tags.tag_value(AFFECTED, &facts, affected_text(rows)),
+        _ => {}
     }
-    picked
+    if let Some(r) = &drawn.export {
+        tags.tag_value(EXPORT, r, "Export");
+    }
+    if let Some(r) = drawn.value {
+        value_panel::tag_toggle(tags, r, open, narrow);
+    }
+    drawn.asked
 }
 
 /// The editor's height in a tab body `h` high, for split `split`.
 fn editor_height(h: f32, split: f32) -> f32 {
-    let most = (h - TOP_PAD - SPLIT_H - TOOLBAR_H - MIN_RESULTS_H).max(MIN_EDITOR_H);
+    let most = (h - BAR_LINE - BAR_H - MIN_RESULTS_H).max(MIN_EDITOR_H);
     let wanted = if split.is_finite() { split * h } else { DEFAULT_SPLIT * h };
     wanted.max(MIN_EDITOR_H).min(most)
 }
 
-/// Draws query tab `id` into `ui` and runs what it asks for.
-pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
-    let t = TOKENS;
+/// Draws query tab `id` into `ui` and runs what it asks for. Whether it drew the value panel.
+pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
+    let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut set_text: Option<String> = None;
+    let mut panel = None;
     {
         let DbeeApp { session, view, tags, .. } = app;
-        let Some(Tab::Query(q)) = session.state().tab(id) else { return };
+        let Some(Tab::Query(q)) = session.state().tab(id) else { return false };
+        let open = view.value_panel;
         // The engine's own rule for the Run buttons; what the run refuses it says when clicked.
         let run_blocked = can_run(session).err();
         let modal = view.dialog.is_some() || view.quick.open;
@@ -1051,11 +1206,17 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             state.editor.focus();
         }
         state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
-        let full = ui.available_rect_before_wrap();
-        let h = full.height();
-        // The split first, so a drag moves the editor in this frame.
+        let body = ui.available_rect_before_wrap();
+        let h = body.height();
+        // The run's 300 ms: CANCEL, RUN off and the running words wait as long.
+        let ctx = ui.ctx().clone();
+        let elapsed = q.running.and_then(|job| view.quiet.past(&ctx, Watch::Tab(id, job)));
+        let past = elapsed.is_some();
+        // The split first, so a drag moves the editor in this frame: a zone centred on the run
+        // row's top line.
         let mut editor_h = editor_height(h, view.query_split);
-        let split_at = |editor_h: f32| Rect::from_min_size(pos2(full.left(), full.top() + TOP_PAD + editor_h), vec2(full.width(), SPLIT_H));
+        let split_at =
+            |editor_h: f32| Rect::from_center_size(pos2(body.center().x, body.top() + editor_h + BAR_LINE / 2.0), vec2(body.width(), SPLIT_ZONE_H));
         let split = ui.interact(split_at(editor_h), Id::new("dbee-query-split"), Sense::drag());
         if split.dragged() && h > 0.0 {
             editor_h = editor_height(h, (editor_h + split.drag_delta().y) / h);
@@ -1065,121 +1226,144 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
         }
         let split_rect = split_at(editor_h);
-        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.border };
-        let c = split_rect.center();
-        ui.painter().line_segment([pos2(c.x - 18.0, c.y), pos2(c.x + 18.0, c.y)], Stroke::new(2.0, grip));
         tags.tag_value(SPLIT, &split, f64::from(view.query_split));
-        // The editor.
-        let editor_rect = Rect::from_min_size(pos2(full.left(), full.top() + TOP_PAD), vec2(full.width(), editor_h));
+        // The editor, edge to edge from the body's top.
+        let editor_rect = Rect::from_min_size(body.min, vec2(body.width(), editor_h));
+        // Every area is cut at the body's edges: nothing is drawn past them at any width.
+        let clip = ui.clip_rect().intersect(body);
         let mut editor_ui =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-editor", id.0)).max_rect(editor_rect).layout(Layout::top_down(Align::Min)));
-        let out = editor(&mut editor_ui, editor_id(id), &mut state.editor);
+        editor_ui.set_clip_rect(clip.intersect(editor_rect));
+        let error_line = q.error.as_ref().and_then(|e| e.position).map(|p| state.editor.line_column_of(p).0);
+        // The error's token is underlined while the text is the one the run started with: the
+        // window notes the text's version when it first sees the run's error.
+        if let Some(job) = q.running {
+            state.last_run = Some(job);
+        }
+        match &q.error {
+            Some(e) if q.running.is_none() => {
+                if state.seen.as_ref().is_none_or(|seen| seen.run != state.last_run) {
+                    let token = e.position.and_then(|at| error_token(session.state().dialect(Which::Tab(id)), &state.editor.text, at));
+                    state.seen = Some(SeenError { run: state.last_run, version: state.editor.version, token });
+                }
+            }
+            _ => state.seen = None,
+        }
+        state.editor.underline = state.seen.as_ref().filter(|seen| seen.version == state.editor.version).and_then(|seen| seen.token.clone());
+        let out = editor(&mut editor_ui, editor_id(id), &mut state.editor, error_line);
         let value = json!({
             "cursor": out.cursor,
             "focused": out.focused,
             "lines": out.lines,
             "length": state.editor.text.len(),
             "highlighted": state.editor.highlighted(),
+            "errorLine": error_line,
+            "underline": state.editor.underline.as_ref().map(|r| [r.start, r.end]),
         });
-        tags.tag_value(EDITOR, &out.response, value);
+        // The editor is its whole area.
+        let mut whole = out.response.clone();
+        whole.rect = editor_rect;
+        whole.interact_rect = editor_rect.intersect(ui.clip_rect());
+        tags.tag_value(EDITOR, &whole, value);
         view.query_cursor = Some(out.cursor);
         if out.changed {
             set_text = Some(state.editor.text.clone());
         }
-        // The toolbar.
-        let bar_rect = Rect::from_min_size(pos2(full.left(), split_rect.bottom()), vec2(full.width(), TOOLBAR_H));
-        let mut bar =
-            ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
-        bar.spacing_mut().item_spacing.x = 6.0;
+        // The split's line, then the run row under it.
+        let line = Rect::from_min_size(pos2(body.left(), editor_rect.bottom()), vec2(body.width(), BAR_LINE));
+        ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+        let row_rect = Rect::from_min_size(pos2(body.left(), line.bottom()), vec2(body.width(), BAR_H));
+        let mut row_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-run-row", id.0)).max_rect(row_rect).layout(Layout::top_down(Align::Min)));
+        row_ui.set_clip_rect(clip);
         let running = q.running.is_some();
-        if let Some(c) = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()) {
-            let chip = Chip {
-                database: c.starts_in(q),
-                choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
-                word: c.dialect.schema_word(),
-                why_not: can_set_database(session)
-                    .err()
-                    .or_else(|| running.then(|| "the tab's query is running".to_owned()))
-                    .or_else(|| run_blocked.clone()),
-            };
-            if let Some(name) = database_chip(&mut bar, tags, &chip) {
-                runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
-            }
-        }
-        let why_not = run_blocked.as_deref();
-        if tool_button(&mut bar, tags, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not), true) {
-            runs.push((QUERY_RUN, json!({})));
-        }
-        let current = ("Run the statement under the cursor (Ctrl+Shift+Enter)", why_not);
-        if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", current, false) {
-            runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor })));
-        }
-        let stop = ("Stop the running statement", (!running).then_some("nothing is running"));
-        if tool_button(&mut bar, tags, CANCEL, "Cancel", stop, false) {
-            runs.push(("query.cancel", json!({})));
-        }
-        let shown = q.shown_result();
-        let summary = shown.filter(|o| !o.result.columns.is_empty()).map(|o| (rows_text(&o.result), !o.result.complete));
-        // The summary's own width at the right, measured as it is drawn.
-        let right_room = summary.as_ref().map_or(0.0, |(text, _)| {
-            let font = FontId::proportional(12.5);
-            bar.painter().layout_no_wrap(text.clone(), font, t.text).size().x + 16.0
+        let chip = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()).map(|c| Chip {
+            database: c.starts_in(q),
+            choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
+            word: c.dialect.schema_word(),
+            why_not: can_set_database(session)
+                .err()
+                .or_else(|| running.then(|| "the tab's query is running".to_owned()))
+                .or_else(|| run_blocked.clone()),
         });
-        if running {
-            let spinner = bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
-            let words = RichText::new("Running…").size(12.5).color(t.text_muted);
-            let words_w = bar.painter().layout_no_wrap("Running…".to_owned(), FontId::proportional(12.5), t.text_muted).size().x;
-            let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;
-            if q.results.len() < 2 || bar_rect.right() - right_room - after >= MORE_W + result_width(q.results.len()) {
-                bar.label(words);
-            } else {
-                spinner.on_hover_text("Running…");
+        let mut chosen = None;
+        let run_row = RunRow { running: past, cancel: past, run_current: true, can_run: run_blocked.is_none(), lead: chip.as_ref().map(|_| CHIP_W) };
+        let row = run_row.show_with(&mut row_ui, |ui, width| {
+            if let Some(chip) = &chip {
+                chosen = database_chip(ui, tags, chip, width);
             }
+        });
+        if let Some(name) = chosen {
+            runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
         }
-        // The selector between the buttons and the summary, kept within its room.
-        let left = bar.cursor().min.x + 10.0;
-        let right = (bar_rect.right() - right_room).max(left);
-        if q.results.len() > 1 && right > left {
-            let room = Rect::from_min_max(pos2(left, bar_rect.top()), pos2(right, bar_rect.bottom()));
-            let mut sel =
-                bar.new_child(UiBuilder::new().id_salt(("dbee-query-selector", id.0)).max_rect(room).layout(Layout::left_to_right(Align::Center)));
-            sel.set_clip_rect(room.intersect(bar.clip_rect()));
-            sel.spacing_mut().item_spacing.x = 4.0;
-            if let Some(index) = selector(&mut sel, tags, &q.results, q.shown, room.width()) {
-                runs.push(("query.showResult", json!({ "index": index })));
+        let why_not = run_blocked.as_deref().or(past.then_some("the tab's query is running"));
+        tag_run_button(tags, &row.run, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not));
+        if let Some(r) = &row.run_current {
+            tag_run_button(tags, r, RUN_CURRENT, "Run current", ("Run the statement under the cursor (Ctrl+Shift+Enter)", why_not));
+        }
+        if let Some(r) = &row.cancel {
+            tag_run_button(tags, r, CANCEL, "Cancel", ("Stop the running statement", None));
+        }
+        match row.asked {
+            Some(RunAsked::Run) => runs.push((QUERY_RUN, json!({}))),
+            Some(RunAsked::RunCurrent) => runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor }))),
+            Some(RunAsked::Cancel) => runs.push(("query.cancel", json!({}))),
+            None => {}
+        }
+        // The grip on the split's line, over what is under it.
+        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.line };
+        let c = split_rect.center();
+        ui.painter().line_segment([pos2(c.x - 18.0, c.y), pos2(c.x + 18.0, c.y)], Stroke::new(2.0, grip));
+        // The result bar, once there is something to say.
+        let shown = q.shown_result();
+        state.results.follow(&q.results, &q.text, session.state().dialect(Which::Tab(id)));
+        let mut results_top = row_rect.bottom();
+        // The results column: the result bar, the band and the grid, with the value panel at its
+        // right from the bar's top while there is a bar.
+        let mut right = body.right();
+        // The panel gives way before the results do: with no room beside them, its toggle is off.
+        let narrow = open && !value_panel::has_room(body.width());
+        if let Some(says) = run_state(q, elapsed) {
+            panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), row_rect.bottom()), body.max));
+            right = panel.map_or(right, |p| p.left);
+            let bar_rect = Rect::from_min_max(pos2(body.left(), row_rect.bottom()), pos2(right, row_rect.bottom() + BAR_H));
+            let mut bar_ui =
+                ui.new_child(UiBuilder::new().id_salt(("dbee-query-result-bar", id.0)).max_rect(bar_rect).layout(Layout::top_down(Align::Min)));
+            bar_ui.set_clip_rect(bar_rect.intersect(clip));
+            match result_bar(&mut bar_ui, tags, q, &state.results.titles, (says, past, open, narrow)) {
+                Some(ResultAsked::Show(index)) => runs.push(("query.showResult", json!({ "index": index }))),
+                Some(ResultAsked::Value) => runs.push(("ui.toggleValuePanel", json!({}))),
+                None => {}
             }
+            results_top = bar_rect.bottom();
         }
-        if let Some((text, cut)) = &summary {
-            let at = Rect::from_min_max(pos2(right, bar_rect.top()), bar_rect.max);
-            let mut sum =
-                bar.new_child(UiBuilder::new().id_salt(("dbee-query-summary", id.0)).max_rect(at).layout(Layout::right_to_left(Align::Center)));
-            {
-                let ui = &mut sum;
-                let rich = if *cut {
-                    RichText::new(text.as_str()).size(12.5).strong().color(t.text)
-                } else {
-                    RichText::new(text.as_str()).size(12.5).color(t.text_muted)
-                };
-                let r = ui.add(Label::new(rich).selectable(false));
-                let r = if *cut { r.on_hover_text(cap_hover()) } else { r };
-                tags.tag_value(ROWS, &r, text.as_str());
-            }
-        }
-        ui.painter().line_segment([bar_rect.left_bottom(), bar_rect.right_bottom()], Stroke::new(1.0, t.border));
-        // The card, then the results.
-        let rest = Rect::from_min_max(pos2(full.left(), bar_rect.bottom() + 6.0), full.max);
+        // The band (none for dbee's own cancel: the bar says it), a hairline under it, then the
+        // results.
+        let rest = Rect::from_min_max(pos2(body.left(), results_top), pos2(right, body.bottom()));
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
-        if let Some(e) = &q.error {
+        rest_ui.set_clip_rect(rest.intersect(clip));
+        rest_ui.spacing_mut().item_spacing.y = 0.0;
+        if let Some(e) = q.error.as_ref().filter(|e| e.code != "cancelled") {
             let at = e.position.map(|p| state.editor.line_column_of(p));
-            if card(&mut rest_ui, tags, id, e, q.results.len(), at)
+            let failed = session
+                .state()
+                .connection(Which::Tab(id))
+                .and_then(|c| c.transaction())
+                .is_some_and(|tr| tr.state == dbee_engine::TransactionState::Failed);
+            let why = can_end(session, id).err().map(|why| format!("Roll back the transaction: not now, {why}"));
+            let rollback = failed.then(|| Action { label: "Rollback", enabled: why.is_none(), hover: why.as_deref().unwrap_or(ROLLBACK_HOVER) });
+            let asked = band(&mut rest_ui, tags, id, e, q.results.len(), at, rollback);
+            if asked.jump
                 && let Some(at) = e.position
             {
                 state.editor.jump_to(at);
                 ui.ctx().request_repaint();
             }
-            rest_ui.add_space(6.0);
+            if asked.rollback {
+                runs.push(("query.rollback", json!({ "tab": id })));
+            }
+            let (line, _) = rest_ui.allocate_exact_size(vec2(rest.width(), BAR_LINE), Sense::hover());
+            rest_ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
         }
-        state.results.follow(&q.results);
         match shown {
             Some(o) if !o.result.columns.is_empty() => {
                 let data: &ResultSet = &o.result;
@@ -1195,8 +1379,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     links: false,
                     first_number: 1,
                     editing: None,
+                    saved: 0.0,
+                    dimmed: false,
                 };
-                let area = rest_ui.available_rect_before_wrap().intersect(rest);
+                let below = rest_ui.available_rect_before_wrap().top().min(rest.bottom());
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(right, rest.bottom()));
                 let mut grid_ui = rest_ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
                 let mut spare = GridState::default();
                 let gs = state.results.grids.get_mut(q.shown).unwrap_or(&mut spare);
@@ -1205,42 +1392,41 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                         GridAct::Select { anchor, focus } => {
                             runs.push(("selection.set", json!({ "anchor": [anchor.0, anchor.1], "focus": [focus.0, focus.1] })));
                         }
+                        GridAct::SelectRows { first, last } => runs.push(("selection.rows", json!({ "first": first, "last": last }))),
                         GridAct::Copy(format) => runs.push(("clipboard.copy", json!({ "format": format }))),
                         // Read-only: no sorting, editing or links.
                         GridAct::Sort(_) | GridAct::Follow { .. } | GridAct::SetNull { .. } | GridAct::DeleteRows(_) | GridAct::Edit { .. } => {}
                     }
                 }
             }
-            Some(o) => {
-                let text = affected_text(o.result.rows_affected);
-                rest_ui.add_space(4.0);
-                let r = rest_ui.add(Label::new(RichText::new(text.as_str()).size(13.0).color(t.text)).selectable(false));
-                tags.tag_value(AFFECTED, &r, text.as_str());
-            }
-            // The toolbar says it runs.
-            None if running => {}
-            None if q.error.is_none() => {
-                rest_ui.add_space(rest.height() * 0.25);
-                rest_ui.vertical_centered(|ui| {
-                    let text = "Ctrl+Enter runs every statement in the editor; Ctrl+Shift+Enter runs only the one the cursor is in.";
-                    let r = ui.add(Label::new(RichText::new(text).color(t.text_muted)).wrap());
-                    tags.tag_value(HINT, &r, text);
-                });
-            }
-            None => {}
+            // A statement without rows: the result bar says what it did. Before the first run:
+            // nothing (the run row says how).
+            Some(_) | None => {}
         }
     }
     if let Some(text) = set_text
         && let Err(e) = app.run("query.setText", json!({ "text": text }))
     {
-        app.notice(crate::app::notice_text(&e));
+        app.notice(Kind::Error, crate::app::notice_text(&e));
     }
     for (command, params) in runs {
-        app.start(command, params, Origin::Menu);
+        let job = app.start(command, params, Origin::Menu);
+        // A run that ends before the next frame is still a new run for the underline.
+        if command == QUERY_RUN
+            && job.is_some()
+            && let Some(state) = app.view.work.queries.get_mut(&id)
+        {
+            state.last_run = job;
+        }
     }
+    // After the grid and what it asked for, so a cell selected in this frame shows its value now.
+    if let Some(placed) = panel {
+        value_panel::fill(app, ui, placed.contents);
+    }
+    panel.is_some()
 }
 
-/// A query run's error that the tab's card shows (`QueryTab::error`), so no notice repeats it:
+/// A query run's error that the tab's band shows (`QueryTab::error`), so no notice repeats it:
 /// the engine adds the failing statement to the data of each error it records on the tab.
 pub(crate) fn in_card(command: &str, result: &Result<Json, dbee_engine::EngineError>) -> bool {
     command == QUERY_RUN && matches!(result, Err(dbee_engine::EngineError::Db { data, .. }) if data.get("statement").is_some())
@@ -1280,6 +1466,38 @@ mod tests {
     }
 
     #[test]
+    fn the_error_token_is_the_name_the_position_falls_in() {
+        let pg = Dialect::Postgres;
+        let sql = "SELECT o.totl FROM shop.orders o -- note";
+        assert_eq!(error_token(pg, sql, 7), Some(7..13), "a dotted name whole");
+        assert_eq!(error_token(pg, sql, 9), Some(7..13), "from any part of it");
+        assert_eq!(error_token(pg, sql, 0), Some(0..6), "a keyword");
+        assert_eq!(error_token(pg, sql, 6), None, "whitespace");
+        assert_eq!(error_token(pg, sql, 36), None, "a comment");
+        assert_eq!(error_token(pg, sql, 400), None, "past the text");
+        assert_eq!(error_token(pg, "select 1/0", 8), Some(8..9), "an operator alone");
+        assert_eq!(error_token(pg, "", 0), None);
+    }
+
+    #[test]
+    fn result_titles_name_what_the_statement_works_on() {
+        let pg = Dialect::Postgres;
+        assert_eq!(result_title(pg, "SELECT 1"), "SELECT 1", "a short statement is its own title");
+        assert_eq!(result_title(pg, "select o.id from shop.orders o join shop.customers c on c.id = o.customer_id"), "select … orders");
+        assert_eq!(result_title(pg, "INSERT INTO \"Odd\".\"Name\" (a, b, c) VALUES (1, 2, 3)"), "INSERT … Name", "as written, quotes dropped");
+        assert_eq!(result_title(pg, "update shop.dealers set name = 'x' where id = 1"), "update … dealers");
+        assert_eq!(result_title(pg, "explain analyze select 1 + 2 as three, 4 as four"), "explain …", "no name: the first word");
+        assert_eq!(result_title(pg, "select 1\nfrom t"), "select … t", "a short statement on two lines is not its own title");
+        assert_eq!(result_title(pg, "SELECT * FROM shop.orders LIMIT 50"), "SELECT … orders");
+        assert_eq!(result_title(Dialect::MySql, "select * from `shop`.`order lines` where id > 100000"), "select … order lines");
+        // Never a panic.
+        for sql in ["", " ", "\0", "select\0 from \0", "from", "select * from", "select * from .", "\"", "insert into \"", "-- only a comment"] {
+            let _ = result_title(pg, sql);
+        }
+        assert_eq!(result_title(pg, ""), "");
+    }
+
+    #[test]
     fn byte_offsets_and_char_indices_convert_both_ways() {
         let text = "select 'é🐙', nope";
         let nope = text.find("nope").unwrap();
@@ -1301,6 +1519,50 @@ mod tests {
         ed.set_text("-- note\nselect 1;\nselect nope".into());
         assert_eq!(ed.line_column_of(3), (1, 4));
         assert_eq!(ed.line_column_of(25), (3, 8), "another text");
+    }
+
+    #[test]
+    fn the_gutter_draws_the_shared_line_numbers() {
+        // `components::editor::LineNumber` in the gutter: the cursor's line (1) in `text`, the
+        // error's line (2) in `danger`, the rest `text_muted`, in `code`, flush right in a box as
+        // wide as two `code` digits, 12 in from the editor's left; no line after the gutter.
+        for (theme, t) in crate::components::both() {
+            let mut ed = EditorState::new("select 1;\nselect nope;\nselect 3".into());
+            ed.jump_to(3);
+            let mut h = crate::components::harness_in(egui::vec2(500.0, 200.0), theme, (ed, Rect::NOTHING), |ui, (ed, at)| {
+                *at = ui.available_rect_before_wrap();
+                editor(ui, Id::new("gutter-test"), ed, Some(2));
+            });
+            h.run_steps(3);
+            let shapes = h.output().shapes.clone();
+            let at = h.state().1;
+            let vertical = crate::components::flat(&shapes)
+                .into_iter()
+                .any(|s| matches!(s, egui::Shape::LineSegment { points, stroke } if points[0].x == points[1].x && stroke.color == t.line));
+            assert!(!vertical, "{theme:?}: no line between the gutter and the text");
+            let digit = h.ctx.fonts_mut(|f| f.glyph_width(&Text::Code.font(), '0'));
+            let edge = at.left() + EDITOR_INSET + 2.0 * digit;
+            // The numbers, in the gutter (the text has a `1` of its own).
+            let seen: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(_, r, _)| r.right() <= edge + 0.5).collect();
+            let mut rights = Vec::new();
+            for (words, colour) in [("1", t.text), ("2", t.danger), ("3", t.text_muted)] {
+                let (_, r, c) = seen.iter().find(|(w, _, _)| w == words).unwrap_or_else(|| panic!("{theme:?}: line {words}: {seen:?}"));
+                assert_eq!(*c, colour, "{theme:?}: line {words}");
+                assert!((r.height() - Text::Code.line()).abs() < 0.5, "{theme:?}: line {words} in `code`'s 20: {r:?}");
+                rights.push(r.right());
+            }
+            let fonts: Vec<_> = crate::components::flat(&shapes)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(g) if g.pos.x < edge && ["1", "2", "3"].contains(&g.galley.text()) => {
+                        g.galley.job.sections.first().map(|s| s.format.font_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fonts, vec![Text::Code.font(); 3], "{theme:?}: the numbers in `code`");
+            assert!(rights.iter().all(|r| (r - edge).abs() < 0.5), "{theme:?}: flush right in the box ending at {edge}: {rights:?}");
+        }
     }
 
     #[test]
@@ -1478,14 +1740,14 @@ mod tests {
         ed.highlight.window = colour_window(0..60);
         let plain = Color32::BLACK;
         let note = text.find("# note").unwrap();
-        let job = ed.highlight.job(text, false, plain);
+        let job = ed.highlight.job(text, &crate::theme::LIGHT, plain);
         assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(Dialect::Postgres, text).as_slice());
         assert_eq!(colour_at(&job, note), (plain, false), "`#` is an operator on Postgres");
         for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Postgres] {
             ed.set_dialect(dialect);
-            let job = ed.highlight.job(text, false, plain);
+            let job = ed.highlight.job(text, &crate::theme::LIGHT, plain);
             assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(dialect, text).as_slice(), "{dialect:?}");
-            let comment = (crate::theme::SQL_LIGHT.comment, true);
+            let comment = (crate::theme::LIGHT.text_muted, true);
             assert_eq!(colour_at(&job, note) == comment, dialect == Dialect::MySql, "{dialect:?}: the job follows the dialect");
         }
     }
@@ -1516,7 +1778,7 @@ mod tests {
 
     #[test]
     fn only_the_lines_near_the_view_are_coloured() {
-        let syntax = crate::theme::SQL_LIGHT;
+        let syntax = &crate::theme::LIGHT;
         let plain = Color32::BLACK;
         let text = "select 1;\n".repeat(1000);
         let mut tokens = Tokens::default();
@@ -1524,8 +1786,8 @@ mod tests {
         let job = tokens.job(128..256, syntax, plain);
         let line = |n: usize| n * "select 1;\n".len();
         assert_eq!(colour_at(&job, line(0)), (plain, false), "before the window");
-        assert_eq!(colour_at(&job, line(128)), (syntax.keyword, false));
-        assert_eq!(colour_at(&job, line(255) + 7), (syntax.number, false));
+        assert_eq!(colour_at(&job, line(128)), (syntax.syn_keyword, false));
+        assert_eq!(colour_at(&job, line(255) + 7), (syntax.syn_number, false));
         assert_eq!(colour_at(&job, line(256)), (plain, false), "after the window");
         assert!(job.sections.len() < 2 * 128 * 3, "{} sections", job.sections.len());
         // The window moves in whole chunks: a few lines of scrolling keep it.
@@ -1536,45 +1798,22 @@ mod tests {
     }
 
     #[test]
-    fn the_selector_shows_the_results_around_the_shown_one_when_not_all_fit() {
-        let fit = |results: usize, shown: usize, room: f32| {
-            let f = selector_fit(results, shown, room, 50.0);
-            (f.label, f.from, f.to, f.more)
-        };
-        let room = |n: usize| 50.0 + MORE_W + n as f32 * result_width(100);
-        assert_eq!(fit(3, 2, 50.0 + 3.0 * result_width(3)), (true, 0, 3, false), "all fit, and the label");
-        assert_eq!(fit(100, 0, room(10)), (true, 0, 10, true));
-        assert_eq!(fit(100, 50, room(10)), (true, 45, 55, true));
-        assert_eq!(fit(100, 99, room(10)), (true, 90, 100, true));
-        // Short of room the label goes first, never cut; the `…` stays and lists them all.
-        assert_eq!(fit(3, 2, MORE_W + result_width(3)), (false, 2, 3, true));
-        assert_eq!(fit(3, 2, MORE_W + 2.0 * result_width(3)), (false, 1, 3, true));
-        assert_eq!(fit(3, 0, MORE_W + 1.0), (false, 0, 0, true), "room for the `…` alone");
-        assert_eq!(fit(100, 7, -5.0), (false, 7, 7, true));
-        assert_eq!(fit(100, 7, f32::NAN), (false, 7, 7, true));
-        assert_eq!(fit(0, 0, room(10)), (true, 0, 0, false));
-        // Longer numbers take more room.
-        assert!(result_width(3000) > result_width(30) && result_width(30) > result_width(3));
-        assert_eq!(fit(3000, 2999, 50.0 + MORE_W + 10.0 * result_width(3000)), (true, 2990, 3000, true));
-    }
-
-    #[test]
     fn highlighting_colours_tokens_and_covers_the_text() {
-        let syntax = crate::theme::SQL_LIGHT;
+        let syntax = &crate::theme::LIGHT;
         let plain = Color32::BLACK;
         let text = "SELECT a, \"Odd\" FROM t WHERE x = 'it''s' AND y > 4.5 -- why\n/* block */ $1";
         let job = highlight(text, syntax, plain);
         assert_eq!(job.text, text);
         let at = |needle: &str| colour_at(&job, text.find(needle).unwrap());
-        assert_eq!(at("SELECT"), (syntax.keyword, false));
-        assert_eq!(at("WHERE"), (syntax.keyword, false));
+        assert_eq!(at("SELECT"), (syntax.syn_keyword, false));
+        assert_eq!(at("WHERE"), (syntax.syn_keyword, false));
         assert_eq!(at("a,"), (plain, false));
-        assert_eq!(at("\"Odd\""), (syntax.quoted, false));
-        assert_eq!(at("'it"), (syntax.string, false));
-        assert_eq!(at("4.5"), (syntax.number, false));
-        assert_eq!(at("-- why"), (syntax.comment, true));
-        assert_eq!(at("/* block"), (syntax.comment, true));
-        assert_eq!(at("$1"), (syntax.number, false));
+        assert_eq!(at("\"Odd\""), (syntax.syn_literal, false));
+        assert_eq!(at("'it"), (syntax.syn_string, false));
+        assert_eq!(at("4.5"), (syntax.syn_number, false));
+        assert_eq!(at("-- why"), (syntax.text_muted, true));
+        assert_eq!(at("/* block"), (syntax.text_muted, true));
+        assert_eq!(at("$1"), (syntax.syn_number, false));
         // Contiguous sections over the whole text, none empty, no two alike side by side.
         let mut end = 0;
         for pair in job.sections.windows(2) {

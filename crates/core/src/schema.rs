@@ -143,6 +143,131 @@ pub struct ForeignKey {
     pub target_columns: Vec<String>,
 }
 
+/// One part of an index, in index order: a column, or an expression as the engine writes it out
+/// (`lower(email)`). SQLite names no expression when it cannot be read from the index's
+/// statement: then both are `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexPart {
+    pub column: Option<String>,
+    pub expression: Option<String>,
+    pub descending: bool,
+}
+
+/// An index of a table, as the structure view lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexInfo {
+    pub name: String,
+    pub parts: Vec<IndexPart>,
+    pub unique: bool,
+    /// The index of the primary key.
+    pub primary: bool,
+    /// The access method or kind as the engine names it (Postgres `btree`, `gin`; MySQL `BTREE`,
+    /// `FULLTEXT`); `None` where the engine has one kind (SQLite).
+    pub method: Option<String>,
+    /// A partial index's condition, as the engine writes it out.
+    pub predicate: Option<String>,
+}
+
+/// When a trigger fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// What fires a trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+/// A trigger on a table, as the structure view lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerInfo {
+    pub name: String,
+    /// `None` when the engine's text could not be read for it.
+    pub timing: Option<TriggerTiming>,
+    /// In the order insert, update, delete, truncate.
+    pub events: Vec<TriggerEvent>,
+    /// Once for each row (`true`) or once for each statement; `None` when unknown.
+    pub for_each_row: Option<bool>,
+    /// The trigger as the engine gives it: Postgres's `CREATE TRIGGER` statement, SQLite's, and
+    /// MySQL's and MariaDB's action (the body after `FOR EACH ROW`).
+    pub definition: String,
+}
+
+/// What a foreign key does when the row it references is deleted or its key updated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FkAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+/// A column's default as the structure view writes it: the server's text (`'pending'::text`,
+/// `now()`), or a dbee word where dbee names it (`identity`, `auto_increment`, `generated`, or
+/// `generated always as (…)`). `None` when the column has none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnDefault {
+    pub column: String,
+    pub default: Option<String>,
+}
+
+/// A foreign key's actions, named by its columns (in key order) and the table it references, as
+/// the catalog's [`ForeignKey`] is. `None` when the engine's word was not one dbee knows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyActions {
+    pub columns: Vec<String>,
+    pub target: TableRef,
+    pub on_delete: Option<FkAction>,
+    pub on_update: Option<FkAction>,
+}
+
+/// What a table's structure adds to the catalog: its indexes, triggers, column defaults and
+/// foreign key actions, read when asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStructure {
+    /// The primary key's index first, then by name.
+    pub indexes: Vec<IndexInfo>,
+    /// By name.
+    pub triggers: Vec<TriggerInfo>,
+    /// In column order; a column without a default may have no entry.
+    #[serde(default)]
+    pub defaults: Vec<ColumnDefault>,
+    /// One per foreign key the engine reports.
+    #[serde(default)]
+    pub actions: Vec<ForeignKeyActions>,
+}
+
+impl TableStructure {
+    /// The actions of the foreign key on `columns` that points at `schema.name`: the key whose
+    /// target is spelled the same, else one spelled the same ignoring ASCII case (SQLite keeps a
+    /// key's REFERENCES as written, the catalog the table's own name).
+    pub fn actions_of(&self, columns: &[&str], schema: &str, name: &str) -> Option<&ForeignKeyActions> {
+        let same = |a: &&ForeignKeyActions| a.columns.iter().map(String::as_str).eq(columns.iter().copied()) && a.target.schema == schema;
+        self.actions
+            .iter()
+            .filter(same)
+            .find(|a| a.target.name == name)
+            .or_else(|| self.actions.iter().filter(same).find(|a| a.target.name.eq_ignore_ascii_case(name)))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableInfo {
@@ -254,6 +379,13 @@ impl Catalog {
 
     pub fn table_count(&self) -> usize {
         self.schemas.iter().map(|s| s.tables.len()).sum()
+    }
+
+    /// The foreign keys of every table that reference `t`, with the table each belongs to: tables
+    /// in catalog order, each table's keys in its order. A table that references itself is listed.
+    pub fn referenced_by(&self, t: &TableRef) -> Vec<(&TableRef, &ForeignKey)> {
+        let tables = self.schemas.iter().flat_map(|s| s.tables.iter());
+        tables.flat_map(|info| info.foreign_keys.iter().filter(|fk| fk.target == *t).map(move |fk| (&info.table, fk))).collect()
     }
 }
 
@@ -429,6 +561,73 @@ mod tests {
         let j = serde_json::to_value(&t).unwrap();
         assert!(j.get("primaryKey").is_some() && j["kind"] == "table");
         assert_eq!(serde_json::from_value::<TableInfo>(j).unwrap(), t);
+    }
+
+    #[test]
+    fn referenced_by_lists_every_key_that_points_at_the_table() {
+        let fk = |name: &str, target: &str| ForeignKey {
+            name: name.into(),
+            columns: vec!["id".into()],
+            target: TableRef { schema: "shop".into(), name: target.into() },
+            target_columns: vec!["id".into()],
+        };
+        let mut orders = table("shop", "orders");
+        orders.foreign_keys = vec![fk("orders_user", "users"), fk("orders_item", "items")];
+        let mut users = table("shop", "users");
+        users.foreign_keys = vec![fk("users_parent", "users")];
+        let mut elsewhere = table("other", "users");
+        elsewhere.foreign_keys = vec![fk("other_user", "users")];
+        let cat = Catalog {
+            schemas: vec![
+                SchemaInfo { name: "other".into(), system: false, tables: vec![elsewhere] },
+                SchemaInfo { name: "shop".into(), system: false, tables: vec![orders, users] },
+            ],
+            default_schema: None,
+        };
+        let users = TableRef { schema: "shop".into(), name: "users".into() };
+        let found: Vec<(String, &str)> = cat.referenced_by(&users).into_iter().map(|(t, fk)| (t.display(), fk.name.as_str())).collect();
+        assert_eq!(found, [("other.users".to_string(), "other_user"), ("shop.orders".into(), "orders_user"), ("shop.users".into(), "users_parent")]);
+        assert!(cat.referenced_by(&TableRef { schema: "shop".into(), name: "nobody".into() }).is_empty());
+    }
+
+    #[test]
+    fn structure_serializes_in_camel_case() {
+        let s = TableStructure {
+            indexes: vec![IndexInfo {
+                name: "i".into(),
+                parts: vec![IndexPart { column: None, expression: Some("lower(a)".into()), descending: true }],
+                unique: true,
+                primary: false,
+                method: Some("btree".into()),
+                predicate: Some("a IS NOT NULL".into()),
+            }],
+            triggers: vec![TriggerInfo {
+                name: "t".into(),
+                timing: Some(TriggerTiming::InsteadOf),
+                events: vec![TriggerEvent::Insert, TriggerEvent::Truncate],
+                for_each_row: Some(false),
+                definition: "CREATE TRIGGER t".into(),
+            }],
+            defaults: vec![ColumnDefault { column: "a".into(), default: Some("now()".into()) }],
+            actions: vec![ForeignKeyActions {
+                columns: vec!["a".into()],
+                target: TableRef { schema: "s".into(), name: "p".into() },
+                on_delete: Some(FkAction::SetNull),
+                on_update: None,
+            }],
+        };
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["triggers"][0]["timing"], "insteadOf");
+        assert_eq!(j["defaults"][0], serde_json::json!({ "column": "a", "default": "now()" }));
+        assert_eq!(j["actions"][0]["onDelete"], "setNull");
+        assert_eq!(j["actions"][0]["onUpdate"], serde_json::Value::Null);
+        assert_eq!(serde_json::json!(FkAction::NoAction), "noAction");
+        let old: TableStructure = serde_json::from_value(serde_json::json!({ "indexes": [], "triggers": [] })).unwrap();
+        assert!(old.defaults.is_empty() && old.actions.is_empty());
+        assert_eq!(j["triggers"][0]["events"], serde_json::json!(["insert", "truncate"]));
+        assert_eq!(j["triggers"][0]["forEachRow"], false);
+        assert_eq!(j["indexes"][0]["parts"][0]["expression"], "lower(a)");
+        assert_eq!(serde_json::from_value::<TableStructure>(j).unwrap(), s);
     }
 
     #[test]

@@ -88,7 +88,7 @@ fn shortcut_table_names_registered_commands() {
         assert!(params.is_object(), "{keys}: params must be an object");
         assert!(shortcuts::parse(keys).is_some(), "{keys} does not parse");
     }
-    for id in ["ui.quickSearch", "ui.toggleValuePanel", "clipboard.copy"] {
+    for id in ["ui.quickSearch", "ui.toggleValuePanel", "ui.themeSystem", "ui.themeLight", "ui.themeDark", "clipboard.copy"] {
         assert!(ids.contains(id), "engine.commands lists the UI-only command {id}");
     }
     // Every shortcut a menu shows has a binding with the same keys.
@@ -179,4 +179,25 @@ fn input_methods_check_their_params() {
     assert_eq!(ui.call("ui.click", json!({ "x": 10.0, "y": 10.0, "button": "middle", "count": 2 }))["ok"], true);
     assert_eq!(ui.call("ui.click", json!({ "id": "conn-new", "count": 1_000_000 }))["code"], "badParams");
     assert_eq!(ui.call("ui.text", json!({ "text": "typed nowhere" }))["ok"], true);
+}
+
+/// `ui.focus {id}` gives a widget the keyboard without a click: Space then presses the saved
+/// connection's card, which shows its form as a click does. A widget not drawn, or one that cannot
+/// take the keyboard (a label), is `notFound`.
+#[test]
+fn focus_gives_a_widget_the_keyboard_without_a_click() {
+    let mut ui = ui();
+    let config = json!({ "name": "Focused", "host": "127.0.0.1", "port": 1, "user": "postgres", "database": "dbee" });
+    let id = ui.execute("connection.save", json!({ "config": config }))["id"].as_str().unwrap().to_string();
+    let card = format!("conn-saved-{id}");
+    ui.until("the card", |ui| ui.tag(&card).is_some());
+    assert_eq!(ui.ok("ui.focus", json!({ "id": card })), json!({}));
+    ui.key("Space");
+    ui.until("the card's form", |ui| ui.tag("conn-name").is_some_and(|t| t["value"] == "Focused"));
+    assert_eq!(ui.document()["screen"], "connections", "a press shows the form, it connects nowhere");
+    for (id, why) in [("nothing-here", "not drawn"), ("conn-version", "a label")] {
+        let r = ui.call("ui.focus", json!({ "id": id }));
+        assert_eq!(r["code"], "notFound", "{why}: {r}");
+    }
+    assert_eq!(ui.call("ui.focus", json!({}))["code"], "badParams");
 }

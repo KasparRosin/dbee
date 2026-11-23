@@ -23,6 +23,7 @@ pub mod connect;
 pub mod driver;
 mod errors;
 mod query;
+mod structure;
 mod values;
 
 pub use connect::{BUSY_TIMEOUT, Canceller, SqliteConnection, connect};

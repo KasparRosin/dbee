@@ -59,6 +59,7 @@ const METHODS: &[&str] = &[
     "document.inspect",
     "ui.inspect",
     "ui.click",
+    "ui.focus",
     "ui.key",
     "ui.text",
     "ui.screenshot",
@@ -263,6 +264,7 @@ fn dispatch(app: &mut DbeeApp, ctx: &egui::Context, method: &str, params: Json) 
         "document.inspect" => Handled::Now(ok(document(app))),
         "ui.inspect" => Handled::Now(ok(ui_inspect(app, ctx))),
         "ui.click" => click(app, &params),
+        "ui.focus" => Handled::Now(focus(app, ctx, &params)),
         "ui.key" => key(app, &params),
         "ui.text" => match params.get("text") {
             Some(Json::String(t)) => input(app, vec![vec![Event::Text(t.clone())]], json!({})),
@@ -337,7 +339,7 @@ fn document(app: &DbeeApp) -> Json {
     d
 }
 
-/// `{screen, dialog, window: [width, height], frame, editor, automation: [{id, rect, …}]}`;
+/// `{screen, dialog, window: [width, height], frame, editor, theme: {choice, mode}, automation: [{id, rect, …}]}`;
 /// `frame` counts the frames drawn so far, `editor` is the open cell editor's `{row, column}` (also
 /// while it is not drawn) or null, `automation` is the last drawn frame's tags
 /// ([`crate::automation::Tags::to_json`]).
@@ -349,6 +351,7 @@ fn ui_inspect(app: &DbeeApp, ctx: &egui::Context) -> Json {
         "window": [r.width(), r.height()],
         "frame": app.frames(),
         "editor": app.view.work.editor.as_ref().map(|e| e.tag_cell()),
+        "theme": { "choice": app.theme_choice.as_str(), "mode": if app.mode() == egui::Theme::Dark { "dark" } else { "light" } },
         "automation": app.tags.to_json(),
     })
 }
@@ -492,6 +495,27 @@ fn click(app: &mut DbeeApp, p: &Json) -> Handled {
     // The pointer moves first, so the widget under it is hovered when the button goes down.
     let batches = with_modifiers(m, vec![vec![Event::PointerMoved(pos)], presses]);
     input(app, batches, json!({ "x": pos.x, "y": pos.y }))
+}
+
+/// `ui.focus {id}`: gives the keyboard to widget `id`, drawn in view in the last frame, as Tab
+/// would, without a click (which egui would count towards a double or triple click).
+fn focus(app: &DbeeApp, ctx: &egui::Context, p: &Json) -> Json {
+    let id = match p.get("id") {
+        Some(Json::String(id)) => id,
+        _ => return bad("`id` is required (a string)"),
+    };
+    match app.tags.focusable(id) {
+        Some(widget) => {
+            ctx.memory_mut(|m| m.request_focus(widget));
+            ctx.request_repaint();
+            ok(json!({}))
+        }
+        None => error(
+            "notFound",
+            format!("no widget `{}` that can take the keyboard was drawn in view in the last frame (see ui.inspect)", shown(id)),
+            json!({ "id": shown(id) }),
+        ),
+    }
 }
 
 /// A key by its egui name (`Enter`, `ArrowDown`, `A`, `F2`), ignoring case, or a common alias
@@ -688,7 +712,7 @@ pub(crate) fn answer_deferred(
         && now >= at
     {
         app.quit = None;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        app.close_window(ctx);
     }
     let mut waiting = Vec::new();
     for mut d in std::mem::take(&mut app.deferred) {

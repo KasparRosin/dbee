@@ -2,7 +2,8 @@
 //!
 //! [`render_within`] renders cells it reads one at a time ([`Cells`]) into at most a budget of
 //! bytes, counting everything it writes (separators, quotes, escapes, `NULL`, column names), and
-//! gives up as soon as the next write would pass it.
+//! gives up as soon as the next write would pass it. [`row_json`] writes one row's JSON object,
+//! keeping its start up to a length and counting the rest.
 
 use std::convert::Infallible;
 
@@ -138,7 +139,7 @@ pub fn render_within<C: Cells + ?Sized>(format: CopyFormat, columns: &[Column], 
     }
     let names = columns.iter().fold(0usize, |n, c| n.saturating_add(c.name.len()).saturating_add(3));
     let guess = bytes.saturating_add(count.saturating_mul(3)).saturating_add(names);
-    let mut out = Out { text: String::with_capacity(guess.min(budget).min(MAX_RESERVE)), budget, rows: 0 };
+    let mut out = Out::new(budget, guess.min(budget).min(MAX_RESERVE));
     let done = match format {
         CopyFormat::Tsv => delimited(&mut out, columns, cells, false, push_tsv, b'\t'),
         CopyFormat::TsvWithHeader => delimited(&mut out, columns, cells, true, push_tsv, b'\t'),
@@ -164,15 +165,46 @@ struct Out {
     budget: usize,
     /// The rows written whole so far, and with room left for the text's end.
     rows: usize,
+    /// What a write past the budget does: with `None` it is refused ([`Over`]); with `Some`, the
+    /// text keeps its start up to the budget, cut on a character boundary, and ends there, and
+    /// this counts the bytes the rest would have taken ([`row_json`]).
+    past: Option<usize>,
 }
 
 /// A write would have passed the budget; nothing of it was written.
 struct Over;
 
 impl Out {
+    /// A text refused once it would pass `budget`.
+    fn new(budget: usize, reserve: usize) -> Out {
+        Out { text: String::with_capacity(reserve), budget, rows: 0, past: None }
+    }
+
+    /// Room left before the budget.
+    fn room(&self) -> usize {
+        self.budget.saturating_sub(self.text.len())
+    }
+
+    /// `n` bytes did not fit: refused, or counted, and the text ends where it is.
+    fn count_past(&mut self, n: usize) -> Result<(), Over> {
+        let past = self.past.as_mut().ok_or(Over)?;
+        *past = past.saturating_add(n);
+        self.budget = self.text.len();
+        Ok(())
+    }
+
     fn push_str(&mut self, s: &str) -> Result<(), Over> {
-        if s.len() > self.budget.saturating_sub(self.text.len()) {
-            return Err(Over);
+        let room = self.room();
+        if s.len() > room {
+            if self.past.is_none() {
+                return Err(Over);
+            }
+            let mut end = room;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.text.push_str(s.get(..end).unwrap_or_default());
+            return self.count_past(s.len() - end);
         }
         self.text.push_str(s);
         Ok(())
@@ -181,7 +213,7 @@ impl Out {
     /// An ASCII byte.
     fn push_byte(&mut self, b: u8) -> Result<(), Over> {
         if self.text.len() >= self.budget {
-            return Err(Over);
+            return self.count_past(1);
         }
         self.text.push(char::from(b));
         Ok(())
@@ -189,9 +221,20 @@ impl Out {
 
     /// The ASCII byte `b`, `n` times.
     fn push_repeated(&mut self, b: u8, n: usize) -> Result<(), Over> {
-        if n > self.budget.saturating_sub(self.text.len()) {
-            return Err(Over);
+        let room = self.room();
+        if n > room {
+            if self.past.is_none() {
+                return Err(Over);
+            }
+            self.repeat(b, room);
+            return self.count_past(n - room);
         }
+        self.repeat(b, n);
+        Ok(())
+    }
+
+    /// The ASCII byte `b`, `n` times, whatever the budget.
+    fn repeat(&mut self, b: u8, n: usize) {
         // In pieces of a run of 64, which costs far less than a character at a time.
         let run = [b; 64];
         match std::str::from_utf8(&run) {
@@ -205,7 +248,6 @@ impl Out {
             }
             Err(_) => self.text.extend(std::iter::repeat_n(char::from(b), n)),
         }
-        Ok(())
     }
 
     /// A row was written whole: it counts as fitting when the text's last `trailer` bytes (JSON's
@@ -283,40 +325,63 @@ fn json<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], cells: &C) -> Resu
     if cells.rows() == 0 {
         return out.push_str("[]");
     }
-    // Each name as a JSON string, once.
-    let names: Vec<String> = columns.iter().map(|c| json_string(&c.name)).collect();
+    let names = json_names(columns);
     out.push_str("[\n")?;
     for row in 0..cells.rows() {
         if row > 0 {
             out.push_str(",\n")?;
         }
-        out.push_str("  {")?;
-        // Every column: the row's cells, then NULL for those a short row lacks.
-        let mut fields = columns.iter().zip(&names);
-        let field = |out: &mut Out, first: bool, (c, name): (&Column, &String), v: Option<&str>| {
-            if !first {
-                out.push_str(", ")?;
-            }
-            out.push_str(name)?;
-            out.push_str(": ")?;
-            push_json_value(out, c.class, v)
-        };
-        let mut i = 0usize;
-        cells.each(row, |v| {
-            if let Some(f) = fields.next() {
-                field(out, i == 0, f, v)?;
-                i += 1;
-            }
-            Ok(())
-        })?;
-        for f in fields {
-            field(out, i == 0, f, None)?;
-            i += 1;
-        }
-        out.push_byte(b'}')?;
+        out.push_str("  ")?;
+        json_object(out, columns, &names, cells, row)?;
         out.row_done(2);
     }
     out.push_str("\n]")
+}
+
+/// Each column's name as a JSON string, made once for all the rows.
+fn json_names(columns: &[Column]) -> Vec<String> {
+    columns.iter().map(|c| json_string(&c.name)).collect()
+}
+
+/// Row `row` as a JSON object on one line: every column, the row's cells, then NULL for those a
+/// short row lacks.
+fn json_object<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], names: &[String], cells: &C, row: usize) -> Result<(), Over> {
+    out.push_byte(b'{')?;
+    let mut fields = columns.iter().zip(names);
+    let field = |out: &mut Out, first: bool, (c, name): (&Column, &String), v: Option<&str>| {
+        if !first {
+            out.push_str(", ")?;
+        }
+        out.push_str(name)?;
+        out.push_str(": ")?;
+        push_json_value(out, c.class, v)
+    };
+    let mut i = 0usize;
+    cells.each(row, |v| {
+        if let Some(f) = fields.next() {
+            field(out, i == 0, f, v)?;
+            i += 1;
+        }
+        Ok(())
+    })?;
+    for f in fields {
+        field(out, i == 0, f, None)?;
+        i += 1;
+    }
+    out.push_byte(b'}')
+}
+
+/// Row `row` of `cells` as the object [`CopyFormat::Json`] writes for it (`{"id": 1, "name":
+/// "Ann"}`), without the list around it: the text's first `max` bytes at most, cut on a character
+/// boundary, and the whole text's length. Past `max` nothing more is kept, but every cell is still
+/// read, to count it. A cell the row lacks is null, as in a copy.
+pub fn row_json<C: Cells + ?Sized>(columns: &[Column], cells: &C, row: usize, max: usize) -> (String, usize) {
+    let mut out = Out::new(max, 0);
+    out.past = Some(0);
+    // Never `Over`: what does not fit is counted.
+    let _ = json_object(&mut out, columns, &json_names(columns), cells, row);
+    let len = out.text.len().saturating_add(out.past.unwrap_or(0));
+    (out.text, len)
 }
 
 fn json_string(s: &str) -> String {
@@ -482,6 +547,27 @@ mod tests {
     fn markdown_nulls_and_pipes() {
         let r = render(CopyFormat::Markdown, &cols(), &[vec![Some("1"), Some("a|b\nc"), None, Some("")]]);
         assert_eq!(r, "| id | name | billing | note |\n|---|---|---|---|\n| 1 | a\\|b<br>c | NULL |  |");
+    }
+
+    /// One row is the object Copy as JSON writes for it; cut at any length, its start up to a
+    /// character boundary, with the whole text's length.
+    #[test]
+    fn one_row_as_an_object_cut_anywhere() {
+        let rows = vec![vec![Some("1"), Some("Ann\t\"é\" 🐙"), Some(r#"{"a":1}"#), None]];
+        let list = render(CopyFormat::Json, &cols(), &rows);
+        let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]")).unwrap();
+        for max in 0..=object.len() + 2 {
+            let mut end = max.min(object.len());
+            while !object.is_char_boundary(end) {
+                end -= 1;
+            }
+            assert_eq!(row_json(&cols(), rows.as_slice(), 0, max), (object[..end].to_string(), object.len()), "cut at {max}");
+        }
+        // A short row's missing cells are null, and so is every cell of a row there is not.
+        let short = [vec![Some("2")]];
+        assert_eq!(row_json(&cols(), short.as_slice(), 0, usize::MAX).0, r#"{"id": 2, "name": null, "billing": null, "note": null}"#);
+        assert_eq!(row_json(&cols(), short.as_slice(), 5, usize::MAX).0, r#"{"id": null, "name": null, "billing": null, "note": null}"#);
+        assert_eq!(row_json(&[], short.as_slice(), 0, usize::MAX), ("{}".to_string(), 2));
     }
 
     #[test]
@@ -739,7 +825,7 @@ mod tests {
     fn long_strings_escape_in_pieces_as_a_whole() {
         // Pieces end where a character does, wherever a two-byte one falls.
         for text in [format!("a{}", "é".repeat(40_000)), format!("{}\u{1}\"x\n", "é\\".repeat(30_000)), "\u{1}".repeat(ESCAPE_CHUNK + 3)] {
-            let mut out = Out { text: String::new(), budget: usize::MAX, rows: 0 };
+            let mut out = Out::new(usize::MAX, 0);
             assert!(push_json_string(&mut out, &text).is_ok());
             assert_eq!(out.text, json_string(&text));
         }

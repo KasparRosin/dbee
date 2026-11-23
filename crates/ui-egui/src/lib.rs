@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod automation;
+pub mod components;
 pub mod conn_form;
 pub mod connections;
 pub mod control;
@@ -13,13 +14,14 @@ pub mod dialogs;
 pub mod editors;
 pub mod filter_bar;
 pub mod grid;
-pub mod icons;
 pub mod menu;
 pub mod paging;
 pub mod picker;
 pub mod query_tab;
 pub mod quick_search;
+pub(crate) mod quiet;
 pub mod shortcuts;
+pub mod structure_view;
 pub mod table_tab;
 pub mod theme;
 pub mod tree;

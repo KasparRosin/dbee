@@ -1,6 +1,6 @@
 //! The control channel's guards (`docs/control-protocol.md`) from a client's side, with the
 //! driver the day tests share: the first test needs no window, and the second drives the real app
-//! on a throwaway home, by hand, as the days do.
+//! on a throwaway home, by hand or in the CI workflow, as the days do.
 //!
 //! Safety: the app gets an isolated run's environment (`common`), and nothing here connects to
 //! anything but a stand-in on `127.0.0.1` and that app.

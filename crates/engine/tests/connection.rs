@@ -9,14 +9,17 @@
 
 mod common;
 
+use std::io::{Read as _, Write as _};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
-use dbee_driver::Drivers;
-use dbee_engine::{EngineError, Json, Outcome, Session, UiRequest, Which};
+use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, SecretError, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
+use dbee_driver::{Connection, DbError, DbFuture, Driver, Drivers, Target};
+use dbee_engine::{EngineError, JobId, Json, Outcome, Session, UiRequest, Which};
 use dbee_testkit::{TestTarget, require_testdb, temp_home, unique};
 use serde_json::json;
 
@@ -522,10 +525,16 @@ fn save_password_on_open_while_another_dbee_holds_the_file() {
     let lock = s.home.home.join("config").join(dbee_config::store::LOCK_FILE);
     let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
     other.lock().unwrap();
+    let start = Instant::now();
     let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    let took = start.elapsed();
     other.unlock().unwrap();
     assert_eq!((&r["secretsSaved"], &r["secretsNote"]), (&json!(false), &json!("another dbee window was changing the connections file")), "{r}");
     assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None);
+    // One wait for the file; the recent list, in the same file, says it once and waits no more.
+    assert!(took < Duration::from_secs(8), "one wait of 5 s for the file, not two: {took:?}");
+    let notices = notices(&mut s);
+    assert_eq!(notices.len(), 1, "one notice: {notices:?}");
 }
 
 #[test]
@@ -569,6 +578,76 @@ fn save_password_on_open_of_an_ad_hoc_config_stores_nothing() {
         let plain = open_or_err_after_close(&mut s, json!({ "id": id }));
         assert_eq!(plain.code(), "needsPassword", "the recent entry has no stored password: {plain}");
     }
+}
+
+/// `connection.open {save: true}` saves the connection once the open has succeeded, and a failed
+/// open saves nothing.
+#[test]
+fn an_open_with_save_saves_only_when_it_succeeds() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let r = open(&mut s, json!({ "config": pg14_config(), "password": pw(), "save": true }));
+    assert_eq!(r["connection"]["saved"], true, "{r}");
+    let list = run(&mut s, "connection.list", json!({}));
+    let saved = list["saved"].as_array().unwrap();
+    assert_eq!(saved.len(), 1, "{list}");
+    assert_eq!((&saved[0]["id"], &saved[0]["name"]), (&r["connection"]["id"], &json!("pg14")), "{list}");
+    assert_eq!(s.inspect()["connection"]["saved"], true);
+    assert!(r.get("savedNote").is_none(), "{r}");
+    let file: Json = serde_json::from_str(&std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap()).unwrap();
+    assert_eq!(file["saved"][0]["id"], r["connection"]["id"], "{file}");
+
+    let mut s = session();
+    let e = run_err(&mut s, "connection.open", json!({ "config": pg14_config(), "password": "not-the-password", "save": true }));
+    assert_eq!(e.code(), "auth", "{e}");
+    assert_eq!(run(&mut s, "connection.list", json!({}))["saved"], json!([]));
+}
+
+/// A cancelled open with `save` saves nothing.
+#[test]
+fn a_cancelled_open_with_save_saves_nothing() {
+    let _db = require_testdb!();
+    let host = Host::new(Answer::Nothing);
+    let mut s = session();
+    let job = started(&mut s, "connection.open", json!({ "config": at(&pg14_target(), &host), "password": pw(), "save": true }));
+    host.until("the connect", |seen| seen.taken == 1);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    ends_cancelled(&mut s, job, "the open");
+    nothing_open(&s, "the open");
+    assert_eq!(run(&mut s, "connection.list", json!({}))["saved"], json!([]));
+}
+
+/// While another dbee holds the connections file, the open stands and says the connection was not
+/// saved: once, after one wait for the file (the recent list, in the same file, waits no more).
+#[test]
+fn a_save_that_cannot_write_leaves_the_open_standing() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    let lock = s.home.home.join("config").join(dbee_config::store::LOCK_FILE);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
+    other.lock().unwrap();
+    let start = Instant::now();
+    let r = open(&mut s, json!({ "config": config_for(&t), "save": true }));
+    let took = start.elapsed();
+    other.unlock().unwrap();
+    assert_eq!(r["savedNote"], "another dbee window was changing the connections file", "{r}");
+    assert_eq!(r["connection"]["saved"], false, "{r}");
+    assert_eq!(s.inspect()["connection"]["saved"], false);
+    assert!(s.state().store.saved.is_empty());
+    let notices = notices(&mut s);
+    assert_eq!(notices, ["The connection was not saved: another dbee window was changing the connections file"], "one notice");
+    assert!(took < Duration::from_secs(8), "one wait of 5 s for the file, not two: {took:?}");
+}
+
+#[test]
+fn open_file_refuses_save() {
+    let mut s = session();
+    let path = s.home.home.join("shop.sqlite");
+    let e = s.execute("connection.openFile", json!({ "path": path, "save": true })).unwrap_err();
+    assert_eq!(e.code(), "badParams", "{e}");
+    assert!(e.to_string().contains("`save`"), "{e}");
 }
 
 /// Closes the connection, then opens `params`, expecting an error.
@@ -909,6 +988,7 @@ fn connection_commands_are_registered() {
         "connection.listDatabases",
         "connection.open",
         "connection.openFile",
+        "connection.cancel",
     ] {
         assert!(get(id).enabled, "{id} runs on the connection screen");
     }
@@ -1900,4 +1980,531 @@ fn the_journal_keeps_a_connection_param_only_where_it_was_given() {
         run(&mut replay, &command, params);
     }
     assert_eq!(open_id(&replay), id);
+}
+
+// ---- cancelling a connection attempt ---------------------------------------------------------
+
+/// What a [`Host`] does with each connection it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    /// Nothing: it reads what comes and never answers, as a host that hangs.
+    Nothing,
+    /// An SSH server's first line, then nothing: the client's key exchange never ends.
+    SshFirstLine,
+    /// Everything, both ways, to and from this port on 127.0.0.1.
+    Forward(u16),
+    /// Postgres that logs the client in and answers the first `answered` queries of dbee's setup
+    /// ([`setup_answers`]), then reads what comes and never answers: a server that hangs after the
+    /// login, or after the setup.
+    Pg { answered: usize },
+}
+
+/// What a [`Host`] saw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Seen {
+    /// The connections it took.
+    taken: usize,
+    /// Those whose other end closed them.
+    closed: usize,
+    /// Those that sent more than one line: an SSH client's key exchange, after its first line.
+    past_first_line: usize,
+    /// The requests a Postgres client sent after its login (its goodbye left out).
+    requests: usize,
+}
+
+/// What a test saw, and a way to wait until it saw something: no wait is on a timer, and the 30 s
+/// bound is only for a test that fails.
+struct Watch<S>(Mutex<S>, Condvar);
+
+impl<S: Default + std::fmt::Debug> Watch<S> {
+    fn new() -> Arc<Watch<S>> {
+        Arc::new(Watch(Mutex::new(S::default()), Condvar::new()))
+    }
+
+    fn note(&self, f: impl FnOnce(&mut S)) {
+        f(&mut self.0.lock().unwrap());
+        self.1.notify_all();
+    }
+
+    fn until(&self, what: &str, done: impl Fn(&S) -> bool) {
+        let deadline = Instant::now() + T;
+        let mut seen = self.0.lock().unwrap();
+        while !done(&seen) {
+            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_else(|| panic!("gave up waiting for {what}: {seen:?}"));
+            seen = self.1.wait_timeout(seen, left).unwrap().0;
+        }
+    }
+}
+
+/// A host on 127.0.0.1 that the test opens itself: it answers each connection as [`Answer`] said
+/// when it took it, and tells what it saw.
+struct Host {
+    port: u16,
+    answer: Arc<Mutex<Answer>>,
+    seen: Arc<Watch<Seen>>,
+}
+
+impl Host {
+    fn new(answer: Answer) -> Host {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = Host { port: listener.local_addr().unwrap().port(), answer: Arc::new(Mutex::new(answer)), seen: Watch::new() };
+        let (answer, seen) = (Arc::clone(&host.answer), Arc::clone(&host.seen));
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let answer = *answer.lock().unwrap();
+                seen.note(|s| s.taken += 1);
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    serve(conn, answer, &seen);
+                    seen.note(|s| s.closed += 1);
+                });
+            }
+        });
+        host
+    }
+
+    fn set(&self, answer: Answer) {
+        *self.answer.lock().unwrap() = answer;
+    }
+
+    fn until(&self, what: &str, done: impl Fn(&Seen) -> bool) {
+        self.seen.until(what, done);
+    }
+
+    fn seen(&self) -> Seen {
+        *self.seen.0.lock().unwrap()
+    }
+}
+
+/// Serves one connection as `answer` says, until its other end closes it.
+fn serve(mut conn: TcpStream, answer: Answer, seen: &Watch<Seen>) {
+    let mut upstream = match answer {
+        Answer::Forward(port) => {
+            let up = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let (mut from, mut to) = (up.try_clone().unwrap(), conn.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut from, &mut to);
+                let _ = to.shutdown(Shutdown::Write);
+            });
+            Some(up)
+        }
+        Answer::SshFirstLine => {
+            conn.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
+            None
+        }
+        Answer::Pg { answered } => return serve_pg(conn, answered, seen),
+        Answer::Nothing => None,
+    };
+    let (mut buf, mut first_line_ended, mut past) = ([0u8; 16 * 1024], false, false);
+    loop {
+        let n = match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if let Some(up) = upstream.as_mut() {
+            // A write that fails (the server has closed) is not this end closing.
+            let _ = up.write_all(&buf[..n]);
+        }
+        if !past {
+            let newline = buf[..n].iter().position(|b| *b == b'\n');
+            past = first_line_ended || newline.is_some_and(|at| at + 1 < n);
+            first_line_ended |= newline.is_some();
+            if past {
+                seen.note(|s| s.past_first_line += 1);
+            }
+        }
+    }
+    if let Some(up) = upstream {
+        let _ = up.shutdown(Shutdown::Write);
+    }
+}
+
+/// One Postgres message: its kind and its body, with the length that counts itself.
+fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+    let len = i32::try_from(body.len() + 4).unwrap();
+    [&[kind][..], &len.to_be_bytes(), body].concat()
+}
+
+/// A query's answer of one text column named `x`: a row with each of `values`, each ended by
+/// `tag`.
+fn rows(values: &[&str], tag: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in values {
+        let field = [
+            &b"x\0"[..],
+            &0i32.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &25i32.to_be_bytes(),
+            &(-1i16).to_be_bytes(),
+            &(-1i32).to_be_bytes(),
+            &0i16.to_be_bytes(),
+        ]
+        .concat();
+        out.extend(message(b'T', &[&1i16.to_be_bytes()[..], &field].concat()));
+        let len = i32::try_from(value.len()).unwrap();
+        out.extend(message(b'D', &[&1i16.to_be_bytes()[..], &len.to_be_bytes(), value.as_bytes()].concat()));
+        out.extend(message(b'C', format!("{tag}\0").as_bytes()));
+    }
+    out
+}
+
+/// The answers to dbee's setup on a connection that is not read-only, in order: its SET, its six
+/// SHOWs, its search path's schemas; each ends ready for the next.
+fn setup_answers() -> Vec<Vec<u8>> {
+    let ready = message(b'Z', b"I");
+    vec![
+        [message(b'C', b"SET\0"), ready.clone()].concat(),
+        [rows(&["off", "on", "UTF8", "14.0", "140000", "public"], "SHOW"), ready.clone()].concat(),
+        [rows(&["public"], "SELECT 1"), ready].concat(),
+    ]
+}
+
+/// Serves one Postgres client: no TLS, a login with no password, then the first `answered` of
+/// [`setup_answers`]; after that it reads and never answers, until the client closes.
+fn serve_pg(mut conn: TcpStream, answered: usize, seen: &Watch<Seen>) {
+    const SSL_REQUEST: u32 = 80_877_103;
+    let (mut buf, mut have, mut started) = ([0u8; 16 * 1024], Vec::new(), false);
+    let mut answers = setup_answers().into_iter().take(answered);
+    loop {
+        let n = match conn.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        have.extend_from_slice(&buf[..n]);
+        loop {
+            // Before the login a message is its length and its body; after it, a kind first.
+            let head = usize::from(started);
+            let Some(len) = have.get(head..head + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { break };
+            if have.len() < head + len {
+                break;
+            }
+            let msg: Vec<u8> = have.drain(..head + len).collect();
+            if !started {
+                if msg.get(4..8) == Some(&SSL_REQUEST.to_be_bytes()[..]) {
+                    conn.write_all(b"N").unwrap();
+                } else {
+                    started = true;
+                    let login = [message(b'R', &0i32.to_be_bytes()), message(b'K', &[1u8, 0, 0, 0, 2, 0, 0, 0]), message(b'Z', b"I")].concat();
+                    conn.write_all(&login).unwrap();
+                }
+            } else if msg.first() != Some(&b'X') {
+                seen.note(|s| s.requests += 1);
+                if let Some(answer) = answers.next() {
+                    conn.write_all(&answer).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// What [`Mute`] saw: connects waiting through the tunnel, and those dropped while they waited.
+#[derive(Debug, Default)]
+struct MuteSeen {
+    waiting: usize,
+    dropped: usize,
+}
+
+/// Postgres, with a database behind the tunnel that does not answer until told to: until then a
+/// connect opens its channel through the tunnel to the database and waits there, as one to a
+/// database that never answers would. (The test sshd reaches only the test servers, which all
+/// answer.)
+struct Mute {
+    real: Arc<dyn Driver>,
+    answers: AtomicBool,
+    seen: Arc<Watch<MuteSeen>>,
+}
+
+/// Notes a mute connect's wait, and its end when it is dropped.
+struct Waiting(Arc<Watch<MuteSeen>>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.note(|s| s.dropped += 1);
+    }
+}
+
+impl Mute {
+    fn new() -> Arc<Mute> {
+        let real = dbee_drivers::all().for_kind(DbKind::Postgres).cloned().expect("a Postgres driver");
+        Arc::new(Mute { real, answers: AtomicBool::new(false), seen: Watch::new() })
+    }
+
+    /// This driver for Postgres, then every driver dbee has.
+    fn drivers(self: &Arc<Mute>) -> Drivers {
+        let mute: Arc<dyn Driver> = Arc::clone(self) as Arc<dyn Driver>;
+        Drivers::new(std::iter::once(mute).chain(dbee_drivers::all().iter().cloned()).collect())
+    }
+}
+
+impl Driver for Mute {
+    fn kinds(&self) -> &'static [DbKind] {
+        self.real.kinds()
+    }
+
+    fn connect<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Arc<dyn Connection>> {
+        if self.answers.load(Ordering::SeqCst) {
+            return self.real.connect(target);
+        }
+        Box::pin(async move {
+            let tunnel = target.tunnel.clone().ok_or_else(|| DbError::Other("the mute database is behind a tunnel".into()))?;
+            let _channel = tunnel.connect(&target.config.host, target.config.port).await.map_err(DbError::Ssh)?;
+            self.seen.note(|s| s.waiting += 1);
+            let _waiting = Waiting(Arc::clone(&self.seen));
+            std::future::pending().await
+        })
+    }
+}
+
+/// `command` started as a job.
+fn started(s: &mut Session, command: &str, params: Json) -> JobId {
+    match s.execute(command, params) {
+        Ok(Outcome::Started(job)) => job,
+        other => panic!("{command} did not start a job: {other:?}"),
+    }
+}
+
+/// `connection.cancel`'s answer.
+fn cancel(s: &mut Session) -> Json {
+    run(s, "connection.cancel", json!({}))
+}
+
+/// Job `job`'s result, which must be the cancelled attempt's.
+fn ends_cancelled(s: &mut Session, job: JobId, what: &str) {
+    let e = match s.wait(job, T) {
+        Ok(v) => panic!("{what}: the cancelled attempt ended {v}"),
+        Err(e) => e,
+    };
+    assert_eq!((e.code(), e.to_string().as_str(), e.data()), ("cancelled", "the connection attempt was cancelled", json!({})), "{what}");
+}
+
+/// Nothing open, nothing running, nothing remembered: the connection screen as before the attempt.
+fn nothing_open(s: &TestSession, what: &str) {
+    let doc = s.inspect();
+    assert_eq!(
+        (&doc["screen"], &doc["connection"], &doc["connections"], &doc["jobs"]),
+        (&json!("connections"), &Json::Null, &json!([]), &json!([])),
+        "{what}"
+    );
+    assert!(s.state().store.recent.is_empty(), "{what}: the attempt went to Recent");
+}
+
+/// `t`'s settings, but at `host`.
+fn at(t: &TestTarget, host: &Host) -> ConnectionConfig {
+    ConnectionConfig { port: host.port, ..config_for(t) }
+}
+
+/// The targets on a server.
+fn server_targets() -> Vec<TestTarget> {
+    engine_targets().into_iter().filter(|t| !t.is_file()).collect()
+}
+
+/// On each server engine, a connect to a host that takes the connection and never answers, which
+/// would wait for the connect limit (15 s), is cancelled and ends `cancelled`. How long each took
+/// from the cancel to its end.
+fn silent_hosts_cancelled() -> Vec<(String, Duration)> {
+    let mut took = Vec::new();
+    for t in server_targets() {
+        let host = Host::new(Answer::Nothing);
+        let mut s = session();
+        let job = started(&mut s, "connection.open", json!({ "config": at(&t, &host), "password": pw() }));
+        host.until("the connect", |seen| seen.taken == 1);
+        let asked = Instant::now();
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{}", t.name());
+        ends_cancelled(&mut s, job, &t.name());
+        let ended = asked.elapsed();
+        println!("{}: the attempt ended {ended:?} after the cancel", t.name());
+        took.push((t.name(), ended));
+    }
+    took
+}
+
+#[test]
+fn a_connect_to_a_silent_host_can_be_cancelled() {
+    let _db = require_testdb!();
+    silent_hosts_cancelled();
+}
+
+/// The cancel ends the attempt within a second.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn a_connect_to_a_silent_host_is_cancelled_within_a_second() {
+    let _db = require_testdb!();
+    for (name, took) in silent_hosts_cancelled() {
+        assert!(took < Duration::from_secs(1), "{name}: {took:?}");
+    }
+}
+
+/// Review Focus 4: a connect through the SSH tunnel stops wherever it is, while the SSH server has
+/// sent its first line and nothing more, and while the tunnel is up and the database behind it does
+/// not answer. Each time the socket to the SSH server closes, and with it the tunnel; then the next
+/// connect to the same place works at once.
+#[test]
+fn a_connect_through_the_tunnel_can_be_cancelled() {
+    let db = require_testdb!();
+    let host = Host::new(Answer::SshFirstLine);
+    let key: Vec<&str> = db.sshd.known_hosts_line.split_whitespace().skip(1).collect();
+    let known = format!("[127.0.0.1]:{} {}", host.port, key.join(" "));
+    let mute = Mute::new();
+    let mut s = session_in_adjusted(temp_home(Some(&db.keys.plain), Some(&known)), |o| o.drivers = mute.drivers());
+    let mut config = via_ssh(SshAuth::Key { path: None });
+    config.ssh.as_mut().unwrap().port = host.port;
+    let params = json!({ "config": config, "password": pw() });
+
+    let job = started(&mut s, "connection.open", params.clone());
+    host.until("the key exchange", |seen| seen.past_first_line == 1);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    ends_cancelled(&mut s, job, "in the key exchange");
+    host.until("the socket to the SSH server to close", |seen| seen.closed == 1);
+    nothing_open(&s, "in the key exchange");
+
+    host.set(Answer::Forward(db.sshd.port));
+    let job = started(&mut s, "connection.open", params.clone());
+    mute.seen.until("the channel to the database", |m| m.waiting == 1);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    ends_cancelled(&mut s, job, "with the tunnel up");
+    host.until("the tunnel to close", |seen| seen.closed == 2);
+    mute.seen.until("the wait to be dropped", |m| m.dropped == 1);
+    nothing_open(&s, "with the tunnel up");
+
+    mute.answers.store(true, Ordering::SeqCst);
+    open(&mut s, params);
+    assert_eq!(s.inspect()["connection"]["ssh"], true);
+    s.run_blocking("schema.refresh", json!({}), T).unwrap();
+}
+
+/// A direct Postgres connect cancelled after the login leaves nothing open.
+/// The server logs the client in, then stops answering: during the session's setup, or, once the
+/// setup is answered, during the catalog's load. Cancelled there, the attempt ends `cancelled` and
+/// the socket to the server closes. How long each took from the cancel to the close.
+fn pg_cancelled_after_login() -> Vec<(&'static str, Duration)> {
+    let t = pg14_target();
+    let mut took = Vec::new();
+    for (when, answered) in [("in the setup", 0), ("in the catalog's load", setup_answers().len())] {
+        let host = Host::new(Answer::Pg { answered });
+        let mut s = session();
+        let job = started(&mut s, "connection.open", json!({ "config": at(&t, &host), "password": pw() }));
+        host.until(&format!("the request {when} that gets no answer"), |seen| seen.requests > answered);
+        let asked = Instant::now();
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{when}");
+        ends_cancelled(&mut s, job, when);
+        host.until(&format!("the socket to close {when}"), |seen| seen.closed == 1);
+        let closed = asked.elapsed();
+        println!("{when}: the socket closed {closed:?} after the cancel");
+        nothing_open(&s, when);
+        took.push((when, closed));
+    }
+    took
+}
+
+#[test]
+fn a_postgres_connect_cancelled_after_the_login_leaves_no_socket() {
+    let _db = require_testdb!();
+    pg_cancelled_after_login();
+}
+
+/// The socket closes within a second of the cancel.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn a_postgres_connect_cancelled_after_the_login_closes_its_socket_within_a_second() {
+    let _db = require_testdb!();
+    for (when, took) in pg_cancelled_after_login() {
+        assert!(took < Duration::from_secs(1), "{when}: {took:?}");
+    }
+}
+
+/// A test stops as a connect does, and leaves the screen and the lists as they were.
+#[test]
+fn a_test_can_be_cancelled() {
+    let _db = require_testdb!();
+    for t in server_targets() {
+        let host = Host::new(Answer::Nothing);
+        let mut s = session();
+        let job = started(&mut s, "connection.test", json!({ "config": at(&t, &host), "password": pw() }));
+        host.until("the connect", |seen| seen.taken == 1);
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{}", t.name());
+        ends_cancelled(&mut s, job, &t.name());
+        host.until("the socket to close", |seen| seen.closed == 1);
+        nothing_open(&s, &t.name());
+    }
+}
+
+/// A reconnect stops too: the connection stays as it was, with its tabs, and goes on working.
+#[test]
+fn a_reconnect_can_be_cancelled() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let host = Host::new(Answer::Forward(pg14().port));
+    let mut s = session();
+    open(&mut s, json!({ "config": at(&t, &host), "password": pw() }));
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    let before = s.inspect();
+    let opened = host.seen();
+    host.set(Answer::Nothing);
+    let job = started(&mut s, "connection.reconnect", json!({}));
+    host.until("the reconnect", |seen| seen.taken > opened.taken);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    ends_cancelled(&mut s, job, "the reconnect");
+    host.until("its socket to close", |seen| seen.closed > opened.closed);
+    let after = s.inspect();
+    assert_eq!((&after["connection"], &after["tabs"]), (&before["connection"], &before["tabs"]));
+    s.run_blocking("schema.refresh", json!({}), T).unwrap();
+    assert_eq!(host.seen().closed, opened.closed + 1, "the connection it had stays open");
+}
+
+/// With no attempt running, a cancel does nothing and says so, without an error: on the
+/// connection screen, while connected (the connection goes on), and after an attempt has ended.
+#[test]
+fn cancel_with_nothing_running_is_harmless() {
+    let _db = require_testdb!();
+    let none = json!({ "stopped": false, "note": "no connection attempt is running" });
+    let mut s = session();
+    assert_eq!(cancel(&mut s), none);
+    assert!(s.journal().is_empty(), "a cancel is not journaled");
+    drop(s);
+    let mut s = connected();
+    assert_eq!(cancel(&mut s), none);
+    s.run_blocking("schema.refresh", json!({}), T).unwrap();
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    s.run_blocking("query.run", json!({}), T).unwrap();
+    drop(s);
+    let host = Host::new(Answer::Nothing);
+    let mut s = session();
+    let job = started(&mut s, "connection.test", json!({ "config": at(&pg14_target(), &host), "password": pw() }));
+    host.until("the connect", |seen| seen.taken == 1);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    assert_eq!(cancel(&mut s), json!({ "stopped": false, "stopping": true }), "asked again before it ended");
+    ends_cancelled(&mut s, job, "the test");
+    assert_eq!(cancel(&mut s), none);
+}
+
+/// A cancelled attempt leaves no connection: the document shows none, the host sees its socket
+/// closed, and Recent is as before. That holds also when the attempt had connected before the
+/// cancel came, while its result waited to be applied: what it opened is closed.
+#[test]
+fn a_cancelled_attempt_leaves_no_connection() {
+    let _db = require_testdb!();
+    for t in server_targets() {
+        let host = Host::new(Answer::Nothing);
+        let mut s = session();
+        let job = started(&mut s, "connection.open", json!({ "config": at(&t, &host), "password": pw() }));
+        host.until("the connect", |seen| seen.taken == 1);
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{}", t.name());
+        ends_cancelled(&mut s, job, &t.name());
+        nothing_open(&s, &t.name());
+        host.until("the socket to close", |seen| seen.closed == 1);
+        drop(s);
+
+        let host = Host::new(Answer::Forward(t.server().unwrap().port));
+        let (finished, ended) = std::sync::mpsc::channel();
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = finished.send(());
+        });
+        let mut s = session_adjusted(|o| o.notify = Some(notify));
+        let job = started(&mut s, "connection.open", json!({ "config": at(&t, &host), "password": pw() }));
+        ended.recv_timeout(T).expect("the open's work to end");
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{}", t.name());
+        ends_cancelled(&mut s, job, &t.name());
+        nothing_open(&s, &t.name());
+        host.until("the connection it made to close", |seen| seen.taken > 0 && seen.closed == seen.taken);
+    }
 }

@@ -45,6 +45,8 @@ struct Entry {
     visible: bool,
     shows: Shows,
     enabled: bool,
+    /// The egui widget, when it can take the keyboard (`ui.focus`).
+    focusable: Option<egui::Id>,
 }
 
 /// The most out-of-view cells [`Tags::to_json`] lists; the others can still be clicked by id.
@@ -126,7 +128,8 @@ impl Tags {
         let seen = r.interact_rect;
         let visible = seen.is_finite() && seen.width() > 0.0 && seen.height() > 0.0;
         let rect = if visible { seen } else { r.rect };
-        self.insert(Entry { id: id.to_string(), rect, visible, shows, enabled });
+        let focusable = (r.sense.is_focusable() && r.enabled()).then_some(r.id);
+        self.insert(Entry { id: id.to_string(), rect, visible, shows, enabled, focusable });
     }
 
     /// Lists `id` as drawn but out of view at `rect`: a row of a long list that is laid out but
@@ -134,7 +137,7 @@ impl Tags {
     /// waiting to be scrolled into view ([`Tags::scroll_pending`]); once drawn in view, it is
     /// tagged as usual.
     pub fn tag_out_of_view(&mut self, id: &str, rect: Rect) {
-        self.insert(Entry { id: id.to_string(), rect, visible: false, shows: Shows::Nothing, enabled: true });
+        self.insert(Entry { id: id.to_string(), rect, visible: false, shows: Shows::Nothing, enabled: true, focusable: None });
     }
 
     fn insert(&mut self, entry: Entry) {
@@ -179,6 +182,12 @@ impl Tags {
     /// scrolled out of view.
     pub fn rect(&self, id: &str) -> Option<Rect> {
         self.entry(id).filter(|e| e.visible).map(|e| e.rect)
+    }
+
+    /// The egui widget `id` names, when it was drawn in view, enabled, and can take the keyboard
+    /// (`ui.focus`).
+    pub fn focusable(&self, id: &str) -> Option<egui::Id> {
+        self.entry(id).filter(|e| e.visible).and_then(|e| e.focusable)
     }
 
     /// `id` was drawn, but scrolled out of view (or is a grid cell of a row out of view).

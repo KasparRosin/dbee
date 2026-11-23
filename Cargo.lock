@@ -1265,9 +1265,12 @@ dependencies = [
  "egui_kittest",
  "getrandom 0.4.3",
  "image",
+ "kurbo",
  "log",
  "rfd",
  "serde_json",
+ "vello_cpu",
+ "zbus",
 ]
 
 [[package]]

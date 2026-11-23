@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use dbee_config::DbKind;
-use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target};
+use dbee_core::{Catalog, ResultSet, TableRef, TableStructure};
+use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target, TransactionState};
 use dbee_sql::Dialect;
 
 use crate::connect::{self, Canceller, SqliteConnection};
@@ -60,8 +60,16 @@ impl Connection for SqliteConnection {
         Box::pin(SqliteConnection::load_catalog(self))
     }
 
+    fn table_structure<'a>(&'a self, table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(SqliteConnection::table_structure(self, table))
+    }
+
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
         Box::pin(SqliteConnection::apply(self, statements, gate))
+    }
+
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(SqliteConnection::transaction(self))
     }
 }
 

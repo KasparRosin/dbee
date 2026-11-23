@@ -1,0 +1,1881 @@
+//! The components showcase: every shared control in every state, with no database, for looking
+//! at them in light and dark (`examples/components.rs`): one section per control, each headed
+//! with a caption.
+
+use std::sync::LazyLock;
+use std::time::Duration;
+
+use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+
+use dbee_config::{ConnectionColor, DbKind};
+use dbee_core::RelKind;
+
+use super::Look;
+use super::button::{BarButton, BoxButton, IconButton, TextButton};
+use super::checkbox::Checkbox;
+use super::chip::Chip;
+use super::dialog::{Button, Dialog};
+use super::dropdown::Dropdown;
+use super::editor::{ErrorToken, LineNumber};
+use super::empty::{Phrase, Place};
+use super::error_band::{Action, Band};
+use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Mark, RowNumber, Sort};
+use super::icon::Icon;
+use super::input::{Field, Input};
+use super::keycap::Keycap;
+use super::logo::Logo;
+use super::menu::{self, BarTitle, Item};
+use super::quick_search::{self, Field as SearchField, Heading as SearchHeading, Hit, Note, Row as SearchRow};
+use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
+use super::rows::{ConnectionRow, TreeKind, TreeRow};
+use super::segmented::{Segment, Segmented};
+use super::sidebar::{self, Count};
+use super::skeleton;
+use super::status::{self, Activity, Connection, Facts};
+use super::strip::{Strip, Tone};
+use super::structure::{self, HeaderCell, Heading};
+use super::swatch::{COLOURS, Swatch};
+use super::tab::{self, ListButton, NewTab, Tab};
+use super::table_bars::{self, Loading, PagingBar, TableBar, View};
+use super::toast::Toast;
+use super::tooltip;
+use super::value::{self, CopyButton, Facts as ValueFacts, Panel, State as ValueState};
+use crate::theme::size::{
+    BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, QS_LIST_GAP, QS_PAD, QS_ROW_H, QS_W,
+    RADIUS_CONTROL, ROW_H, SIDEBAR_COUNT_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H,
+    STRUCTURE_ROW_H, TAB_H, TAB_LIST_GAP, TREE_ROW_H,
+};
+use crate::theme::{Text, Tokens, Words, connection_color, tokens};
+
+/// 20 between sections.
+const BETWEEN: f32 = 20.0;
+/// Between the controls of a row of buttons.
+const ROW_GAP: f32 = 20.0;
+/// The Field and input section's inputs and fields, and the Dropdown section's dropdowns.
+const INPUT_W: f32 = 160.0;
+/// The Segmented section's small boxes, and the width of a small segment shown alone.
+const SEGMENTED_W: f32 = 386.0;
+const SMALL_SEGMENT_W: f32 = 77.0;
+/// The Icons section: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
+/// between rows. In a cell the icon's box ends 18 down, centred, and its name starts 24 down.
+const ICONS_UNDER_CAPTION: f32 = 20.0;
+const ICON_CELL: Vec2 = vec2(120.0, 40.0);
+const ICONS_PER_ROW: usize = 9;
+const ICON_CELL_GAP: Vec2 = vec2(8.0, 20.0);
+const ICON_BOTTOM: f32 = 18.0;
+const ICON_NAME_TOP: f32 = 24.0;
+/// The check box's mark is shown on an `ink` tile, as in a checkbox.
+const ICON_TILE: f32 = 14.0;
+/// The Menus section: the items' widths of its menus (Edit, View, Theme), its scene with the menu
+/// bar, and the Theme submenu's overlap of the View menu.
+const MENU_W: f32 = 230.0;
+const VIEW_MENU_W: f32 = 190.0;
+const THEME_MENU_W: f32 = 130.0;
+const SCENE: Vec2 = vec2(560.0, 190.0);
+const MENU_BAR_W: f32 = 240.0;
+const SUBMENU_OVERLAP: f32 = 4.0;
+/// The Tabs and bars section's tab strip and menu bars; its scene of tabs that don't fit, this tall,
+/// and the list's items this wide.
+const STRIP_W: f32 = 840.0;
+const TAB_LIST_SCENE_H: f32 = 250.0;
+const TAB_LIST_W: f32 = 130.0;
+/// The widths of the filter bar section's column, operator and value.
+const FILTER_COLUMN_W: f32 = 140.0;
+const FILTER_OP_W: f32 = 160.0;
+const FILTER_VALUE_W: f32 = 140.0;
+/// The width of the sidebar header section's filters and counts and of the tree rows; that of
+/// the connection rows.
+const SIDEBAR_W: f32 = 259.0;
+const CONNECTION_LIST_W: f32 = 279.0;
+/// The status bar sections: bars this wide, this far apart.
+const STATUS_W: f32 = 1100.0;
+const STATUS_APART: f32 = 10.0;
+/// The status bars' addresses, and a long path.
+static PG14: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@pg14:5432/dbee".into()));
+static TUNNEL: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@db.internal:5432/dbee via bastion.example.com".into()));
+static SHOP_FILE: LazyLock<status::Address> = LazyLock::new(|| status::Address::File("~/data/shop.sqlite".into()));
+static LONG_PATH: LazyLock<status::Address> =
+    LazyLock::new(|| status::Address::File("~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite".into()));
+/// A bar too narrow for the long path.
+const LONG_PATH_W: f32 = 560.0;
+/// The Dialogs section's scrim scene: a window of this size, its query text this far in, the dialog
+/// this far in.
+const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
+const BEHIND_AT: Vec2 = vec2(24.0, 20.0);
+const DIALOG_AT: Vec2 = vec2(100.0, 40.0);
+const BEHIND: &str = "select o.id, c.name as customer, o.total\nfrom shop.orders o\njoin shop.customers c on c.id = o.customer_id\nwhere o.total > 100\norder by o.id desc\nlimit 50;";
+
+/// The icons in the order the Icons section shows them.
+const ICONS: [Icon; 32] = [
+    Icon::ChevronDown,
+    Icon::KeyForeign,
+    Icon::KeyPrimary,
+    Icon::MaterializedView,
+    Icon::View,
+    Icon::Table,
+    Icon::Schema,
+    Icon::Link,
+    Icon::NoColour,
+    Icon::Search,
+    Icon::Wrap,
+    Icon::Copy,
+    Icon::CheckBox,
+    Icon::Check,
+    Icon::Last,
+    Icon::Next,
+    Icon::Previous,
+    Icon::First,
+    Icon::Code,
+    Icon::Import,
+    Icon::Export,
+    Icon::Panel,
+    Icon::TabQuery,
+    Icon::TabTable,
+    Icon::Refresh,
+    Icon::Close,
+    Icon::Minus,
+    Icon::Plus,
+    Icon::Key,
+    Icon::SortDescending,
+    Icon::SortAscending,
+    Icon::ChevronRight,
+];
+
+/// Sets dbee's fonts and theme on `ctx`, drawing in `theme`. The fonts are there from the next
+/// frame on.
+pub fn prepare(ctx: &egui::Context, theme: egui::Theme) {
+    crate::theme::apply(ctx);
+    ctx.set_theme(theme);
+}
+
+/// Every control in every state, one section per control.
+pub fn show(ui: &mut Ui) {
+    egui::Frame::NONE.inner_margin(SPACE_24).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        section(ui, "icon/, today's drawings in their usual colour", ICONS_UNDER_CAPTION, icons);
+        section(
+            ui,
+            "logo/: the engines' logos from Simple Icons 13.21.0 in their usual colour, at 24 and at the connection row's 14",
+            ICONS_UNDER_CAPTION,
+            logos,
+        );
+        buttons(ui);
+        inputs(ui);
+        choices(ui);
+        section(ui, "keycap: default, disabled", SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = KEYCAP_GAP;
+            for key in ["Ctrl", "Shift", "Z"] {
+                ui.add(Keycap::new(key));
+            }
+            // The 24 between the groups is an item of the row, with the gap either side.
+            ui.add_space(SPACE_24 + KEYCAP_GAP);
+            for key in ["Ctrl", "Z"] {
+                ui.add_enabled(false, Keycap::new(key));
+            }
+        });
+        section(ui, "chip: next, available", SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_16;
+            ui.add(Chip::next("Upcoming"));
+            ui.add(Chip::available("Available"));
+        });
+        menus(ui);
+        tooltips_and_toasts(ui);
+        dialogs(ui);
+        tabs(ui);
+        bars(ui);
+        grid(ui);
+        sidebar_rows(ui);
+        quick_searches(ui);
+        value_panels(ui);
+        error_bands(ui);
+        strips(ui);
+        editor_sample(ui);
+        structure_sample(ui);
+        waiting(ui);
+    });
+}
+
+/// The Grid section's columns: the row numbers, then each column's width, name, type, key and
+/// whether its values sit right.
+const GRID_ROW_NUMBERS: f32 = 36.0;
+const GRID_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 5] = [
+    (100.0, "id", "int8", Some(Key::Primary), true),
+    (150.0, "customer", "text", None, false),
+    (110.0, "total", "numeric", None, true),
+    (150.0, "customer_id", "int4", Some(Key::Foreign), true),
+    (90.0, "paid", "bool", None, false),
+];
+
+/// One of the Grid section's rows: its values (`None` for NULL), and how it is drawn.
+struct GridRow {
+    values: [Option<&'static str>; 5],
+    hovered: bool,
+    /// Every cell selected; with the focus in this column.
+    selected: bool,
+    focus: Option<usize>,
+    /// The whole row selected (#17).
+    whole: bool,
+    new: bool,
+    deleted: bool,
+    /// Cells with a mark, and whether each is selected.
+    marks: &'static [(usize, Mark, bool)],
+}
+
+const PLAIN: GridRow =
+    GridRow { values: [None; 5], hovered: false, selected: false, focus: None, whole: false, new: false, deleted: false, marks: &[] };
+
+/// The Grid section's twelve rows. Rows 10 and 11 are plain: the cell editor, which the grid
+/// draws over a cell, is not one of the cells.
+const GRID_ROWS: [GridRow; 12] = [
+    GridRow { values: [Some("91"), Some("Customer 91"), Some("207.29"), Some("12"), Some("true")], ..PLAIN },
+    GridRow { values: [Some("391"), Some("Customer 391"), Some("464.29"), Some("7"), Some("false")], hovered: true, ..PLAIN },
+    GridRow { values: [Some("691"), Some("Customer 191"), Some("221.29"), Some("42"), Some("true")], selected: true, focus: Some(3), ..PLAIN },
+    GridRow {
+        values: [Some("991"), Some("Customer 491"), Some("512.00"), Some("9"), Some("false")],
+        marks: &[(2, Mark::Staged, false), (4, Mark::Staged, true)],
+        ..PLAIN
+    },
+    GridRow { values: [Some("1291"), Some("Customer 291"), Some("240.00"), Some("3"), Some("true")], marks: &[(2, Mark::Saved, false)], ..PLAIN },
+    GridRow { values: [Some("1591"), Some("Customer 91"), Some("492.29"), Some("12"), Some("true")], marks: &[(2, Mark::Failed, false)], ..PLAIN },
+    GridRow {
+        values: [Some(""), Some("Customer 999"), Some("100.00"), Some("42"), Some("true")],
+        new: true,
+        marks: &[(0, Mark::New, false), (1, Mark::New, false), (2, Mark::New, false), (3, Mark::New, false), (4, Mark::New, false)],
+        ..PLAIN
+    },
+    GridRow {
+        values: [Some("2791"), Some("Customer 791"), Some("263.29"), Some("42"), Some("false")],
+        deleted: true,
+        marks: &[
+            (0, Mark::Deleted, false),
+            (1, Mark::Deleted, false),
+            (2, Mark::Deleted, false),
+            (3, Mark::Deleted, false),
+            (4, Mark::Deleted, false),
+        ],
+        ..PLAIN
+    },
+    GridRow { values: [Some("3091"), Some("Leave at↵Ring twice"), None, Some("42"), Some("")], ..PLAIN },
+    GridRow { values: [Some("3691"), Some("Customer 3691"), Some("291.29"), Some("42"), Some("false")], ..PLAIN },
+    GridRow { values: [Some("4291"), Some("Customer 91"), Some("305.29"), Some("42"), Some("false")], ..PLAIN },
+    GridRow {
+        values: [Some("4891"), Some("Customer 491"), Some("319.29"), Some("42"), Some("true")],
+        selected: true,
+        whole: true,
+        marks: &[(2, Mark::Staged, true)],
+        ..PLAIN
+    },
+];
+
+/// The grid's cells, then the two icons it draws with.
+fn grid(ui: &mut Ui) {
+    section(
+        ui,
+        "grid: header (sorted, text, number, foreign key hovered); rows: plain, hover, selected with the focus on a key (its link), staged and staged focus, saved, failed, new, deleted, NULL / line break / empty, two plain rows, the whole row selected",
+        SPACE_8,
+        |ui| {
+            let width = GRID_ROW_NUMBERS + GRID_COLUMNS.iter().map(|c| c.0).sum::<f32>();
+            let (table, _) = ui.allocate_exact_size(vec2(width, GRID_HEADER_H + ROW_H * GRID_ROWS.len() as f32), Sense::hover());
+            ui.painter().rect_filled(table, CornerRadius::ZERO, tokens(ui.ctx()).card);
+            let mut x = table.left();
+            grid_cell::corner(ui, Rect::from_min_size(table.min, vec2(GRID_ROW_NUMBERS, GRID_HEADER_H)));
+            x += GRID_ROW_NUMBERS;
+            for (i, &(w, name, ty, key, right)) in GRID_COLUMNS.iter().enumerate() {
+                let head = Header {
+                    name,
+                    ty,
+                    key,
+                    sort: (i == 0).then_some(Sort::Asc),
+                    align: if right { CellAlign::Right } else { CellAlign::Left },
+                    sortable: true,
+                    hovered: i == 3,
+                };
+                head.paint(ui, Rect::from_min_size(pos2(x, table.top()), vec2(w, GRID_HEADER_H)));
+                x += w;
+            }
+            for (r, row) in GRID_ROWS.iter().enumerate() {
+                let top = table.top() + GRID_HEADER_H + ROW_H * r as f32;
+                let number =
+                    RowNumber { n: r as u64 + 1, new: row.new, deleted: row.deleted, selected: row.selected, whole: row.whole, hovered: row.hovered };
+                number.paint(ui, Rect::from_min_size(pos2(table.left(), top), vec2(GRID_ROW_NUMBERS, ROW_H)));
+                let mut x = table.left() + GRID_ROW_NUMBERS;
+                for (c, &(w, _, _, key, right)) in GRID_COLUMNS.iter().enumerate() {
+                    let mark = row.marks.iter().find(|m| m.0 == c);
+                    let cell = Cell {
+                        text: row.values[c].map_or(CellText::Null, CellText::Text),
+                        align: if right { CellAlign::Right } else { CellAlign::Left },
+                        mark: mark.map(|m| m.1),
+                        selected: row.selected || mark.is_some_and(|m| m.2),
+                        focused: row.focus == Some(c),
+                        deleted: row.deleted,
+                        link: key == Some(Key::Foreign),
+                        row_selected: row.focus.is_some(),
+                        hovered: row.hovered,
+                        strength: 1.0,
+                    };
+                    let at = Rect::from_min_size(pos2(x, top), vec2(w, ROW_H));
+                    cell.show(ui, at, ui.id().with(("showcase-grid-link", r, c)));
+                    x += w;
+                }
+            }
+        },
+    );
+    section(ui, "icon/follow, icon/line-break: the grid's follow link and a line break in a cell", ICONS_UNDER_CAPTION, |ui| {
+        let t = tokens(ui.ctx());
+        ui.spacing_mut().item_spacing.x = ICON_CELL_GAP.x;
+        for (icon, colour) in [(Icon::Follow, t.text_muted), (Icon::LineBreak, t.text)] {
+            let (cell, _) = ui.allocate_exact_size(ICON_CELL, Sense::hover());
+            let p = ui.painter();
+            icon.paint(p, pos2(cell.center().x, cell.top() + ICON_BOTTOM - icon.size().y / 2.0), colour);
+            Text::Small.paint(p, pos2(cell.center().x, cell.top() + ICON_NAME_TOP), Align2::CENTER_TOP, icon.name(), t.text_muted);
+        }
+    });
+}
+
+/// The tree's rows and the connection list's:
+/// each list on `bg` with a 1 px `line` at its right.
+fn sidebar_rows(ui: &mut Ui) {
+    let rel = TreeKind::Relation;
+    let row = |level, kind, name, right, open| TreeRow {
+        level,
+        kind,
+        name,
+        right,
+        open,
+        selected: false,
+        focused: false,
+        chevron_focused: false,
+        hovered: false,
+    };
+    let table = |name| row(1, rel(RelKind::Table), name, None, Some(false));
+    let tree = [
+        row(0, TreeKind::Schema, "shop", None, Some(true)),
+        table("customers"),
+        row(1, rel(RelKind::Table), "orders", None, Some(true)),
+        row(2, TreeKind::Column(Some(Key::Primary)), "id", Some("int8"), None),
+        row(2, TreeKind::Column(None), "dealer_id", Some("int4"), None),
+        row(2, TreeKind::Column(Some(Key::Foreign)), "customer_id", Some("int8"), None),
+        row(2, TreeKind::Column(None), "total", Some("numeric(12,2)"), None),
+        row(1, rel(RelKind::View), "orders_archive", None, Some(false)),
+        row(1, rel(RelKind::MaterializedView), "order_totals", None, Some(false)),
+        TreeRow { hovered: true, ..table("payments") },
+        TreeRow { selected: true, ..table("shipments") },
+        TreeRow { focused: true, ..table("users") },
+        row(0, TreeKind::System, "System schemas", None, Some(false)),
+    ];
+    section(
+        ui,
+        "tree/row: schema open, table, table open with its columns (primary key, plain, foreign key), view, materialized view, hover, selected, focus, schema",
+        SPACE_8,
+        |ui| {
+            list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| {
+                tree[i].paint(ui, rect);
+            })
+        },
+    );
+    let connection = |name, engine: DbKind, line: &str, colour| ConnectionRow {
+        name,
+        engine,
+        address: if engine.uses_file() { status::Address::File(line.into()) } else { status::Address::Server(line.into()) },
+        colour: connection_color(colour),
+        selected: false,
+        focused: false,
+        hovered: false,
+    };
+    let connections = [
+        connection("Analytics replica", DbKind::Postgres, "analytics@replica:5432/analytics", ConnectionColor::Blue),
+        ConnectionRow { selected: true, ..connection("Shop live", DbKind::Postgres, "postgres@pg14:5432/dbee  SSH", ConnectionColor::Red) },
+        ConnectionRow { hovered: true, ..connection("Billing staging", DbKind::MySql, "billing@staging:3306/billing", ConnectionColor::Orange) },
+        ConnectionRow { focused: true, ..connection("Shop dev", DbKind::Postgres, "postgres@localhost:5432/shop", ConnectionColor::Green) },
+        connection("Local postgres", DbKind::Postgres, "postgres@localhost:5432/postgres", ConnectionColor::None),
+        connection("Notes", DbKind::Sqlite, "~/data/notes.sqlite", ConnectionColor::Purple),
+    ];
+    section(ui, "sidebar/connection: default, selected, hover, focus, no colour, other engines (logo/mysql, logo/sqlite)", SPACE_8, |ui| {
+        list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| {
+            connections[i].paint(ui, rect);
+        })
+    });
+}
+
+/// The quick search's narrow box, for a cut row: this wide.
+const QS_NARROW_W: f32 = 300.0;
+
+/// One item of a quick search box in the showcase.
+enum SearchItem<'a> {
+    Heading(SearchHeading<'a>),
+    Row(SearchRow<'a>),
+    Note(Note<'a>),
+}
+
+/// The quick search as the screen draws it, and its states.
+fn quick_searches(ui: &mut Ui) {
+    let row = |hit| SearchItem::Row(SearchRow { hit, highlighted: false, hovered: false });
+    let table = |schema, name, kind| Hit::Table { schema, name, kind };
+    let connection = |name, label, colour| Hit::Connection { name, label, colour: connection_color(colour) };
+    let found = [
+        SearchItem::Heading(SearchHeading::Connection { name: "Shop live", colour: connection_color(ConnectionColor::Red) }),
+        SearchItem::Row(SearchRow { hit: table("shop", "orders", RelKind::Table), highlighted: true, hovered: false }),
+        row(table("shop", "order_items", RelKind::Table)),
+        row(table("public", "orders_archive", RelKind::View)),
+        row(table("reporting", "order_totals", RelKind::MaterializedView)),
+        SearchItem::Heading(SearchHeading::Others),
+        row(connection("Orders replica", "PostgreSQL", ConnectionColor::Blue)),
+        SearchItem::Row(SearchRow { hit: connection("Orders staging", "MySQL", ConnectionColor::Orange), highlighted: false, hovered: true }),
+        row(connection("Plain", "SQLite", ConnectionColor::None)),
+    ];
+    section(
+        ui,
+        "quick search: ord; the open connection's heading and tables (highlighted, view, materialized view), other connections (hover, no colour)",
+        SPACE_8,
+        |ui| search_box(ui, 0, QS_W, "ord", &found),
+    );
+    let cut = [
+        row(table("reporting", "order_totals_by_customer_and_month", RelKind::MaterializedView)),
+        row(connection("Reporting replica for the Customer Success team", "PostgreSQL", ConnectionColor::Green)),
+    ];
+    section(ui, "quick search: nothing typed, the placeholder; no match; the search's error (not drawn); cut rows", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_24;
+            search_box(ui, 1, QS_W, "", &[]);
+            search_box(ui, 2, QS_W, "zzz", &[SearchItem::Note(Note::NoMatch)]);
+            search_box(ui, 3, QS_W, "ord", &[SearchItem::Note(Note::Error("The search gave no list."))]);
+            search_box(ui, 4, QS_NARROW_W, "order", &cut);
+        });
+    });
+}
+
+/// A quick search box `width` wide with `query` typed, listing `items`.
+fn search_box(ui: &mut Ui, salt: usize, width: f32, query: &str, items: &[SearchItem<'_>]) {
+    let t = tokens(ui.ctx());
+    let inner = width - 2.0 * f32::from(QS_PAD);
+    quick_search::frame(t).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.vertical(|ui| {
+            let mut text = query.to_owned();
+            SearchField { text: &mut text, placeholder: "Find a table or connection", id: egui::Id::new(("showcase-quick-search", salt)) }
+                .show(ui, inner);
+            if !items.is_empty() {
+                ui.add_space(QS_LIST_GAP);
+            }
+            for item in items {
+                let (rect, _) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::hover());
+                match item {
+                    SearchItem::Heading(h) => h.paint(ui, rect),
+                    SearchItem::Row(r) => r.paint(ui, rect),
+                    SearchItem::Note(n) => n.paint(ui, rect),
+                };
+            }
+        });
+    });
+}
+
+/// The value panel as drawn here: 340 by 372, three to a row, 16 apart.
+const VALUE_PANEL: Vec2 = vec2(340.0, 372.0);
+const VALUE_PANELS_PER_ROW: usize = 3;
+const VALUE_PANEL_GAP: f32 = 16.0;
+
+/// The values shown: the `meta` jsonb, the `notes` text, the value being edited, row 3.
+const VALUE_JSON: &str =
+    r#"{"src": "web", "gift": true, "tags": ["express", "fragile"], "items": 3, "notes": "Leave at the door", "coupon": null, "weight_kg": 1.25}"#;
+const VALUE_TEXT: &str = "Leave at the door.\nRing twice, then wait.";
+const VALUE_EDITING: &str = "{\n  \"src\": \"web\",\n  \"gift\": false,\n  \"tags\": [\"new\", \"eu\"],\n  \"note\": null\n}";
+const VALUE_ROW: &str = r#"{"id": 691, "customer": "Customer 191", "total": 221.29, "shipped_at": "2025-04-02", "note": null, "paid": true}"#;
+
+/// One of the value panel's states: the panel, and the value in it (its text,
+/// whether it is JSON, where the editing caret is).
+pub(crate) struct ValueSample {
+    pub panel: Panel<'static>,
+    pub value: Option<(String, bool, Option<usize>)>,
+}
+
+/// The value panel's eight states with those values.
+pub(crate) fn value_samples() -> [ValueSample; 8] {
+    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
+    let row = dbee_core::json::pretty(VALUE_ROW).unwrap_or_else(|| VALUE_ROW.to_owned());
+    let lines = |s: &str| s.split('\n').count();
+    let panel = |state, title, ty, facts| Panel { state, title, ty, facts, buttons: true, copy: CopyButton::ON, wrap: false, edge: true };
+    let facts = |lines, bytes| Some(ValueFacts { lines, bytes, formatted: false, whole: None });
+    let json_facts = facts(lines(&json), VALUE_JSON.len());
+    // The value being edited, the caret after `false`.
+    let caret = VALUE_EDITING.find("false").map(|at| at + "false".len());
+    [
+        ValueSample { panel: panel(ValueState::Json, "meta", "jsonb", json_facts), value: Some((json.clone(), true, None)) },
+        ValueSample {
+            panel: panel(ValueState::Text, "notes", "text", facts(lines(VALUE_TEXT), VALUE_TEXT.len())),
+            value: Some((VALUE_TEXT.to_owned(), false, None)),
+        },
+        ValueSample { panel: panel(ValueState::Null, "coupon", "text", None), value: None },
+        ValueSample { panel: panel(ValueState::Empty, "coupon", "text", None), value: None },
+        ValueSample { panel: panel(ValueState::NoCell, "", "", None), value: None },
+        ValueSample { panel: panel(ValueState::Copied, "meta", "jsonb", json_facts), value: Some((json, true, None)) },
+        ValueSample {
+            panel: panel(ValueState::Editing, "meta", "json", facts(lines(VALUE_EDITING), 58)),
+            value: Some((VALUE_EDITING.to_owned(), true, caret)),
+        },
+        // The facts for the row, given: a row's size is the value panel screen's to work out.
+        ValueSample { panel: panel(ValueState::Row, "Row 3", "", facts(lines(&row), 134)), value: Some((row, true, None)) },
+    ]
+}
+
+/// Draws `sample` into `at`.
+pub(crate) fn value_panel(ui: &mut Ui, sample: &ValueSample, at: Rect) -> value::Shown {
+    let shown = sample.panel.show(ui, at);
+    match &sample.value {
+        // The editing state's text as the panel's editor lays it out.
+        Some((text, json, caret)) if sample.panel.state == ValueState::Editing => value::paint_edited(ui, shown.text, text, *json, *caret),
+        Some((text, json, caret)) => {
+            let spans = json.then(|| crate::value_panel::spans(text));
+            value::paint_value(ui, shown.text, text, spans.as_deref(), *caret);
+        }
+        None => {}
+    }
+    shown
+}
+
+/// A long type, for the narrow bar.
+const VALUE_LONG_TYPE: &str = "enum('small','Large')";
+
+/// The value panel's facts and its narrowest bar, as the app draws them: text holding JSON
+/// (`FORMATTED AS JSON`), a cut value (`FIRST 10 MIB OF 19.1 MIB`), and the panel at 240 with
+/// a long name and type (the type gone, the name cut, COPY and WRAP icons).
+pub(crate) fn value_facts_samples() -> [(ValueSample, f32); 3] {
+    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
+    let lines = json.split('\n').count();
+    let mib = 1024 * 1024;
+    let base = value_samples()[0].panel.clone();
+    let cut = "0123456789abcdef".repeat(4);
+    [
+        (
+            ValueSample {
+                panel: Panel {
+                    state: ValueState::Json,
+                    title: "raw_json_text",
+                    ty: "text",
+                    facts: Some(ValueFacts { lines, bytes: VALUE_JSON.len(), formatted: true, whole: None }),
+                    ..base.clone()
+                },
+                value: Some((json.clone(), true, None)),
+            },
+            VALUE_PANEL.x,
+        ),
+        (
+            ValueSample {
+                panel: Panel {
+                    state: ValueState::Text,
+                    title: "note",
+                    ty: "text",
+                    facts: Some(ValueFacts { lines: 1, bytes: 10 * mib, formatted: false, whole: Some(20_000_000) }),
+                    ..base.clone()
+                },
+                value: Some((cut, false, None)),
+            },
+            VALUE_PANEL.x,
+        ),
+        (
+            ValueSample { panel: Panel { title: "delivery_instructions", ty: VALUE_LONG_TYPE, ..base }, value: Some((json, true, None)) },
+            crate::value_panel::MIN_WIDTH,
+        ),
+    ]
+}
+
+/// The value panel in each state; then its facts and its
+/// narrowest bar.
+fn value_panels(ui: &mut Ui) {
+    let samples = value_samples();
+    section(ui, "value panel: json, text, NULL, empty, no cell selected, COPIED, editing, a row as JSON", SPACE_8, |ui| {
+        panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at))
+    });
+    let facts = value_facts_samples();
+    section(ui, "value panel: FORMATTED AS JSON, a cut value, 240 wide with a long name and type", SPACE_8, |ui| {
+        panels(ui, facts.len(), |ui, i, at| {
+            if let Some((sample, width)) = facts.get(i) {
+                _ = value_panel(ui, sample, Rect::from_min_size(at.min, vec2(*width, at.height())));
+            }
+        });
+    });
+}
+
+/// The Error band section's bands: 840 wide, 12 apart.
+const BAND_W: f32 = 840.0;
+const BANDS_APART: f32 = 12.0;
+const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", detail: None, hint: None, note: None, actions: &[] };
+/// ROLLBACK, under a failed transaction's band.
+const ROLLBACK_ACTION: [Action<'static>; 1] = [Action { label: "Rollback", enabled: true, hover: crate::query_tab::ROLLBACK_HOVER }];
+const BAND_TOTL: &str = "column o.totl does not exist";
+const BAND_HINT: &str = "Perhaps you meant to reference the column \"o.total\".";
+
+/// The Error band section's five bands.
+pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
+    Band { heading: "Query failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
+    Band {
+        heading: "Query failed",
+        message: "insert or update on table \"orders\" violates foreign key constraint \"orders_customer_id_fkey\"",
+        detail: Some("Failing row contains (691, 42, null)."),
+        ..NO_BAND
+    },
+    Band { heading: "Query failed", message: "Unknown column 'o.totl' in 'field list'", ..NO_BAND },
+    Band { heading: "Query failed", position: Some((1, 14)), message: "no such column: o.totl", ..NO_BAND },
+    Band { heading: "Statement 2 failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
+];
+
+/// More bands the app draws: ROLLBACK under a failed
+/// transaction, the table tab's headings and notes, a server's detail and
+/// hint both.
+pub(crate) const APP_BANDS: [Band<'static>; 6] = [
+    Band {
+        heading: "Query failed",
+        message: "current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)",
+        actions: &ROLLBACK_ACTION,
+        ..NO_BAND
+    },
+    Band {
+        heading: "The changes were not applied",
+        message: "invalid input syntax for type date: \"not a date\"; nothing was written",
+        note: Some(crate::table_tab::FAILED_NOTE),
+        ..NO_BAND
+    },
+    Band {
+        heading: "The changes were not applied",
+        message: "the Apply was cancelled at change 1, so nothing was written",
+        note: Some(crate::table_tab::CANCELLED_NOTE),
+        ..NO_BAND
+    },
+    Band { heading: "The connection was lost during Apply", message: "the connection to the server was lost", ..NO_BAND },
+    Band {
+        heading: "The page did not load",
+        message: "invalid input syntax for type integer: \"not a number\"",
+        note: Some(crate::table_tab::PAGE_NOTE),
+        ..NO_BAND
+    },
+    Band {
+        heading: "Query failed",
+        message: "cannot drop table customers because other objects depend on it",
+        detail: Some("constraint orders_customer_id_fkey on table orders depends on table customers"),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too."),
+        ..NO_BAND
+    },
+];
+
+/// The five error bands, then the app's others.
+fn error_bands(ui: &mut Ui) {
+    section(
+        ui,
+        "error band: Postgres, hint and position; Postgres, DETAIL and no position; MySQL, the message only; SQLite, a position; statement 2 failed",
+        SPACE_8,
+        |ui| bands(ui, "page", &PAGE_BANDS),
+    );
+    section(
+        ui,
+        "more error bands: ROLLBACK under a failed transaction; the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
+        SPACE_8,
+        |ui| bands(ui, "app", &APP_BANDS),
+    );
+}
+
+fn bands(ui: &mut Ui, salt: &str, bands: &[Band<'_>]) {
+    ui.vertical(|ui| {
+        ui.set_max_width(BAND_W);
+        ui.spacing_mut().item_spacing.y = BANDS_APART;
+        for (i, band) in bands.iter().enumerate() {
+            band.show(ui, egui::Id::new(("showcase-band", salt, i)));
+        }
+    });
+}
+
+/// The strip in both tones, as the connection form shows a result and a note above its bar.
+fn strips(ui: &mut Ui) {
+    section(ui, "strip: a result (a test passed, a save), a note; not drawn, the connection form's", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.set_max_width(BAND_W);
+            ui.spacing_mut().item_spacing.y = BANDS_APART;
+            let shown = [
+                (Tone::Success, "Test passed: PostgreSQL 14.12, through bastion.example.com with ~/.ssh/id_ed25519."),
+                (Tone::Neutral, "No databases to list."),
+            ];
+            for (i, (tone, text)) in shown.into_iter().enumerate() {
+                Strip { tone, text }.show(ui, egui::Id::new(("showcase-strip", i)));
+            }
+        });
+    });
+}
+
+/// The Error band section's editor: 600 wide on `card`, its lines 12 down; the line numbers in their
+/// boxes at its left, the code 12 after them.
+const EDITOR_W: f32 = 600.0;
+const EDITOR_PAD: f32 = 12.0;
+
+/// The editor: the error on line 1, its token underlined; the cursor on line 3.
+fn editor_sample(ui: &mut Ui) {
+    section(ui, "editor: the error's line number in danger, the token underlined in danger; the current line's number in text", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        let line_h = Text::Code.line();
+        let (frame, _) = ui.allocate_exact_size(vec2(EDITOR_W, 2.0 * EDITOR_PAD + 3.0 * line_h), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(frame, CornerRadius::ZERO, t.card);
+        let lines: [(&[(&str, Color32)], Option<&str>, &[(&str, Color32)]); 3] = [
+            (&[("SELECT", t.syn_keyword), (" o.id, ", t.text)], Some("o.totl"), &[(", c.email", t.text)]),
+            (&[("FROM", t.syn_keyword), (" shop.orders o", t.text)], None, &[]),
+            (&[("WHERE", t.syn_keyword), (" o.total > ", t.text), ("100", t.syn_number)], None, &[]),
+        ];
+        for (i, (before, token, after)) in lines.into_iter().enumerate() {
+            let top = frame.top() + EDITOR_PAD + line_h * i as f32;
+            let slot = Rect::from_min_size(pos2(frame.left(), top), vec2(LINE_NUMBER_W, line_h));
+            LineNumber { n: i + 1, current: i == 2, error: i == 0 }.paint(p, slot);
+            let mut x = code(p, pos2(slot.right() + EDITOR_PAD, top), before);
+            if let Some(token) = token {
+                x = ErrorToken { token }.paint(p, pos2(x, top)).right();
+            }
+            code(p, pos2(x, top), after);
+        }
+    });
+}
+
+/// The Error band section's structure table: 840 wide on `card`; its columns' widths and titles,
+/// then its rows.
+const STRUCTURE_W: f32 = 840.0;
+const STRUCTURE_COLUMNS: [(f32, &str); 6] = [(40.0, ""), (150.0, "Name"), (140.0, "Type"), (76.0, "Nullable"), (150.0, "Default"), (284.0, "Keys")];
+const STRUCTURE_ROWS: [[structure::Cell<'static>; 6]; 4] = {
+    use structure::Cell::{ForeignKey, Muted, Nullable, Position, PrimaryKey, Text};
+    [
+        [Position(1), Text("id"), Muted("int8"), Muted(""), Muted("identity"), PrimaryKey],
+        [Position(2), Text("customer_id"), Muted("int8"), Muted(""), Muted(""), ForeignKey("shop.customers.id")],
+        [Position(3), Text("dealer_id"), Muted("int4"), Nullable, Muted(""), Muted("")],
+        [Position(4), Text("status"), Muted("text"), Muted(""), Muted("'pending'::text"), Muted("")],
+    ]
+};
+
+/// The structure view's parts: COLUMNS, the header, four columns.
+fn structure_sample(ui: &mut Ui) {
+    let caption = "structure view: a section heading, the header (ink line under it), rows with position, name, type, nullable check, default, keys (primary key, foreign key link)";
+    section(ui, caption, 0.0, |ui| {
+        let rows = STRUCTURE_ROWS.len() as f32;
+        let (frame, _) = ui.allocate_exact_size(vec2(STRUCTURE_W, STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * rows), Sense::hover());
+        ui.painter().rect_filled(frame, CornerRadius::ZERO, tokens(ui.ctx()).card);
+        Heading { title: "Columns" }.paint(ui, Rect::from_min_size(frame.min, vec2(STRUCTURE_W, STRUCTURE_HEADING_H)));
+        let mut top = frame.top() + STRUCTURE_HEADING_H;
+        let mut x = frame.left();
+        for (w, title) in STRUCTURE_COLUMNS {
+            HeaderCell { title }.paint(ui, Rect::from_min_size(pos2(x, top), vec2(w, STRUCTURE_HEADER_H)));
+            x += w;
+        }
+        top += STRUCTURE_HEADER_H;
+        for row in STRUCTURE_ROWS {
+            let mut x = frame.left();
+            for ((w, _), cell) in STRUCTURE_COLUMNS.into_iter().zip(row) {
+                cell.paint(ui, Rect::from_min_size(pos2(x, top), vec2(w, STRUCTURE_ROW_H)));
+                x += w;
+            }
+            top += STRUCTURE_ROW_H;
+        }
+    });
+}
+
+/// The waiting states' grid: the Grid section's first three columns.
+const WAIT_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 3] =
+    [(100.0, "id", "int8", Some(Key::Primary), true), (150.0, "customer", "text", None, false), (110.0, "total", "numeric", None, true)];
+/// The waiting states' rows of the grid and of the tree.
+const WAIT_ROWS: usize = 10;
+const WAIT_TREE_ROWS: usize = 8;
+/// The empty areas the phrases sit in.
+const EMPTY_AREA: Vec2 = vec2(300.0, 120.0);
+
+/// The waiting states: a first load's skeleton, a reload at 50 %, the tree's `LOADING`, a
+/// dimmed area's off control, and the one grey phrase in its two places. The footer's jobs with
+/// their timers and RECONNECTING are the status bar's sections.
+fn waiting(ui: &mut Ui) {
+    let side_by_side = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            add(ui);
+        });
+    };
+    section(
+        ui,
+        "loading: a table's first load, the real header over ten rows of fill bars (none in the row numbers, a number's bar at the right); a reload, the old rows at 50 % under the header at full strength",
+        SPACE_8,
+        |ui| {
+            side_by_side(ui, &mut |ui| {
+                for reload in [false, true] {
+                    wait_grid(ui, reload);
+                }
+            })
+        },
+    );
+    section(ui, "loading: the tree's count reads loading over its rows at 50 %; with no rows to keep, eight rows of bars", SPACE_8, |ui| {
+        side_by_side(ui, &mut |ui| {
+            for rows in [true, false] {
+                wait_tree(ui, rows);
+            }
+        })
+    });
+    section(
+        ui,
+        "a dimmed area (the connecting form at 50 %): clear on and off, then the same dimmed; the one already off keeps its own look, never fainter",
+        SPACE_8,
+        |ui| {
+            side_by_side(ui, &mut |ui| {
+                for on in [false, true] {
+                    ui.horizontal(|ui| {
+                        super::dim(ui, on, &[], |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add(BoxButton::outline("Clear"));
+                                ui.add_enabled(false, BoxButton::outline("Clear"));
+                            });
+                        });
+                    });
+                }
+            })
+        },
+    );
+    section(ui, "the one grey phrase of an empty area: at the top (no rows are loaded.); centred (no cell selected)", SPACE_8, |ui| {
+        side_by_side(ui, &mut |ui| {
+            for (words, place) in [("No rows are loaded.", Place::Top), ("No cell selected", Place::Centre)] {
+                let (area, _) = ui.allocate_exact_size(EMPTY_AREA, Sense::hover());
+                ui.painter().rect_filled(area, CornerRadius::ZERO, tokens(ui.ctx()).card);
+                Phrase::new(words, place).show(ui, area);
+            }
+        })
+    });
+}
+
+/// The waiting states' grid: the header over the skeleton's rows, or (`reload`) over rows at
+/// [`crate::theme::DIM`].
+fn wait_grid(ui: &mut Ui, reload: bool) {
+    let width = GRID_ROW_NUMBERS + WAIT_COLUMNS.iter().map(|c| c.0).sum::<f32>();
+    let (table, _) = ui.allocate_exact_size(vec2(width, GRID_HEADER_H + ROW_H * WAIT_ROWS as f32), Sense::hover());
+    ui.painter().rect_filled(table, CornerRadius::ZERO, tokens(ui.ctx()).card);
+    grid_cell::corner(ui, Rect::from_min_size(table.min, vec2(GRID_ROW_NUMBERS, GRID_HEADER_H)));
+    let mut x = table.left() + GRID_ROW_NUMBERS;
+    for (i, &(w, name, ty, key, right)) in WAIT_COLUMNS.iter().enumerate() {
+        let align = if right { CellAlign::Right } else { CellAlign::Left };
+        let head = Header { name, ty, key, sort: (i == 0).then_some(Sort::Asc), align, sortable: reload, hovered: false };
+        head.paint(ui, Rect::from_min_size(pos2(x, table.top()), vec2(w, GRID_HEADER_H)));
+        x += w;
+    }
+    let rows = Rect::from_min_max(pos2(table.left(), table.top() + GRID_HEADER_H), table.max);
+    ui.scope_builder(UiBuilder::new().max_rect(rows).layout(Layout::top_down(Align::Min)), |ui| {
+        if !reload {
+            let widths = WAIT_COLUMNS.map(|c| c.0);
+            let right = WAIT_COLUMNS.map(|c| c.4);
+            skeleton::GridRows { widths: &widths, right: &right, number_w: GRID_ROW_NUMBERS }.show(ui);
+            return;
+        }
+        ui.multiply_opacity(crate::theme::DIM);
+        for (r, row) in GRID_ROWS.iter().take(WAIT_ROWS).enumerate() {
+            let top = rows.top() + ROW_H * r as f32;
+            let number = RowNumber { n: r as u64 + 1, new: false, deleted: false, selected: false, whole: false, hovered: false };
+            number.paint(ui, Rect::from_min_size(pos2(rows.left(), top), vec2(GRID_ROW_NUMBERS, ROW_H)));
+            let mut x = rows.left() + GRID_ROW_NUMBERS;
+            for (c, &(w, _, _, _, right)) in WAIT_COLUMNS.iter().enumerate() {
+                let cell = Cell {
+                    text: row.values[c].map_or(CellText::Null, CellText::Text),
+                    align: if right { CellAlign::Right } else { CellAlign::Left },
+                    mark: None,
+                    selected: false,
+                    focused: false,
+                    deleted: false,
+                    link: false,
+                    row_selected: false,
+                    hovered: false,
+                    strength: 1.0,
+                };
+                cell.show(ui, Rect::from_min_size(pos2(x, top), vec2(w, ROW_H)), ui.id().with(("showcase-wait-cell", r, c)));
+                x += w;
+            }
+        }
+    });
+}
+
+/// The waiting states' tree: the count's `LOADING` over rows at [`crate::theme::DIM`], or
+/// (without `rows`) over the skeleton's eight rows; on `bg` with a 1 px `line` at the right.
+fn wait_tree(ui: &mut Ui, rows: bool) {
+    let t = tokens(ui.ctx());
+    let (frame, _) = ui.allocate_exact_size(vec2(SIDEBAR_W + 1.0, SIDEBAR_COUNT_H + TREE_ROW_H * WAIT_TREE_ROWS as f32), Sense::hover());
+    ui.painter().rect_filled(frame, CornerRadius::ZERO, t.bg);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(frame.right() - 1.0, frame.top()), frame.max), CornerRadius::ZERO, t.line);
+    let inside = Rect::from_min_size(frame.min, vec2(SIDEBAR_W, frame.height()));
+    ui.scope_builder(UiBuilder::new().max_rect(inside).layout(Layout::top_down(Align::Min)), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        Count::Loading.show(ui);
+        if !rows {
+            skeleton::TreeRows.show(ui);
+            return;
+        }
+        let top = ui.cursor().top();
+        ui.multiply_opacity(crate::theme::DIM);
+        let table = |name| TreeRow {
+            level: 1,
+            kind: TreeKind::Relation(RelKind::Table),
+            name,
+            right: None,
+            open: Some(false),
+            selected: false,
+            focused: false,
+            chevron_focused: false,
+            hovered: false,
+        };
+        let tree = [
+            TreeRow { level: 0, kind: TreeKind::Schema, open: Some(true), ..table("shop") },
+            table("customers"),
+            table("dealers"),
+            table("order_items"),
+            table("orders"),
+            table("payments"),
+            table("shipments"),
+            table("users"),
+        ];
+        for (i, row) in tree.iter().enumerate() {
+            row.paint(ui, Rect::from_min_size(pos2(inside.left(), top + TREE_ROW_H * i as f32), vec2(SIDEBAR_W, TREE_ROW_H)));
+        }
+    });
+}
+
+/// `parts` in `code` from `at`, each in its colour; where the text ends.
+fn code(p: &egui::Painter, at: Pos2, parts: &[(&str, Color32)]) -> f32 {
+    let mut job = egui::text::LayoutJob::default();
+    for (words, colour) in parts {
+        job.append(words, 0.0, Text::Code.format(*colour));
+    }
+    let chars = job.text.chars().count();
+    let galley = p.layout_job(job);
+    let end = galley.pos_from_cursor(egui::text::CCursor::new(chars)).min.x;
+    p.galley(at, galley, Color32::PLACEHOLDER);
+    at.x + end
+}
+
+/// `n` value panels, three to a row, drawn by `panel`.
+fn panels(ui: &mut Ui, n: usize, mut panel: impl FnMut(&mut Ui, usize, Rect)) {
+    let rows = n.div_ceil(VALUE_PANELS_PER_ROW);
+    let width = VALUE_PANEL.x * VALUE_PANELS_PER_ROW as f32 + VALUE_PANEL_GAP * (VALUE_PANELS_PER_ROW - 1) as f32;
+    let height = VALUE_PANEL.y * rows as f32 + VALUE_PANEL_GAP * rows.saturating_sub(1) as f32;
+    let (frame, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    for i in 0..n {
+        let (row, col) = (i / VALUE_PANELS_PER_ROW, i % VALUE_PANELS_PER_ROW);
+        let at = pos2(frame.left() + (VALUE_PANEL.x + VALUE_PANEL_GAP) * col as f32, frame.top() + (VALUE_PANEL.y + VALUE_PANEL_GAP) * row as f32);
+        panel(ui, i, Rect::from_min_size(at, VALUE_PANEL));
+    }
+}
+
+/// `n` rows `w` wide and `h` tall, one under the other, drawn by `row`, on `bg` with a 1 px `line`
+/// at the right.
+fn list(ui: &mut Ui, w: f32, h: f32, n: usize, row: impl Fn(&Ui, usize, Rect)) {
+    let t = tokens(ui.ctx());
+    let (frame, _) = ui.allocate_exact_size(vec2(w + 1.0, h * n as f32), Sense::hover());
+    ui.painter().rect_filled(frame, CornerRadius::ZERO, t.bg);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(frame.right() - 1.0, frame.top()), frame.max), CornerRadius::ZERO, t.line);
+    for i in 0..n {
+        row(ui, i, Rect::from_min_size(pos2(frame.left(), frame.top() + h * i as f32), vec2(w, h)));
+    }
+}
+
+/// The menu bar, the query tab's bars and the status bars.
+fn bars(ui: &mut Ui) {
+    section(ui, "menu bar, 30 tall, from menubar/title; then with View open", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_8;
+            for open in [None, Some("View")] {
+                let (rect, _) = ui.allocate_exact_size(vec2(STRIP_W, SLIM_BAR_H), Sense::hover());
+                let titles = ["File", "Edit", "View", "Query"].map(|w| (w, Some(w) == open));
+                menu_bar(ui, rect.min, STRIP_W, &titles);
+            }
+        });
+    });
+    results(ui);
+    table_tab_bars(ui);
+    sidebar_header(ui);
+    let shop = |colour| Connection { name: "Shop live", colour, own: true };
+    let stack = |ui: &mut Ui, rows: Vec<(Connection<'static>, Facts<'static>, Option<Activity>)>| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = STATUS_APART;
+            for (connection, facts, activity) in &rows {
+                ui.allocate_ui(vec2(STATUS_W, SLIM_BAR_H), |ui| status::bar(ui, connection, facts, activity.as_ref(), |_| {}));
+            }
+        });
+    };
+    let pg14 = Some(&*PG14);
+    section(ui, "status bar: the connection colour as a 2 px top edge and the name block; no colour keeps a quiet footer", SPACE_8, |ui| {
+        let mut colours: Vec<ConnectionColor> = COLOURS.into_iter().filter(|c| *c != ConnectionColor::None).collect();
+        colours.push(ConnectionColor::None);
+        stack(ui, colours.into_iter().map(|c| (shop(c), Facts { address: pg14, ..Facts::default() }, None)).collect());
+    });
+    section(
+        ui,
+        "new: address as typed, server version, link security (only when weaker than fully checked), read-only, SAVE CONNECTION; right: one activity at a time",
+        SPACE_8,
+        |ui| {
+            let red = shop(ConnectionColor::Red);
+            let server = Some("PostgreSQL 14.24");
+            let link = |words| Some((words, "The link's longer text, on hover."));
+            let s = Duration::from_millis;
+            let at = |address: &'static status::Address| Facts { address: Some(address), ..Facts::default() };
+            stack(
+                ui,
+                vec![
+                    (red, Facts { server, link: link("Not encrypted"), unsaved: true, ..at(&PG14) }, Some(Activity::InTransaction)),
+                    (red, Facts { server, read_only: true, ..at(&PG14) }, Some(Activity::Disconnected)),
+                    (
+                        red,
+                        Facts { link: link("Encrypted, server not checked"), ..at(&PG14) },
+                        Some(Activity::Reconnecting { elapsed: Some(s(4100)) }),
+                    ),
+                    (
+                        red,
+                        Facts { link: link("Encrypted, certificate checked"), ..at(&PG14) },
+                        Some(Activity::Exporting { elapsed: Some(s(12_400)) }),
+                    ),
+                    (red, at(&TUNNEL), Some(Activity::Importing { elapsed: Some(s(3900)) })),
+                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: s(1200), cancel: true })),
+                ],
+            );
+        },
+    );
+    section(
+        ui,
+        "also: a count's job with its timer, a table's name keeps its case; reconnecting in its first 300 ms, its words alone; a name dbee made, as written, with no address; a long path cut in the middle",
+        SPACE_8,
+        |ui| {
+            let job = Activity::Job {
+                text: Words::from("Counting the rows of ").name("Orders").plain("…"),
+                elapsed: Duration::from_millis(1200),
+                cancel: true,
+            };
+            let made = Connection { name: "postgres@pg14.internal/Shop", colour: ConnectionColor::None, own: false };
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = STATUS_APART;
+                stack(
+                    ui,
+                    vec![
+                        (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(job)),
+                        (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(Activity::Reconnecting { elapsed: None })),
+                        (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
+                    ],
+                );
+                ui.allocate_ui(vec2(LONG_PATH_W, SLIM_BAR_H), |ui| {
+                    let facts = Facts { address: Some(&LONG_PATH), read_only: true, ..Facts::default() };
+                    status::bar(ui, &shop(ConnectionColor::Red), &facts, None, |_| {});
+                });
+            });
+        },
+    );
+}
+
+/// The run row, the result tabs, the result bar and the row count,
+/// and their first states.
+fn results(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_12;
+            rows(ui);
+        });
+    };
+    let bar = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.allocate_ui(vec2(STRIP_W, BAR_H), |ui| add(ui));
+    };
+    section(
+        ui,
+        "run row: idle; running (RUN off, CANCEL the ink button); RUN CURRENT as an option, hidden by default: not decided yet",
+        SPACE_8,
+        |ui| {
+            stack(ui, &mut |ui| {
+                for (running, run_current) in [(false, false), (true, false), (false, true)] {
+                    bar(ui, &mut |ui| {
+                        RunRow { running, cancel: running, run_current, can_run: true, lead: None }.show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(ui, "result tab: inactive, hover, active, focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.add(ResultTab::new("select ... series"));
+        ui.add(ResultTab::new("select ... series").look(hovered));
+        ui.add(ResultTab::new("select ... series").active(true));
+        ui.add(ResultTab::new("select ... series").look(focused));
+    });
+    let two = || vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")];
+    let many = || {
+        let titles =
+            ["select ... orders", "select ... series", "select ... customers", "update ... dealers", "select ... line_items", "select ... totals"];
+        titles.into_iter().enumerate().map(|(i, title)| ResultTab::new(title).active(i == 0)).collect()
+    };
+    let s = Duration::from_millis;
+    section(
+        ui,
+        "result bar: done, running, failed, cancelled; new facts: 2 rows affected, first 10,000 of 25,000 rows; the value panel open (on); many results: they scroll, with the list",
+        SPACE_8,
+        |ui| {
+            let done = RunState::Done { rows: 10, ms: Some(24) };
+            let rows = [
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Running { elapsed: s(2400) },
+                    first_of: None,
+                    export: true,
+                    value: Some(false),
+                    time_hover: None,
+                    value_off: false,
+                },
+                ResultBar {
+                    tabs: Vec::new(),
+                    state: RunState::Failed { ms: Some(12) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                    value_off: false,
+                },
+                ResultBar {
+                    tabs: Vec::new(),
+                    state: RunState::Cancelled { elapsed: Some(s(3200)) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                    value_off: false,
+                },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Affected { rows: Some(2), ms: Some(5) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                    value_off: false,
+                },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Done { rows: 10_000, ms: Some(80) },
+                    first_of: Some((10_000, 25_000)),
+                    export: true,
+                    value: Some(false),
+                    time_hover: None,
+                    value_off: false,
+                },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(true), time_hover: None, value_off: false },
+                ResultBar { tabs: many(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
+            ];
+            stack(ui, &mut |ui| {
+                for row in &rows {
+                    bar(ui, &mut |ui| {
+                        row.clone().show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(
+        ui,
+        "rows/count: exact; estimate with COUNT; unknown with COUNT ROWS; counting with its timer (its CANCEL is the footer job)",
+        SPACE_8,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_32;
+            let first = Some((1, 100));
+            RowCount::Exact(25_000).show(ui, first);
+            RowCount::Estimate(100_000).show(ui, first);
+            RowCount::Unknown.show(ui, first);
+            RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }.show(ui, first);
+        },
+    );
+    section(
+        ui,
+        "also: a run as it first shows, at 00:00.3; a count's first 300 ms, its words alone; a result's name keeps its case",
+        SPACE_8,
+        |ui| {
+            stack(ui, &mut |ui| {
+                bar(ui, &mut |ui| {
+                    let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
+                    ResultBar {
+                        tabs,
+                        state: RunState::Running { elapsed: Duration::from_millis(300) },
+                        first_of: None,
+                        export: true,
+                        value: Some(false),
+                        time_hover: None,
+                        value_off: false,
+                    }
+                    .show(ui);
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_32;
+                    RowCount::Counting { estimate: None, elapsed: None }.show(ui, Some((101, 200)));
+                    RowCount::Exact(1).show(ui, Some((1, 1)));
+                });
+            });
+        },
+    );
+}
+
+/// The table bar, the filter bar and the paging bar.
+fn table_tab_bars(ui: &mut Ui) {
+    let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_12;
+            rows(ui);
+        });
+    };
+    let bar = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.allocate_ui(vec2(STRIP_W, BAR_H), |ui| add(ui));
+    };
+    let s = Duration::from_millis;
+    let first = Some((1, 100));
+    let table = |view, loading, count| TableBar {
+        view,
+        loading,
+        count,
+        shown: first,
+        columns: 8,
+        can_refresh: true,
+        can_add: true,
+        can_count: true,
+        value: Some(false),
+        value_off: false,
+    };
+    section(
+        ui,
+        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job); with no Value cell",
+        SPACE_8,
+        |ui| {
+            let rows = [
+                table(View::Data, None, RowCount::Exact(25_000)),
+                table(View::Structure, None, RowCount::Estimate(25_000)),
+                table(View::Data, Some(Loading { elapsed: s(800) }), RowCount::Exact(25_000)),
+                table(View::Data, None, RowCount::Estimate(100_000)),
+                table(View::Data, None, RowCount::Unknown),
+                table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
+                TableBar { value: None, ..table(View::Data, None, RowCount::Estimate(100_000)) },
+            ];
+            stack(ui, &mut |ui| {
+                for row in rows {
+                    bar(ui, &mut |ui| {
+                        row.show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(
+        ui,
+        "filter bar: filter row first (raw SQL toggle, column, operator, value, remove, add, APPLY), then AND rows; on card, 4 by 12 inset, line under",
+        SPACE_8,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(STRIP_W);
+                table_bars::filter_bar(ui, |ui| {
+                    let rows = [("dealer_id", "equals (=)", "42"), ("status", "equals (=)", "completed"), ("total", "greater than (>)", "100")];
+                    for (n, (column, op, value)) in rows.into_iter().enumerate() {
+                        table_bars::filter_row(ui, |ui| {
+                            if n == 0 {
+                                ui.add(IconButton::boxed(Icon::Code));
+                            } else {
+                                table_bars::and_mark(ui);
+                            }
+                            Dropdown::new(("showcase-filter-column", n), column).width(FILTER_COLUMN_W).show(ui, |_| ());
+                            Dropdown::new(("showcase-filter-op", n), op).width(FILTER_OP_W).show(ui, |_| ());
+                            let mut value = value.to_owned();
+                            ui.add(Input::data(&mut value).desired_width(FILTER_VALUE_W));
+                            ui.add(IconButton::boxed(Icon::Minus));
+                            if n == 0 {
+                                ui.add(IconButton::boxed(Icon::Plus));
+                                ui.add(BoxButton::outline("Apply"));
+                            }
+                        });
+                    }
+                });
+            });
+        },
+    );
+    section(
+        ui,
+        "bottom bar: the view switch, the paging in the middle, the staged changes (1 CHANGE, RESET, APPLY); without changes; STRUCTURE's, the switch alone; STRUCTURE off",
+        SPACE_8,
+        |ui| {
+            let pages = PagingBar {
+                view: View::Data,
+                structure: true,
+                pages: true,
+                page: "Page 1 of 250",
+                back: false,
+                forward: true,
+                changes: 1,
+                can_apply: true,
+                note: None,
+            };
+            let rows = [
+                pages,
+                PagingBar { changes: 0, ..pages },
+                PagingBar { view: View::Structure, pages: false, ..pages },
+                PagingBar { structure: false, changes: 0, ..pages },
+            ];
+            stack(ui, &mut |ui| {
+                for row in rows {
+                    bar(ui, &mut |ui| {
+                        row.show(ui);
+                    });
+                }
+            });
+        },
+    );
+}
+
+/// The sidebar's filter and count, and the refresh's other
+/// states.
+fn sidebar_header(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let row = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui, usize)| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            for n in 0..4 {
+                ui.allocate_ui(vec2(SIDEBAR_W, BAR_H), |ui| add(ui, n));
+            }
+        });
+    };
+    section(
+        ui,
+        "sidebar header: the filter (placeholder, filled, focus) with REFRESH; the count under it (516 tables, 3 of 516 tables, 0 tables, loading)",
+        SPACE_8,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = SPACE_8;
+                row(ui, &mut |ui, n| {
+                    let (typed, look) = match n {
+                        0 => ("", None),
+                        1 => ("ord", None),
+                        2 => ("ord", Some(focused)),
+                        _ => return,
+                    };
+                    let mut text = typed.to_owned();
+                    let filter = sidebar::Filter::new(&mut text, "Filter tables").refresh(sidebar::Refresh::Idle);
+                    match look {
+                        Some(look) => filter.look(look).show(ui),
+                        None => filter.show(ui),
+                    };
+                });
+                let tables = ["table", "tables"];
+                let counts = [Count::All(516, tables), Count::Some(3, 516, tables), Count::All(0, tables), Count::Loading];
+                row(ui, &mut |ui, n| {
+                    if let Some(count) = counts.get(n) {
+                        count.show(ui);
+                    }
+                });
+            });
+        },
+    );
+    section(
+        ui,
+        "also: the refresh while a refresh runs (its plain icon, a click does nothing) and off; the connection list's filter, no refresh; typed text keeps its case",
+        SPACE_8,
+        |ui| {
+            row(ui, &mut |ui, n| {
+                let (typed, refresh) = match n {
+                    0 => ("", Some(sidebar::Refresh::Running)),
+                    1 => ("", Some(sidebar::Refresh::Off)),
+                    2 => ("", None),
+                    _ => ("Order_Items", Some(sidebar::Refresh::Idle)),
+                };
+                let mut text = typed.to_owned();
+                let placeholder = if refresh.is_some() { "Filter tables" } else { "Filter connections" };
+                let filter = sidebar::Filter::new(&mut text, placeholder);
+                match refresh {
+                    Some(refresh) => filter.refresh(refresh).show(ui),
+                    None => filter.show(ui),
+                };
+            });
+        },
+    );
+}
+
+/// The tabs, the list button and the strip, the
+/// strip whose tabs don't fit with its list open, and a busy tab.
+fn tabs(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(ui, "tab: table and query; inactive, hover (shows close), active (unsaved dot, close), focus (like a bar button)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        for (tab, title) in [(Tab::table as fn(&'static str) -> Tab<'static>, "orders [3]"), (Tab::query, "Query 1")] {
+            tab(title).show(ui);
+            tab(title).look(hovered).show(ui);
+            tab(title).active(true).unsaved(true).show(ui);
+            tab(title).look(focused).show(ui);
+        }
+    });
+    section(ui, "tab strip: tabs, then the new tab button (default, hover, focus), on card with the line under the inactive tabs", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.allocate_ui(vec2(STRIP_W, TAB_H), |ui| {
+            let tabs = vec![Tab::table("orders [3]"), Tab::table("customers [1]"), Tab::query("Query 1").active(true).unsaved(true)];
+            tab::Strip::new(tabs).show(ui, |_, _| {});
+        });
+        ui.add(NewTab::new().look(hovered));
+        ui.add(NewTab::new().look(focused));
+    });
+    section(ui, "tab/list: default, hover, focus, open (fill, as an open menu title)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.add(ListButton::new("All tabs"));
+        ui.add(ListButton::new("All tabs").look(hovered));
+        ui.add(ListButton::new("All tabs").look(focused));
+        ui.add(ListButton::new("All tabs").open(true));
+    });
+    section(
+        ui,
+        "tabs that don't fit: the strip scrolls, resting at a tab's edge; + and the list stay at the end; the list shows every tab, the active one marked",
+        SPACE_8,
+        |ui| {
+            let (scene, _) = ui.allocate_exact_size(vec2(STRIP_W, TAB_LIST_SCENE_H), Sense::hover());
+            let at = |rect: Rect| UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min));
+            ui.scope_builder(at(Rect::from_min_size(scene.min, vec2(STRIP_W, TAB_H))), |ui| {
+                tab::Strip::new(too_many_tabs()).list_open(true).show(ui, |_, _| {});
+            });
+            // The list as it opens: its right edge at the strip's, under it.
+            let edge = f32::from(MENU_PAD) + 1.0;
+            let menu = Rect::from_min_max(pos2(scene.right() - TAB_LIST_W - 2.0 * edge, scene.top() + TAB_H + TAB_LIST_GAP), scene.max);
+            ui.scope_builder(at(menu), |ui| {
+                menu::in_place(ui, TAB_LIST_W, |ui| {
+                    for (i, (title, _)) in TOO_MANY_TABS.iter().enumerate() {
+                        ui.add(Item::new(title).choice(Some(i == 2)));
+                    }
+                });
+            });
+        },
+    );
+    section(ui, "also: a busy tab, the spinner in its icon's place; inactive, active", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        Tab::table("orders").busy(true).show(ui);
+        Tab::query("Query 1").busy(true).active(true).show(ui);
+    });
+}
+
+/// Seven tabs that don't fit, in strip order: each title and whether it is a query
+/// tab. Query 1 is the active one, with unsaved text.
+const TOO_MANY_TABS: [(&str, bool); 7] = [
+    ("orders [3]", false),
+    ("customers [1]", false),
+    ("Query 1", true),
+    ("line_items", false),
+    ("Query 2", true),
+    ("Odd \"Name\"", false),
+    ("dealers", false),
+];
+
+/// [`TOO_MANY_TABS`] as tabs.
+fn too_many_tabs() -> Vec<Tab<'static>> {
+    TOO_MANY_TABS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, query))| {
+            let tab = if *query { Tab::query(title) } else { Tab::table(title) };
+            tab.active(i == 2).unsaved(i == 2)
+        })
+        .collect()
+}
+
+/// The dialogs and the scrim: two to a row, 24 apart and
+/// 32 between rows.
+fn dialogs(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let id = |n: &str| egui::Id::new("showcase-dialog").with(n);
+    let cancel = Button::outline("Cancel", "dialog-cancel");
+    section(ui, "dialog: database password, fill from URL with an error, close anyway, delete connection", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = vec2(SPACE_24, SPACE_32);
+            ui.horizontal_top(|ui| {
+                let (mut password, mut save, mut url) = ("secretpass".to_owned(), true, "shop@pg14:5432".to_owned());
+                Dialog::new(id("password"), "Database password")
+                    .text(Words::from("Enter the password of ").name("shop").plain(" on ").name("pg14.internal").plain("."))
+                    .body(|ui, _| {
+                        ui.add(Input::body(&mut password).password(true).look(focused));
+                        ui.add(Checkbox::new(&mut save, "Save in keyring"));
+                    })
+                    .buttons([Button::primary("Connect", "dialog-ok"), cancel])
+                    .in_place(ui);
+                Dialog::new(id("url"), "Fill from URL")
+                    .body(|ui, _| {
+                        Field::unlabelled(Input::body(&mut url).error(true)).error(Some("Not a database URL")).show(ui);
+                    })
+                    .buttons([Button::primary("Fill", "dialog-ok"), cancel])
+                    .in_place(ui);
+            });
+            ui.horizontal_top(|ui| {
+                Dialog::new(id("close"), "Close anyway?")
+                    .text("Close Query 1? Its query text will be lost.")
+                    .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
+                    .in_place(ui);
+                Dialog::new(id("delete"), "Delete connection")
+                    .text(Words::from("Delete “").name("Shop live").plain("”? Its saved passwords are deleted with it."))
+                    .buttons([Button::danger("Delete", "dialog-ok"), cancel])
+                    .in_place(ui);
+            });
+        });
+    });
+    section(
+        ui,
+        "new: Apply again (an Apply whose outcome is unknown); the commit prompt on closing a tab or switching connections, COMMIT is the main button",
+        SPACE_8,
+        |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_24;
+                Dialog::new(id("apply"), "Apply again?")
+                    .text(
+                        "Connection lost during Apply — the outcome is unknown. Reset and reload to check what was written, or Apply again to retry.",
+                    )
+                    .buttons([Button::danger("Apply again", "dialog-ok"), cancel])
+                    .in_place(ui);
+                // Placeholder words: the commit prompt isn't built yet.
+                Dialog::new(id("commit"), "Commit the transaction?")
+                    .text("Query 1 has changes that aren't committed.")
+                    .buttons([Button::primary("Commit", "commit"), Button::outline("Rollback", "rollback"), cancel])
+                    .in_place(ui);
+            });
+        },
+    );
+    section(ui, "scrim: over the whole window; the dialog centred, near the top", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        let (scene, _) = ui.allocate_exact_size(DIALOG_SCENE, Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(scene, CornerRadius::ZERO, t.bg);
+        Text::Code.paint(p, scene.min + BEHIND_AT, Align2::LEFT_TOP, BEHIND, t.text);
+        p.rect_filled(scene, CornerRadius::ZERO, t.scrim);
+        // The scene's edge is drawn over what it holds, the scrim too.
+        p.rect_stroke(scene, CornerRadius::ZERO, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+        let at = UiBuilder::new().max_rect(Rect::from_min_size(scene.min + DIALOG_AT, DIALOG_SCENE)).layout(Layout::top_down(Align::Min));
+        ui.scope_builder(at, |ui| {
+            Dialog::new(id("scrim"), "Close anyway?")
+                .text("Close Query 1? Its query text will be lost.")
+                .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
+                .in_place(ui);
+        });
+    });
+}
+
+/// The tooltips, the toasts and the toasts' icons.
+fn tooltips_and_toasts(ui: &mut Ui) {
+    section(ui, "tooltip: one line, wrapped at 320; 4 px below the pointer, its left edge at the pointer", SPACE_8, |ui| {
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            tooltip::in_place(ui, "New query tab (Ctrl+T)");
+            tooltip::in_place(ui, "Next page: not now, changes are staged. Apply or reset them first, then go to the next page.");
+        });
+    });
+    section(ui, "toast: success, error, error without an action; icon/success, icon/error", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        ui.spacing_mut().item_spacing.x = SPACE_24;
+        ui.add(Toast::success(Words::from("Exported ").name("25,000").plain(" rows to ").name("orders.csv")).action("Open folder"));
+        ui.add(Toast::error("Export failed: disk full").action("Details"));
+        ui.add(Toast::error("Export failed: disk full"));
+        for icon in [Icon::Success, Icon::Error] {
+            let (cell, _) = ui.allocate_exact_size(icon.size(), Sense::hover());
+            icon.paint(ui.painter(), cell.center(), t.text_muted);
+        }
+    });
+}
+
+/// The menus, their items and the menu bar's titles.
+fn menus(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    section(ui, "menu: Edit; menu/item, menu/separator, keycaps", SPACE_8, |ui| {
+        menu::in_place(ui, MENU_W, |ui| {
+            ui.add(Item::new("Undo").shortcut("Ctrl+Z"));
+            ui.add(Item::new("Redo").shortcut("Ctrl+Shift+Z"));
+            menu::separator(ui);
+            ui.add(Item::new("Copy").shortcut("Ctrl+C").look(hovered));
+            ui.add(Item::new("Select All").shortcut("Ctrl+A"));
+            menu::separator(ui);
+            ui.add_enabled(false, Item::new("Apply").shortcut("Ctrl+S"));
+            ui.add_enabled(false, Item::new("Reset"));
+        });
+    });
+    section(ui, "menubar/title open, View menu, Theme submenu: the chosen mark sits in a left column", SPACE_8, |ui| {
+        let (scene, _) = ui.allocate_exact_size(SCENE, Sense::hover());
+        let titles = menu_bar(ui, scene.min, SCENE.x, &[("File", false), ("Edit", false), ("View", true), ("Query", false)]);
+        let view = titles.get(2).map_or(scene.min.x, |r| r.left());
+        let at = |pos| UiBuilder::new().max_rect(Rect::from_min_size(pos, SCENE)).layout(Layout::top_down(Align::Min));
+        let shown = ui.scope_builder(at(pos2(view, scene.top() + SLIM_BAR_H)), |ui| {
+            menu::in_place(ui, VIEW_MENU_W, |ui| {
+                ui.add(Item::new("Refresh Schema"));
+                ui.add(Item::new("Toggle Value Panel"));
+                ui.add(Item::new("Theme").submenu(true).highlighted(true)).rect
+            })
+        });
+        let (menu_rect, theme) = (shown.response.rect, shown.inner.inner);
+        let edge = f32::from(MENU_PAD) + 1.0;
+        ui.scope_builder(at(pos2(menu_rect.right() - SUBMENU_OVERLAP, theme.top() - edge)), |ui| {
+            menu::in_place(ui, THEME_MENU_W, |ui| {
+                for (words, chosen) in [("System", false), ("Light", true), ("Dark", false)] {
+                    ui.add(Item::new(words).choice(Some(chosen)));
+                }
+            });
+        });
+    });
+    section(
+        ui,
+        "menu/item: default, hover (the keyboard highlight looks the same), disabled, destructive, destructive hover; menubar/title: default, open",
+        SPACE_8,
+        |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_24;
+                menu::in_place(ui, MENU_W, |ui| {
+                    ui.add(Item::new("Copy").shortcut("Ctrl+C"));
+                    ui.add(Item::new("Copy").shortcut("Ctrl+C").look(hovered));
+                    ui.add_enabled(false, Item::new("Apply").shortcut("Ctrl+S"));
+                    menu::separator(ui);
+                    ui.add(Item::new("Delete row").destructive(true));
+                    ui.add(Item::new("Delete row").destructive(true).look(hovered));
+                });
+                let (bar, _) = ui.allocate_exact_size(vec2(MENU_BAR_W, SLIM_BAR_H), Sense::hover());
+                menu_bar(ui, bar.min, MENU_BAR_W, &[("File", false), ("Edit", true)]);
+            });
+        },
+    );
+}
+
+/// A menu bar `width` wide at `at` holding `titles` (each with whether it is open)
+/// ([`menu::bar`]). Returns where the titles are.
+fn menu_bar(ui: &mut Ui, at: egui::Pos2, width: f32, titles: &[(&str, bool)]) -> Vec<Rect> {
+    let mut bar = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(width, SLIM_BAR_H))).layout(Layout::top_down(Align::Min)));
+    menu::bar(&mut bar, |ui| titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect())
+}
+
+/// The boxed and text buttons in each of their states.
+fn buttons(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(ui, "button/box primary: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::primary("Run").shortcut("Ctrl+Enter"));
+        ui.add(BoxButton::primary("Apply"));
+        ui.add(BoxButton::primary("Save"));
+        ui.add(BoxButton::primary("Apply").look(focused));
+        ui.add_enabled(false, BoxButton::primary("Run").shortcut("Ctrl+Enter"));
+    });
+    section(ui, "button/box outline: default, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::outline("Cancel"));
+        ui.add(BoxButton::outline("Cancel").look(hovered));
+        ui.add(BoxButton::outline("Cancel").look(focused));
+        ui.add_enabled(false, BoxButton::outline("Clear"));
+    });
+    section(ui, "button/box danger: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::danger("Delete"));
+        ui.add(BoxButton::danger("Delete").look(focused));
+        ui.add_enabled(false, BoxButton::danger("Delete"));
+    });
+    // Bar buttons stand side by side, as in a bar.
+    section(ui, "button/bar: default, with divider, hover, on, disabled, focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add(BarButton::label(Icon::Refresh, "Refresh").divider(false));
+        ui.add(BarButton::label(Icon::Plus, "Row"));
+        ui.add(BarButton::label(Icon::Import, "Import").look(hovered));
+        ui.add(BarButton::label(Icon::Wrap, "Wrap").on(true));
+        ui.add_enabled(false, BarButton::label(Icon::Copy, "Copy"));
+        ui.add(BarButton::label(Icon::Refresh, "Refresh").look(focused));
+    });
+    section(ui, "button/bar icon: default, hover, on, disabled, focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add(BarButton::icon(Icon::Panel).divider(false));
+        ui.add(BarButton::icon(Icon::Panel).divider(false).look(hovered));
+        ui.add(BarButton::icon(Icon::Panel).divider(false).on(true));
+        ui.add_enabled(false, BarButton::icon(Icon::Panel).divider(false));
+        ui.add(BarButton::icon(Icon::Refresh).look(focused));
+    });
+    section(ui, "button/text: default, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(TextButton::new("Reset"));
+        ui.add(TextButton::new("Reset").look(hovered));
+        ui.add(TextButton::new("Reset").look(focused));
+        ui.add_enabled(false, TextButton::new("Reset"));
+    });
+    section(ui, "button/icon boxed: plus, minus, code, hover, focus, disabled, on (code: raw WHERE; no change on hover)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(IconButton::boxed(Icon::Plus));
+        ui.add(IconButton::boxed(Icon::Minus));
+        ui.add(IconButton::boxed(Icon::Code));
+        ui.add(IconButton::boxed(Icon::Plus).look(hovered));
+        ui.add(IconButton::boxed(Icon::Plus).look(focused));
+        ui.add_enabled(false, IconButton::boxed(Icon::Minus));
+        ui.add(IconButton::boxed(Icon::Code).on(true));
+    });
+    section(ui, "button/icon plain: first, previous, next, last, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        for icon in [Icon::First, Icon::Previous, Icon::Next, Icon::Last] {
+            ui.add(IconButton::plain(icon));
+        }
+        ui.add(IconButton::plain(Icon::Next).look(hovered));
+        ui.add(IconButton::plain(Icon::Next).look(focused));
+        ui.add_enabled(false, IconButton::plain(Icon::First));
+    });
+}
+
+/// The inputs in each of their states and two fields.
+fn inputs(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let rows: [(&str, fn(&mut String) -> Input<'_>, &str, &str, &str); 2] = [
+        ("input body: empty, placeholder, filled, focus, disabled, error", Input::body, "shop", "Optional", "shop"),
+        ("input data: empty, placeholder, filled, focus, disabled, error", Input::data, "42", "None", "pg14.internal"),
+    ];
+    for (caption, new, typed, placeholder, wrong) in rows {
+        section(ui, caption, SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = ROW_GAP;
+            let mut text = [String::new(), String::new(), typed.to_owned(), typed.to_owned(), typed.to_owned(), wrong.to_owned()];
+            let [empty, hint, filled, focus, off, error] = &mut text;
+            ui.add(new(empty).desired_width(INPUT_W));
+            ui.add(new(hint).placeholder(placeholder).desired_width(INPUT_W));
+            ui.add(new(filled).desired_width(INPUT_W));
+            ui.add(new(focus).look(focused).desired_width(INPUT_W));
+            ui.add_enabled(false, new(off).desired_width(INPUT_W));
+            ui.add(new(error).error(true).desired_width(INPUT_W));
+        });
+    }
+    section(ui, "field: label plus input; with an error line", SPACE_8, |ui| {
+        // The fields stand on one line, their tops level.
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = ROW_GAP;
+            let (mut name, mut url) = ("shop".to_owned(), "shop".to_owned());
+            ui.add(Field::new("Name", Input::body(&mut name).desired_width(INPUT_W)));
+            ui.add(Field::new("Database URL", Input::body(&mut url).desired_width(INPUT_W)).error(Some("Not a database URL")));
+        });
+    });
+}
+
+/// The dropdown, checkbox, segmented control and swatch in each of their states.
+fn choices(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(ui, "dropdown: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        Dropdown::new("showcase-dropdown", "equals (=)").width(INPUT_W).show(ui, |_| ());
+        Dropdown::new("showcase-dropdown-focus", "equals (=)").width(INPUT_W).look(focused).show(ui, |_| ());
+        ui.add_enabled_ui(false, |ui| Dropdown::new("showcase-dropdown-off", "equals (=)").width(INPUT_W).show(ui, |_| ()));
+    });
+    section(ui, "checkbox: on, off, on disabled, off disabled, on focus, off focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_24;
+        for (mut on, enabled, look) in [
+            (true, true, None),
+            (false, true, None),
+            (true, false, None),
+            (false, false, None),
+            (true, true, Some(focused)),
+            (false, true, Some(focused)),
+        ] {
+            let c = Checkbox::new(&mut on, "Read-only");
+            ui.add_enabled(enabled, if let Some(look) = look { c.look(look) } else { c });
+        }
+    });
+    let views = [(0, "Data"), (1, "Structure")];
+    let modes = [(0, "disable"), (1, "prefer"), (2, "require"), (3, "verify-ca"), (4, "verify-full")];
+    let three = [(3, "verify-ca"), (4, "verify-full"), (1, "prefer")];
+    section(ui, "segmented caps, 2 segments", SPACE_8, |ui| {
+        ui.add(Segmented::caps(&mut 0, &views));
+    });
+    section(ui, "segmented small, 3 and 5 segments", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(Segmented::small(&mut 1, &three).width(SEGMENTED_W));
+        ui.add(Segmented::small(&mut 1, &modes).width(SEGMENTED_W));
+    });
+    let states = |ui: &mut Ui, segment: &dyn Fn(bool) -> Segment<'static>| {
+        ui.spacing_mut().item_spacing.x = SPACE_12;
+        ui.add(segment(true));
+        ui.add(segment(false));
+        ui.add(segment(false).look(hovered));
+        ui.add_enabled(false, segment(false));
+        ui.add_enabled(false, segment(true));
+        ui.add(segment(true).look(focused));
+        ui.add(segment(false).look(focused));
+    };
+    section(ui, "segmented/segment: selected, default, hover, disabled, selected disabled, selected focus, focus", SPACE_8, |ui| {
+        states(ui, &|selected| Segment::caps("Data", selected));
+    });
+    section(ui, "segmented/segment small: selected, default, hover, disabled, selected disabled, selected focus, focus", SPACE_8, |ui| {
+        states(ui, &|selected| Segment::small(if selected { "prefer" } else { "require" }, selected).width(SMALL_SEGMENT_W));
+    });
+    for (caption, selected) in [("swatch: not selected; the last one has focus", false), ("swatch: selected; the last one has focus", true)] {
+        section(ui, caption, SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_12;
+            for colour in COLOURS {
+                ui.add(Swatch::new(colour, selected));
+            }
+            ui.add(Swatch::new(ConnectionColor::Red, selected).look(focused));
+        });
+    }
+}
+
+/// A section: its caption, `gap` under it, then `row`.
+fn section(ui: &mut Ui, caption: &str, gap: f32, row: impl FnOnce(&mut Ui)) {
+    let t = tokens(ui.ctx());
+    ui.add(Label::new(Text::Label.rich(caption).color(t.text_muted)).selectable(false));
+    ui.add_space(gap);
+    ui.horizontal(row);
+    ui.add_space(BETWEEN);
+}
+
+/// Each icon with its name, in its usual colour.
+fn icons(ui: &mut Ui) {
+    let t = tokens(ui.ctx());
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing = ICON_CELL_GAP;
+        for row in ICONS.chunks(ICONS_PER_ROW) {
+            ui.horizontal(|ui| {
+                for &icon in row {
+                    let (cell, _) = ui.allocate_exact_size(ICON_CELL, Sense::hover());
+                    let p = ui.painter();
+                    let bottom = cell.top() + ICON_BOTTOM;
+                    if icon == Icon::CheckBox {
+                        let tile = Rect::from_center_size(pos2(cell.center().x, bottom - ICON_TILE / 2.0), Vec2::splat(ICON_TILE));
+                        p.rect_filled(tile, CornerRadius::same(RADIUS_CONTROL), t.ink);
+                        icon.paint(p, tile.center(), t.on_ink);
+                    } else {
+                        icon.paint(p, pos2(cell.center().x, bottom - icon.size().y / 2.0), usual(icon, t));
+                    }
+                    Text::Small.paint(p, pos2(cell.center().x, cell.top() + ICON_NAME_TOP), Align2::CENTER_TOP, icon.name(), t.text_muted);
+                }
+            });
+        }
+    });
+}
+
+/// The logo cells: 120 by 46, each logo at 24 and at 14 side by side, centred, their bottoms 24
+/// down, its name 30 down.
+const LOGO_CELL: Vec2 = vec2(120.0, 46.0);
+const LOGO_BIG: f32 = 24.0;
+const LOGO_BOTTOM: f32 = 24.0;
+const LOGO_NAME_TOP: f32 = 30.0;
+
+/// Each engine's logo with its name, in their usual colour (`logo/*`, `text_muted`).
+fn logos(ui: &mut Ui) {
+    let t = tokens(ui.ctx());
+    ui.spacing_mut().item_spacing.x = ICON_CELL_GAP.x;
+    for logo in Logo::ALL {
+        let (cell, _) = ui.allocate_exact_size(LOGO_CELL, Sense::hover());
+        let p = ui.painter();
+        let left = cell.center().x - (LOGO_BIG + SPACE_8 + CONNECTION_LOGO) / 2.0;
+        let bottom = cell.top() + LOGO_BOTTOM;
+        logo.paint(p, Rect::from_min_max(pos2(left, bottom - LOGO_BIG), pos2(left + LOGO_BIG, bottom)), t.text_muted);
+        let left = left + LOGO_BIG + SPACE_8;
+        logo.paint(p, Rect::from_min_max(pos2(left, bottom - CONNECTION_LOGO), pos2(left + CONNECTION_LOGO, bottom)), t.text_muted);
+        Text::Small.paint(p, pos2(cell.center().x, cell.top() + LOGO_NAME_TOP), Align2::CENTER_TOP, logo.name(), t.text_muted);
+    }
+}
+
+/// The colour the Icons section draws `icon` in.
+fn usual(icon: Icon, t: &Tokens) -> Color32 {
+    match icon {
+        Icon::Key | Icon::KeyPrimary => t.key,
+        Icon::SortAscending | Icon::SortDescending => t.ink,
+        Icon::CheckBox => t.on_ink,
+        Icon::ChevronDown
+        | Icon::ChevronRight
+        | Icon::Close
+        | Icon::TabTable
+        | Icon::Check
+        | Icon::Search
+        | Icon::NoColour
+        | Icon::Schema
+        | Icon::Table
+        | Icon::View
+        | Icon::MaterializedView
+        | Icon::KeyForeign => t.text_muted,
+        _ => t.text,
+    }
+}

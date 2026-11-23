@@ -1,6 +1,6 @@
 # Contributors in the About window
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
 
 The About window will credit everyone who contributed to dbee. **(planned: the About window does not exist yet; the data files and `cargo xtask contributors` do.)**
 

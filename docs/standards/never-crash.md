@@ -18,7 +18,7 @@ People trust dbee with their databases. A crash can lose an unsaved query or lea
 - Every crate root carries `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`.
 - The workspace sets `unsafe_code = "forbid"` under `[workspace.lints.rust]`.
 - `clippy.toml` allows `unwrap`, `expect`, `panic` and indexing inside tests only.
-- `cargo xtask ci` (fmt, clippy with `-D warnings`, tests, assets, layers, provenance) must pass before every commit.
+- `cargo xtask ci` (fmt, clippy with `-D warnings`, tests, assets, tokens, layers, provenance) must pass before every commit.
 
 ## Hostile input checklist
 

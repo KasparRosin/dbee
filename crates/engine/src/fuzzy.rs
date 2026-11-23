@@ -1,5 +1,6 @@
 //! Fuzzy scoring for the quick search (Ctrl+P): [`find`] ranks a catalog's tables,
-//! [`find_connections`] the saved connections, and [`search`] mixes the two.
+//! [`find_connections`] the saved connections, [`search`] mixes the two and [`search_grouped`]
+//! lists them apart.
 //!
 //! A query matches when its characters occur in the candidate in order (case-insensitively).
 //! The score rewards a match at the start of a word (the start, or after `.`, `_`, a space or
@@ -187,4 +188,20 @@ pub fn search<'a>(catalog: Option<&'a Catalog>, saved: &'a [ConnectionConfig], o
     }
     all.truncate(limit);
     all
+}
+
+/// The quick search, grouped: the best `limit` of `catalog`'s tables ([`find`]; none without a
+/// catalog), then the best `limit` of the `saved` connections but `open` ([`find_connections`]),
+/// each in its own order, so up to twice `limit` hits. A long list of tables cannot hide the
+/// connections, as [`search`]'s single cut can.
+pub fn search_grouped<'a>(
+    catalog: Option<&'a Catalog>,
+    saved: &'a [ConnectionConfig],
+    open: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> Vec<Found<'a>> {
+    let tables = catalog.map(|c| find(c, query, limit)).unwrap_or_default();
+    let connections = find_connections(saved, open, query, limit);
+    tables.into_iter().map(Found::Table).chain(connections.into_iter().map(Found::Connection)).collect()
 }

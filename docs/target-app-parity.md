@@ -1,19 +1,19 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the platforms after the first test release; M2 effort; import and export are M4) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (checked against the M3 tree: the Query and Data rows and "What works today" say what the cell editor, the value panel, the error band and the tracked transaction do; "Effort and calibration" keeps the dates and counts; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
 dbee covers the daily workflow on PostgreSQL, MySQL, MariaDB and SQLite files: connect (a server also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window: the M1 day on Postgres (`apps/dbee/tests/m1_day.rs`) and the M2 day on MySQL through SSH, MariaDB and a SQLite file (`apps/dbee/tests/m2_day.rs`), measured. There is no file export or import yet (M4).
 
-Overall parity with Beekeeper Studio: **~29 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (a day of real use on the maintainer's own databases, the last check of M1 and of M2).
+Overall parity with Beekeeper Studio: **~30 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (a day of real use on the maintainer's own databases, the last check of M1 and of M2).
 
 ## Readiness by audience
 
 | Audience | Ready % | Agent wall-clock hours to ~95% | Work that dominates |
 |---|---|---|---|
-| Developer querying a local SQLite file | ~30 % (estimated): the daily workflow on a file (`dbee <file>`, a dropped file, Open with), not yet used on real files | not estimated yet | file export and import (M4), structure views, saved queries and history |
-| Backend developer on Postgres/MySQL | ~35 % (estimated): the daily workflow on Postgres, MySQL and MariaDB, not yet used on real databases | not estimated yet | file export and import (M4), structure views, saved queries and history |
+| Developer querying a local SQLite file | ~30 % (estimated): the daily workflow on a file (`dbee <file>`, a dropped file, Open with), not yet used on real files | not estimated yet | file export and import (M4), a table editor, saved queries and history |
+| Backend developer on Postgres/MySQL | ~35 % (estimated): the daily workflow on Postgres, MySQL and MariaDB, not yet used on real databases | not estimated yet | file export and import (M4), a table editor, saved queries and history |
 | Data analyst exporting results | ~10 % (estimated): copies of up to 8 MiB only | not estimated yet | file export (M4), results past 10,000 rows |
 
 ## What we measured against and how
@@ -40,23 +40,23 @@ Beekeeper Studio 5.5.7, observed black-box in a sandbox, using synthetic databas
 |---|---|---|---|---|---|
 | Connections | 15 | 62 % (7.5 of 12 rows; estimated) | ~45 % (estimated) | not estimated yet | Done: read-only mode, test, save with name, colour and passwords, saved and recent lists with a filter, Fill from URL. Partial: no socket mode or IAM; SSL without client certificates; SSH without a jump host; no Copy URL. Missing: a sample database, team workspaces. Also on every engine: the database type's cards, the server's databases listed under the Database field, a database file opened from the command line or a drop. `crates/engine/tests/connection.rs`, `crates/ui-egui/tests/connections.rs`, `m1_day` step 1, `m2_day`. |
 | Navigation | 10 | 50 % (3 of 6; estimated) | ~40 % (estimated) | not estimated yet | Done: the schema tree, quick search. Partial: the tree's filter and refresh only; tabs without reopen or restore. Missing: database switcher, several windows. Ctrl+P finds saved connections too, and switches to one. `crates/ui-egui/tests/workspace.rs`, `m1_day` step 2, `m2_day`. |
-| Query | 20 | 32 % (3.5 of 11; estimated) | ~25 % (estimated) | not estimated yet | Done: run all and run current, several result sets, errors. Partial: the editor has no autocomplete. Missing: manual transactions, saved queries, history, Vim keymap and wrap, find, run to file, AI shell. On MySQL and MariaDB a query tab's database chip. `crates/ui-egui/tests/query_tab.rs`, `m1_day` step 7, `m2_day`. |
+| Query | 20 | 32 % (3.5 of 11; estimated) | ~25 % (estimated) | not estimated yet | Done: run all and run current, several result sets, errors. Partial: the editor has no autocomplete. Missing: manual transactions (a transaction a script opens itself is shown as IN TRANSACTION and asked about when its tab or the connection closes, and a failed one offers ROLLBACK; there is no manual mode and no Begin or Commit control), saved queries, history, Vim keymap and wrap, find, run to file, AI shell. On MySQL and MariaDB a query tab's database chip. `crates/ui-egui/tests/query_tab.rs`, `m1_day` step 7, `m2_day`. |
 | Results | 10 | 33 % (1 of 3; estimated) | ~30 % (estimated) | M4 | Done: copy as TSV (with or without header), CSV, JSON, Markdown. Missing: downloads. `crates/ui-egui/tests/clipboard.rs`. |
-| Data | 25 | 59 % (6.5 of 11; estimated) | ~45 % (estimated) | not estimated yet | Done: the filter builder (any number of filters, raw `WHERE`), paging with counts, following a foreign key. Partial: the grid has no tooltips; editing has no copy as SQL, and rows have no clone; the value panel (pretty JSON, copy) stands in for two rows, the edit modal and the JSON row viewer, but it is read-only and shows one cell, not the row; copy has no SQL or IN list formats; columns resize only. Missing: quick filter. `crates/ui-egui/tests/table_tab.rs`, `editing.rs`, `value_panel.rs`, `m1_day` steps 3–6, `m2_day`. |
-| Structure | 8 | 0 % (0 of 5) | 0 % | not estimated yet | Not started. |
+| Data | 25 | 59 % (6.5 of 11; estimated) | ~45 % (estimated) | not estimated yet | Done: the filter builder (any number of filters, raw `WHERE`), paging with counts, following a foreign key. Partial: the grid has no tooltips; editing has no copy as SQL, and rows have no clone; the value panel (pretty JSON, copy, a selected row as its JSON object, the draft of the cell being edited) stands in for two rows, the edit modal and the JSON row viewer, but a value past 32 KiB is read-only in it, and a row is shown there, not edited; copy has no SQL or IN list formats; columns resize only. Missing: quick filter. `crates/ui-egui/tests/table_tab.rs`, `editing.rs`, `value_panel.rs`, `m1_day` steps 3–6, `m2_day`. |
+| Structure | 8 | 40 % (2 of 5; estimated) | ~30 % (estimated) | not estimated yet | Partial: a table tab's STRUCTURE shows its columns (with defaults and keys), indexes, foreign keys and the keys that reference it, and its triggers, read-only, on all four engines; a foreign key opens its table. Missing: editing the structure, a new table. `crates/ui-egui/tests/structure.rs`, `m1_day` step 2d. |
 | Import/export | 7 | 0 % (0 of 3) | 0 % | M4 | Not started ([gaps.md](gaps.md) 1). |
 | Tools | 3 | 0 % (0 of 2) | 0 % | not estimated yet | Backup, restore and plugins not started. |
-| App | 2 | 0 % (0 of 4) | 0 % | not estimated yet | One light theme of dbee's own; no zoom or help menus. |
+| App | 2 | 12 % (0.5 of 4; estimated) | ~10 % (estimated) | not estimated yet | Partial: dbee's own light and dark themes, or the system's choice (View > Theme). Missing: zoom, help menus. `crates/ui-egui/tests/theme.rs`. |
 
-Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
+Features, weighted by area: **42 %**, put at **~38 % (estimated)**.
 
 ## Dimensions
 
 | Dimension | Weight | Score | Kind | Basis |
 |---|---|---|---|---|
-| Features | 40 | ~35 % | estimated | the feature areas above |
+| Features | 40 | ~38 % | estimated | the feature areas above |
 | Database engines | 20 | 20 % | measured (4 of 20 engines) | [driver-parity.md](driver-parity.md) |
-| UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 22 elements graded |
+| UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 24 elements graded, 3 done and 19 partial |
 | Performance | 8 | ~30 % | estimated | dbee meets its own M1 targets (measured, below), but a frame passes 16.7 ms at about 100 columns in most runs. Beekeeper's timings were not measured, so there is no side-by-side. |
 | Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps (again on 2026-11-06, seed 1793954111563178215) and every command with empty params pass (measured). No use on real databases yet. |
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
@@ -64,7 +64,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows, FreeBSD and the other Linux builds built in the first test release (2026-10-29), not run except Windows ARM64 ([hardware-parity.md](hardware-parity.md)) |
 | Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); the CLI's database commands are planned; no AI features |
 
-Weighted: 0.40 × 35 + 0.20 × 20 + 0.12 × 45 + 0.08 × 30 + 0.08 × 25 + 0.02 × 25 + 0.02 × 25 = **28.8 %**, given as **~29 % (estimated)**.
+Weighted: 0.40 × 38 + 0.20 × 20 + 0.12 × 45 + 0.08 × 30 + 0.08 × 25 + 0.02 × 25 + 0.02 × 25 = **30.0 %**, given as **~30 % (estimated)**.
 
 ## Performance
 
@@ -126,9 +126,9 @@ Pre-alpha. M1 and M2 are built: five of the six alpha gate rows pass, on all fou
 
 ## Effort and calibration
 
-M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits: 54 for the first 27 tasks (each reviewed, then fixed where the review found problems), one toolchain pin and four for the last task. The M1 review fixes followed in seven more, 66 commits in all.
+M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks, 66 commits with the fixes that followed.
 
-M2 ran from 2026-10-28 to 2026-11-08 (measured, git): 20 planned tasks and one added (M2.5b), each reviewed and fixed where the review found problems. The whole-branch review and its fix round, a larger review and a bugs task followed; connection ids and the security review come next. At 2026-11-08 the branch holds 92 commits of its own (`git rev-list --count --no-merges 4663d95..m2`) and one merge of `main`.
+M2 ran from 2026-10-28 to 2026-11-08 (measured, git): 21 tasks, and the fixes that followed. At 2026-11-08 its branch held 92 commits of its own and one merge of `main`.
 
 Agent hours were not logged in either, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
 
@@ -137,10 +137,12 @@ Agent hours were not logged in either, so per-area hours are not estimated yet. 
 - **Engines:** PostgreSQL 14 and newer; MySQL 5.7 and newer; MariaDB 10.11 and newer; SQLite files.
 - **Connecting:** saved and recent connections; the database type's cards, then its form with Fill from URL; TLS modes with a CA file; an SSH tunnel with key (found on its own), agent or password and host key checks; the server's databases listed under the Database field; read-only mode; passwords in the OS keyring; reconnect after a lost connection; a database file opened from the command line (`dbee <file>`), a drop on the window or the file manager, and saved from the status bar.
 - **Browsing:** a schema tree with a filter (databases on MySQL and MariaDB); quick search (Ctrl+P) over the tables and the saved connections, switching connection; table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging by 100, estimated and exact counts, and foreign keys followed into a filtered tab.
-- **Editing:** staged edits (one-line, multi-line and boolean editors, set NULL, add and delete rows), undo and redo, and Apply or Ctrl+S in one transaction, all or nothing.
-- **Values:** a value panel with the whole value of a cell, JSON pretty-printed and coloured, selectable and copyable.
-- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results; error cards that jump to the position; on MySQL and MariaDB the database a tab runs in.
+- **Editing:** staged edits (an editor in the cell for every type, the value panel showing the same draft and taking new lines; set NULL, add and delete rows), undo and redo, and Apply or Ctrl+S in one transaction, all or nothing.
+- **Values:** a value panel with the whole value of a cell, or a selected row as JSON, JSON pretty-printed and coloured, selectable and copyable.
+- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results; an error band that jumps to the position, with ROLLBACK under a failed transaction; an open transaction shown in the status bar and asked about on close; on MySQL and MariaDB the database a tab runs in.
 - **Copying:** values, with a header, or as CSV, JSON or Markdown, up to 8 MiB.
+- **Structure:** a table tab's STRUCTURE, read-only: columns, indexes, foreign keys, the keys that reference the table, triggers.
+- **Look:** M3's redesign on every screen built so far, in light and dark; nothing that waits shows before it has run 300 ms.
 - **Agents:** a localhost control channel, and isolated runs (`cargo xtask run-isolated`).
 
 ## Not measured yet
@@ -151,15 +153,17 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-08 | minor | Platforms: the first test release built every row (2026-10-29), regular CI builds Linux only; M2 effort through the review rounds; import and export are M4 (M3 is the Redesign). |
+| 2026-11-23 | minor | Checked against the M3 tree. Query: what dbee does with a transaction a script opens (manual transactions still missing). Data: the value panel shows a selected row and an edited cell's draft. "What works today": the cell editor, the error band, the transaction. "Effort and calibration" keeps the dates and counts only. Grades unchanged. |
+| 2026-11-20 | minor | M3's screens: Structure 40 % (2 of 5, read-only; estimated), App 12 % (light and dark themes), features ~38 %, overall ~30 % (estimated); UI ~45 % stands (24 elements, 3 done, 18 partial); what works today gains Structure and the look. |
+| 2026-11-08 | minor | Platforms: the first test release built every row (2026-10-29), regular CI builds Linux only; M2 effort; import and export are M4 (M3 is the Redesign). |
 | 2026-11-06 | minor | The M2 tarball as rebuilt from `df2f3ca`, with its sha256; the launch check right after its release build (948 and 347 ms at a load of 8.5–9.5). |
 | 2026-11-06 | minor | The launch check measured at a low load (199–228 ms); the M2 day's runs with their loads; the 20,000-step fuzz run again. |
 | 2026-11-05 | major | M2 built: MySQL, MariaDB and SQLite (4 of 20 engines, ~29 % overall, estimated); readiness for SQLite and MySQL users; M1's targets measured again on every engine, in a release build, with the load; the M2 day; effort for M2. |
 | 2026-10-29 | trivial | The MCP server is no longer described until it exists. |
 | 2026-10-28 | minor | Import and export is now M3; M2 is three databases (MySQL/MariaDB and SQLite). |
-| 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |
+| 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 fixes, earlier runs instead of task ids. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
-| 2026-10-27 | minor | Effort counts 59 commits for M1 (four for its last task) and five for the M1 review fixes; gaps.md 13 is now 12. |
+| 2026-10-27 | minor | Effort counts 59 commits for M1 (four for its last task) and five for the M1 fixes; gaps.md 13 is now 12. |
 | 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, the earlier 1 MiB figure added; a fifth wide-result run. |
 | 2026-10-26 | major | M1 built: first assessment. Feature areas graded against the observed catalog; dimension scores; ~25 % overall (estimated); performance measured with machine and load; readiness by audience. |
 | 2026-10-15 | major | Template (scaffold). |

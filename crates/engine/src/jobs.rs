@@ -65,6 +65,23 @@ impl std::fmt::Debug for Stop {
     }
 }
 
+/// Set once a job's result is on its way to the session ([`Jobs::sent`]). A job that waits for it
+/// before it ends sends its own result after that one, so the session applies the two in that
+/// order.
+#[derive(Clone, Default)]
+pub(crate) struct Sent(Arc<Stop>);
+
+impl Sent {
+    /// Returns once the result was sent, also when that was before.
+    pub(crate) async fn wait(&self) {
+        self.0.stopped().await;
+    }
+
+    fn set(&self) {
+        self.0.stop();
+    }
+}
+
 /// How long a stopped statement's first cancel request has to stop it before the request is sent
 /// again, and then how often it is sent while the statement has not ended.
 const CANCEL_AGAIN_AFTER: Duration = Duration::from_secs(1);
@@ -76,6 +93,11 @@ const CANCEL_AGAIN_EVERY: Duration = Duration::from_secs(2);
 /// before the statement does is lost. Each request is waited for before the next is sent and
 /// before this returns, so none is still on its way when the connection's next statement starts
 /// (the drivers then start none either). Stopped before it started, the statement is not run.
+///
+/// Whose stop it was is decided here. The statement ends `Cancelled` when it was stopped before
+/// it started, or when it ends in the server's interrupt once a request went out for it. An
+/// interrupt before that (a timeout, another session's cancel) stays the server's error, also
+/// when the stop comes after it, and a statement that ended any other way keeps its end.
 pub(crate) async fn stoppable<T>(cancel: Arc<dyn Cancel>, statement: impl Future<Output = Result<T, DbError>>, stop: &Stop) -> Result<T, DbError> {
     stoppable_with(cancel, statement, stop, CANCEL_AGAIN_AFTER, CANCEL_AGAIN_EVERY).await
 }
@@ -110,13 +132,29 @@ async fn stoppable_with<T>(
             log::info!("a cancel request was not delivered");
         }
         if let Some(ended) = ended {
-            return ended;
+            return cancelled_by_dbee(ended);
         }
         if let Ok(ended) = tokio::time::timeout(wait, &mut statement).await {
-            return ended;
+            return cancelled_by_dbee(ended);
         }
         wait = every;
     }
+}
+
+/// `work`, or `None` once `stop` is set (also when both are ready): `work` is then dropped where it
+/// stands, which closes what it holds, such as a connection attempt's socket. For work no cancel
+/// request reaches, as a connect; a statement stops through [`stoppable`].
+pub(crate) async fn unless_stopped<T>(stop: &Stop, work: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = stop.stopped() => None,
+        done = work => Some(done),
+    }
+}
+
+/// The end of a statement dbee sent a cancel request for: the server's interrupt is that cancel.
+fn cancelled_by_dbee<T>(ended: Result<T, DbError>) -> Result<T, DbError> {
+    ended.map_err(|e| if e.is_interrupted() { DbError::Cancelled } else { e })
 }
 
 /// Worker threads of the job runtime.
@@ -170,6 +208,11 @@ pub(crate) struct Jobs {
     delivered: VecDeque<(JobId, Result<Json, EngineError>)>,
     /// How to stop the running jobs that can be stopped ([`Jobs::spawn_stoppable`]).
     stops: BTreeMap<JobId, Arc<Stop>>,
+    /// How to stop the running connection attempts ([`Jobs::spawn_attempt`]); kept apart from
+    /// `stops`, as closing or reconnecting a connection stops what runs on it, never an attempt.
+    attempts: BTreeMap<JobId, Arc<Stop>>,
+    /// Each running job's [`Sent`].
+    sent: BTreeMap<JobId, Sent>,
     last: u64,
     applying: Option<JobId>,
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -194,6 +237,8 @@ impl Jobs {
             orphaned: BTreeSet::new(),
             delivered: VecDeque::new(),
             stops: BTreeMap::new(),
+            attempts: BTreeMap::new(),
+            sent: BTreeMap::new(),
             last: 0,
             applying: None,
             notify,
@@ -204,6 +249,8 @@ impl Jobs {
         self.last = self.last.saturating_add(1);
         let job = JobId(self.last);
         self.running.insert(job, label);
+        let sent = Sent::default();
+        self.sent.insert(job, sent.clone());
         let tx = self.tx.clone();
         let notify = self.notify.clone();
         log::debug!("job {} ({label}): started", job.0);
@@ -215,6 +262,7 @@ impl Jobs {
             });
             // Fails only when the session is gone, and then nobody wants the result.
             let _ = tx.send(Finished { job, label, outcome, took: start.elapsed() });
+            sent.set();
             if let Some(notify) = notify {
                 notify();
             }
@@ -231,13 +279,40 @@ impl Jobs {
         job
     }
 
+    /// The [`Sent`] of job `job`, while its result was not applied; `None` once it was, when
+    /// there is nothing to wait for.
+    pub fn sent(&self, job: JobId) -> Option<Sent> {
+        self.sent.get(&job).cloned()
+    }
+
     /// Stops the running job `job`: `Some(true)` when this stopped it, `Some(false)` when it was
     /// stopping already, `None` when no such job runs that can be stopped.
     pub fn stop(&self, job: JobId) -> Option<bool> {
         self.stops.get(&job).map(|stop| stop.stop())
     }
 
-    /// Stops every running job that can be stopped.
+    /// [`Jobs::spawn`] for a connection attempt that `stop` stops ([`Jobs::stop_attempts`]).
+    pub fn spawn_attempt(&mut self, label: &'static str, stop: Arc<Stop>, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
+        let job = self.spawn(label, fut);
+        self.attempts.insert(job, stop);
+        job
+    }
+
+    /// Stops every running connection attempt: how many this stopped, and how many were stopping
+    /// already.
+    pub fn stop_attempts(&self) -> (usize, usize) {
+        let (mut stopped, mut stopping) = (0usize, 0usize);
+        for stop in self.attempts.values() {
+            if stop.stop() {
+                stopped = stopped.saturating_add(1);
+            } else {
+                stopping = stopping.saturating_add(1);
+            }
+        }
+        (stopped, stopping)
+    }
+
+    /// Stops every running job that can be stopped, except the connection attempts.
     pub fn stop_all(&self) {
         for stop in self.stops.values() {
             stop.stop();
@@ -291,6 +366,8 @@ impl Jobs {
     pub fn finish(&mut self, job: JobId) -> bool {
         self.running.remove(&job);
         self.stops.remove(&job);
+        self.attempts.remove(&job);
+        self.sent.remove(&job);
         self.orphaned.remove(&job)
     }
 
@@ -376,6 +453,33 @@ mod tests {
         assert!(!stop.stop(), "set already");
     }
 
+    /// A job that waits for another's [`Sent`] before it ends comes in after it, also when it
+    /// would finish first; waiting for a job whose result is already in returns at once.
+    #[test]
+    fn a_job_waiting_for_anothers_result_comes_in_after_it() {
+        let mut jobs = Jobs::new(None).unwrap();
+        let release = Arc::new(Stop::default());
+        let held = Arc::clone(&release);
+        let first = jobs.spawn("first", async move {
+            held.stopped().await;
+            let apply: Apply = Box::new(|_| Ok(Json::Null));
+            apply
+        });
+        let sent = jobs.sent(first).unwrap();
+        let second = jobs.spawn("second", async move {
+            sent.wait().await;
+            let apply: Apply = Box::new(|_| Ok(Json::Null));
+            apply
+        });
+        release.stop();
+        let deadline = Deadline::after(Duration::from_secs(10));
+        let order: Vec<JobId> = (0..2).filter_map(|_| jobs.next_before(&deadline).map(|done| done.job)).collect();
+        assert_eq!(order, [first, second]);
+        assert!(jobs.sent(first).is_some(), "until its result is applied");
+        jobs.finish(first);
+        assert!(jobs.sent(first).is_none(), "nothing to wait for once applied");
+    }
+
     /// A statement that ends only once a cancel request reaches it, and a canceller whose first
     /// `lost` requests reach nothing (they arrive before the statement does). Every request takes
     /// a moment on its way; one is never sent while another is.
@@ -405,15 +509,30 @@ mod tests {
     }
 
     impl Remote {
+        /// Ends with the server's interrupt once a request reached it, as a Postgres or MySQL
+        /// statement does.
         async fn statement(&self) -> Result<u64, DbError> {
             loop {
                 let reached = self.reached.notified();
                 if self.stopped.load(Ordering::SeqCst) {
-                    return Err(DbError::Cancelled);
+                    return Err(interrupt());
                 }
                 reached.await;
             }
         }
+    }
+
+    /// The server's interrupt: a cancel request's, or a timeout's with the same code.
+    fn interrupt() -> DbError {
+        DbError::Server(Box::new(dbee_driver::ServerError {
+            code: "57014".into(),
+            code_label: Some("SQLSTATE"),
+            message: "canceling statement due to statement timeout".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            meaning: Some(dbee_driver::Meaning::Interrupted),
+        }))
     }
 
     const SOON: Duration = Duration::from_millis(10);
@@ -462,5 +581,61 @@ mod tests {
         let quiet = Arc::new(Remote::default());
         assert_eq!(stoppable_with(Arc::clone(&quiet) as Arc<dyn Cancel>, async { Ok(1) }, &Stop::default(), SOON, SOON).await, Ok(1));
         assert_eq!(quiet.sent.load(Ordering::SeqCst), 0);
+    }
+
+    /// The server's interrupt is dbee's cancel only once dbee sent one for the statement: before
+    /// that (a timeout, another session's cancel) it stays the server's error, also when the stop
+    /// comes after the statement ended; once a request went out, an interrupt that ends the
+    /// statement while it is on its way is dbee's. dbee's own `Cancelled` and other errors pass.
+    #[tokio::test]
+    async fn only_an_interrupt_after_dbees_cancel_reads_as_cancelled() {
+        let remote = Arc::new(Remote::default());
+        let quiet = || Arc::clone(&remote) as Arc<dyn Cancel>;
+        let server = async { Err::<u64, _>(interrupt()) };
+        assert_eq!(stoppable_with(quiet(), server, &Stop::default(), SOON, SOON).await, Err(interrupt()));
+        // It ended by itself before the stop: the stop sends nothing and changes nothing.
+        let stop = Stop::default();
+        let ended_first = async {
+            tokio::task::yield_now().await;
+            Err::<u64, _>(interrupt())
+        };
+        let stopping = async {
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            stop.stop();
+        };
+        let (ended, ()) = tokio::join!(stoppable_with(quiet(), ended_first, &stop, SOON, SOON), stopping);
+        assert_eq!(ended, Err(interrupt()));
+        assert_eq!(remote.sent.load(Ordering::SeqCst), 0);
+        // A server's timeout that lands while dbee's request is on its way: the request went out.
+        let stop = Stop::default();
+        let meanwhile = async {
+            stop.stopped().await;
+            tokio::task::yield_now().await;
+            Err::<u64, _>(interrupt())
+        };
+        let stopping = async {
+            tokio::task::yield_now().await;
+            stop.stop();
+        };
+        let (ended, ()) = tokio::join!(stoppable_with(quiet(), meanwhile, &stop, SOON, SOON), stopping);
+        assert_eq!(ended, Err(DbError::Cancelled));
+        assert_eq!(remote.sent.load(Ordering::SeqCst), 1);
+        // Other ends of a stopped statement are kept as they are.
+        for other in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+            let stop = Stop::default();
+            let ends = async {
+                stop.stopped().await;
+                tokio::task::yield_now().await;
+                Err::<u64, _>(other.clone())
+            };
+            let stopping = async {
+                tokio::task::yield_now().await;
+                stop.stop();
+            };
+            let (ended, ()) = tokio::join!(stoppable_with(quiet(), ends, &stop, SOON, SOON), stopping);
+            assert_eq!(ended, Err(other));
+        }
     }
 }

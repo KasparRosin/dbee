@@ -163,15 +163,92 @@ fn new_connection_starts_with_the_engine_cards() {
     let url = rect(&tag_in(&i, "conn-fill-url").unwrap());
     ui.click("conn-kind-postgres");
     let i = ui.inspect();
-    let now = rect(&tag_in(&i, "conn-title").unwrap());
-    assert_eq!(([now[0], now[1], now[3]], rect(&tag_in(&i, "conn-fill-url").unwrap())), ([title[0], title[1], title[3]], url));
+    assert_eq!((rect(&tag_in(&i, "conn-title").unwrap()), rect(&tag_in(&i, "conn-fill-url").unwrap())), (title, url));
     assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "postgres");
     assert_eq!(tag_in(&i, "conn-port").unwrap()["value"], "5432");
-    // The type and Change engine join the title row, left of Fill from URL and as wide as it.
+    // The engine row under the title row: the type, and Change engine at the pane's right end.
+    let pane = rect(&tag_in(&i, "conn-card").unwrap());
     let change = rect(&tag_in(&i, "conn-change-engine").unwrap());
     let kind = rect(&tag_in(&i, "conn-kind").unwrap());
-    assert_eq!((change[1], change[2], change[3]), (url[1], url[2], url[3]), "{change:?} {url:?}");
-    assert!(kind[0] + kind[2] <= change[0] && change[0] + change[2] <= url[0], "{kind:?} {change:?} {url:?}");
+    assert_eq!(kind[1], change[1], "one row: {kind:?} {change:?}");
+    assert!(kind[1] > title[1] + title[3] && kind[1] > url[1] + url[3], "under the title row: {kind:?} {title:?} {url:?}");
+    assert!(((change[0] + change[2]) - (pane[0] + pane[2])).abs() <= 0.5, "at the pane's right end: {change:?} {pane:?}");
+    assert!(kind[0] + kind[2] <= change[0], "{kind:?} {change:?}");
+}
+
+/// The engine cards: one box of cells 104 tall, side by side and joined, each with its
+/// engine's logo 16 in and 16 down, 28 square.
+#[test]
+fn the_engine_cards_are_k2() {
+    // A build without SQLite: its card is upcoming.
+    let drivers = Drivers::new(dbee_drivers::all().iter().filter(|d| !d.kinds().contains(&DbKind::Sqlite)).cloned().collect());
+    let mut ui = Ui::window(Setup { size: egui::vec2(1100.0, 720.0), drivers: Some(drivers), ..Setup::default() });
+    let i = ui.inspect();
+    let cells: Vec<egui::Rect> = DbKind::ALL.iter().map(|k| rect_of(&tag_in(&i, &format!("conn-kind-{}", k.id())).unwrap())).collect();
+    for (n, c) in cells.iter().enumerate() {
+        assert!((c.height() - 104.0).abs() <= 0.5, "{n}: 104 tall: {c:?}");
+        assert!((c.top() - cells[0].top()).abs() <= 0.5, "{n}: side by side: {cells:?}");
+        if n > 0 {
+            assert!((c.left() - cells[n - 1].right()).abs() <= 1.0, "{n}: joined: {cells:?}");
+        }
+        // The logo: a texture drawn in the top-left 16 + 28 square.
+        let square = egui::Rect::from_min_size(c.min, egui::vec2(16.0 + 28.0, 16.0 + 28.0));
+        let logo = ui.shapes().into_iter().any(|(_, s)| {
+            let bounds = s.visual_bounding_rect();
+            matches!(s, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() && square.contains_rect(bounds))
+        });
+        assert!(logo, "{n}: a logo in {square:?}");
+    }
+    let sqlite = tag_in(&i, "conn-kind-sqlite").unwrap();
+    assert_eq!((sqlite["value"]["upcoming"].clone(), sqlite["enabled"].clone()), (json!(true), json!(false)), "{sqlite}");
+    assert!(ui.text_in(cells[3], "UPCOMING").is_some(), "the chip inside the SQLite card");
+    // No rounded card stroke round each cell: one box round the row.
+    let boxed: Vec<egui::Rect> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.rect.contains_rect(cells[0].shrink(1.0)) => Some(r.rect),
+            _ => None,
+        })
+        .collect();
+    assert!(boxed.iter().any(|b| b.contains_rect(cells[3].shrink(1.0))), "one box holds the row: {boxed:?}");
+}
+
+/// The right pane runs from the sidebar to the window's right edge, between the menu bar and the
+/// version bar: no centred card with a rounded edge.
+#[test]
+fn the_pane_is_full_bleed() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.click("conn-kind-postgres");
+    let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 720.0)).shrink(KITTEST_MARGIN);
+    let i = ui.inspect();
+    let pane = rect_of(&tag_in(&i, "conn-card").unwrap());
+    let version = rect_of(&tag_in(&i, "conn-version").unwrap());
+    assert!((pane.left() - (window.left() + 260.0)).abs() <= 1.0, "from the sidebar: {pane:?}");
+    assert!((pane.right() - window.right()).abs() <= 0.5, "to the window's right: {pane:?}");
+    assert!((pane.top() - (window.top() + 30.0)).abs() <= 0.5, "under the menu bar: {pane:?}");
+    assert!((pane.bottom() - version.top()).abs() <= 0.5, "down to the version bar: {pane:?} {version:?}");
+    let host = rect_of(&tag_in(&i, "conn-host").unwrap());
+    let card = ui.shapes().into_iter().find(|(_, s)| match s {
+        egui::Shape::Rect(r) => r.stroke.width > 0.0 && r.corner_radius == egui::CornerRadius::same(4) && r.rect.contains_rect(host),
+        _ => false,
+    });
+    assert!(card.is_none(), "no card round the form: {card:?}");
+}
+
+/// The connection's colour is a 2 px edge along the top of the title row, across the pane.
+#[test]
+fn the_colour_shows_along_the_title_row() {
+    let mut ui = ui();
+    let edge = |ui: &mut Ui| {
+        let pane = rect_of(&ui.tag("conn-card").unwrap());
+        fills_on(ui, egui::Rect::from_min_size(pane.min, egui::vec2(pane.width(), 2.0)))
+    };
+    let red = dbee_ui_egui::theme::connection_color(dbee_config::ConnectionColor::Red).unwrap();
+    ui.click("conn-color-red");
+    assert!(edge(&mut ui).contains(&red), "a red edge: {:?}", edge(&mut ui));
+    ui.click("conn-color-none");
+    assert!(edge(&mut ui).is_empty(), "no edge: {:?}", edge(&mut ui));
 }
 
 #[test]
@@ -193,6 +270,132 @@ fn every_row_of_a_server_form_is_in_view_at_the_default_window() {
             let tag = tag_in(&i, &id).unwrap_or_else(|| panic!("{kind:?}: no {id}"));
             assert!(tag.get("visible").is_none() && rect(&tag)[3] == whole, "{kind:?}: {id} is not whole in view: {tag}");
         }
+        if !ssh {
+            continue;
+        }
+        // With the tunnel on too: its rows are in the second column, every one whole in view.
+        let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+        ui.click(&format!("conn-kind-{}", kind.id()));
+        ui.click("conn-ssh-on");
+        let i = ui.inspect();
+        for id in ["conn-ssh-host", "conn-ssh-port", "conn-ssh-user", "conn-ssh-auth", "conn-ssh-key"] {
+            let tag = tag_in(&i, id).unwrap_or_else(|| panic!("{kind:?}: no {id}"));
+            assert!(tag.get("visible").is_none() && rect(&tag)[3] == 28.0, "{kind:?}, SSH on: {id} is not whole in view: {tag}");
+        }
+    }
+}
+
+/// At 1100 × 720 the pane is 840 wide: two columns of 396, 12 in from the pane's left, 24 apart;
+/// CONNECTION and AUTHENTICATION in the first, SECURITY and SSH TUNNEL in the second; COLOUR on
+/// a row of its own under NAME.
+#[test]
+fn the_form_matches_the_drawn_columns() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    let first = pane.left() + 12.0;
+    for id in ["conn-name", "conn-host", "conn-database", "conn-user", "conn-password"] {
+        assert!((at(id).left() - first).abs() <= 1.0, "{id} starts the first column at {first}: {:?}", at(id));
+    }
+    let name = at("conn-name");
+    // The app's 840 wide pane gives two of 396; kittest's frame takes 16 of the window.
+    let column = (pane.width() - 2.0 * 12.0 - 24.0) / 2.0;
+    assert!((name.width() - column).abs() <= 1.0, "a column is {column} wide: {name:?}");
+    let second = name.right() + 24.0;
+    for id in ["conn-ssl", "conn-ca", "conn-readonly", "conn-ssh-on"] {
+        assert!((at(id).left() - second).abs() <= 1.0, "{id} starts the second column at {second}: {:?}", at(id));
+    }
+    let colour = at("conn-color");
+    assert!(colour.top() >= name.bottom(), "COLOUR under NAME: {colour:?} {name:?}");
+    for swatch in ["none", "red", "orange", "yellow", "green", "blue", "purple", "gray"] {
+        let s = at(&format!("conn-color-{swatch}"));
+        assert!(!s.intersects(name), "conn-color-{swatch} {s:?} overlaps NAME {name:?}");
+    }
+    for words in ["CONNECTION", "AUTHENTICATION", "SECURITY", "SSH TUNNEL"] {
+        assert!(ui.text_in(pane, words).is_some(), "the section {words} is drawn");
+    }
+}
+
+/// SHOW ends where its column ends: in line with PORT's and LIST…'s right edges.
+#[test]
+fn the_show_button_ends_with_its_column() {
+    for size in [APP_SIZE, egui::vec2(640.0, 420.0), egui::vec2(1920.0, 1080.0)] {
+        let mut ui = Ui::fresh(size);
+        ui.click("conn-kind-postgres");
+        let i = ui.inspect();
+        let right = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}"))).right();
+        let show = right("conn-password-show");
+        assert!((show - right("conn-port")).abs() <= 0.5, "{size:?}: SHOW {show} and PORT {}", right("conn-port"));
+        assert!((show - right("conn-database-list")).abs() <= 0.5, "{size:?}: SHOW {show} and LIST… {}", right("conn-database-list"));
+        assert!((show - right("conn-name")).abs() <= 0.5, "{size:?}: SHOW {show} and the column {}", right("conn-name"));
+    }
+}
+
+/// The SSH login's row keeps its place and height whatever the login: KEY FILE with its box,
+/// CHOOSE and CLEAR for a key, USES and the key line for the agent and a password. CLEAR is on
+/// only while a key file is chosen, and forgets it.
+#[test]
+fn the_ssh_login_row_keeps_its_height() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui_in(temp_home(Some(&db.keys.plain), None), true);
+    ui.click("conn-kind-postgres");
+    ui.click("conn-ssh-on");
+    ui.until("the key line", |ui| ui.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ")));
+    let below = |ui: &mut Ui| -> (egui::Rect, Vec<(String, [f64; 4])>) {
+        let i = ui.inspect();
+        let auth = rect_of(&tag_in(&i, "conn-ssh-auth").unwrap());
+        let varies = ["conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
+        let rest = ids(&i)
+            .into_iter()
+            .filter(|id| id.starts_with("conn-") && !varies.contains(&id.as_str()))
+            .map(|id| (id.clone(), rect(&tag_in(&i, &id).unwrap())))
+            .filter(|(_, r)| r[1] >= f64::from(auth.bottom()))
+            .collect();
+        (rect_of(&tag_in(&i, "conn-ssh-key").unwrap()), rest)
+    };
+    let (key, rest) = below(&mut ui);
+    assert_eq!(key.height(), 28.0, "the key file's box: {key:?}");
+    assert!(ui.text_in(key.expand2(egui::vec2(0.0, 24.0)), "KEY FILE").is_some(), "KEY FILE over the box");
+    for auth in ["agent", "password", "key"] {
+        ui.click(&format!("conn-ssh-auth-{auth}"));
+        ui.frame();
+        let (line, now) = below(&mut ui);
+        assert_eq!((line.top(), line.height()), (key.top(), key.height()), "{auth}: the login's row moved");
+        assert_eq!(now, rest, "{auth}: what is under the login moved");
+        if auth != "key" {
+            assert!(ui.tag("conn-ssh-change").is_none(), "{auth}: no CHOOSE");
+            assert!(ui.text_in(line.expand2(egui::vec2(0.0, 24.0)), "USES").is_some(), "{auth}: USES over the line");
+        }
+    }
+    assert!(ui.value("conn-ssh-key").as_str().unwrap().starts_with("Uses "), "no file chosen: the key line");
+    assert_eq!(ui.tag("conn-ssh-auto").unwrap()["enabled"], false, "CLEAR is off with no file chosen");
+
+    // A key file chosen: CLEAR is on, and forgets it.
+    let file = "/nonexistent/dbee-test-key";
+    let card = ui.save(&via_ssh(db, SshAuth::Key { path: Some(file.into()) }), None);
+    ui.click(&card);
+    ui.frame();
+    let auto = ui.tag("conn-ssh-auto").unwrap();
+    assert!(auto.get("enabled").is_none(), "CLEAR is on with a file chosen: {auto}");
+    ui.click("conn-ssh-auto");
+    ui.frame();
+    assert_eq!(ui.tag("conn-ssh-auto").unwrap()["enabled"], false, "CLEAR forgot the file");
+}
+
+/// Below 664 the form is one column: SECURITY under AUTHENTICATION, nothing past the pane.
+#[test]
+fn one_column_at_the_smallest_window() {
+    let mut ui = Ui::fresh(egui::vec2(640.0, 420.0));
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    assert!(at("conn-ssl").top() > at("conn-save-secrets").bottom(), "SECURITY under AUTHENTICATION");
+    assert!((at("conn-ssl").left() - at("conn-name").left()).abs() <= 0.5, "one column");
+    for id in ids(&i).into_iter().filter(|id| id.starts_with("conn-")) {
+        assert!(at(&id).right() <= pane.right() + 0.5, "{id} {:?} runs past the pane {pane:?}", at(&id));
     }
 }
 
@@ -293,8 +496,6 @@ fn sqlite_shows_only_file_rows() {
 fn mysql_url_fills_type_and_fields() {
     let mut ui = cards();
     ui.click("conn-fill-url");
-    let text = ui.value("dialog-text");
-    assert!(text.as_str().unwrap().contains("mysql://"), "{text}");
     ui.text("mysql://u@h:3307/shop");
     ui.click("dialog-ok");
     let i = ui.inspect();
@@ -336,6 +537,61 @@ fn cards_name_the_type() {
     assert_eq!(ui.value(&format!("{pg}-kind")), "PostgreSQL");
 }
 
+/// A SQLite file on a row follows the status bar's path rule: in the home folder (the process's
+/// `HOME`; the file is never opened), its path starts with `~`; short of room it is cut in the
+/// middle with `…`, the file's name kept; hovered, the row shows it whole under the name.
+#[test]
+fn a_sqlite_path_on_a_row_is_cut_in_the_middle_and_whole_on_hover() {
+    let Some(home) = dbee_config::home_dir().filter(|h| h.to_str().is_some_and(|h| !h.is_empty())) else {
+        eprintln!("SKIPPED: no home folder to write `~` for");
+        return;
+    };
+    let file = home.join("Projects").join("clients").join("northwind-traders").join("archive").join("2026").join("nightly").join("notes.sqlite");
+    let path = file.to_str().unwrap_or_default().to_owned();
+    let whole = format!("~{}", &path[home.to_str().unwrap_or_default().len()..]);
+    let mut ui = cards();
+    let card = ui.save(&file_of(&path, "Notes"), None);
+    let row = rect_of(&ui.tag(&card).unwrap());
+    let drawn: Vec<String> = ui.texts().into_iter().filter(|(r, _)| row.contains_rect(*r)).map(|(_, g)| g.text().to_owned()).collect();
+    let [name, line] = drawn.as_slice() else { panic!("the name and the line: {drawn:?}") };
+    assert_eq!(name, "Notes");
+    let (head, tail) = line.split_once('…').unwrap_or_else(|| panic!("cut in the middle: `{line}` of `{whole}`"));
+    assert!(head.starts_with('~') && whole.starts_with(head) && whole.ends_with(tail), "`{line}` of `{whole}`");
+    assert!(tail.ends_with("notes.sqlite") && tail.len() > "notes.sqlite".len(), "the file's name kept, with the folder mark: `{line}`");
+    assert!(ui.texts().iter().all(|(_, g)| g.text() != whole), "not whole before the hover");
+    let at = ui.centre(&card);
+    ui.rest(at);
+    let hover = format!("Notes\n{whole}");
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == hover), "whole on hover: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>());
+}
+
+/// A row whose name or line is cut shows both whole on hover, the name over the
+/// line; a row with nothing cut shows no hover.
+#[test]
+fn a_cut_name_on_a_row_reads_whole_on_hover() {
+    const LONG: &str = "Reporting replica for the Customer Success team (read-only, EU)";
+    let mut ui = cards();
+    for (name, cut) in [(LONG, true), ("Shop", false)] {
+        let card = ui.save(&server_of(DbKind::Postgres, name), None);
+        let row = rect_of(&ui.tag(&card).unwrap());
+        let drawn: Vec<(String, bool)> =
+            ui.texts().into_iter().filter(|(r, _)| row.contains_rect(*r)).map(|(_, g)| (g.text().to_owned(), g.elided)).collect();
+        let [(drawn_name, elided), (line, _)] = drawn.as_slice() else { panic!("the name and the line: {drawn:?}") };
+        assert_eq!((drawn_name.as_str(), *elided), (name, cut), "`{name}` cut: {drawn:?}");
+        let whole = format!("{name}\n{line}");
+        let at = ui.centre(&card);
+        ui.rest(at);
+        let hover = ui.texts().iter().any(|(_, g)| g.text() == whole);
+        assert_eq!(
+            hover,
+            cut,
+            "`{name}`: name and line whole on hover only when cut: {:?}",
+            ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>()
+        );
+        ui.hover(egui::pos2(1.0, 1.0));
+    }
+}
+
 #[test]
 fn the_filter_finds_what_the_cards_show() {
     let mut ui = cards();
@@ -354,6 +610,46 @@ fn the_filter_finds_what_the_cards_show() {
         let i = ui.inspect();
         assert_eq!([tag_in(&i, &maria).is_some(), tag_in(&i, &file).is_some()], shown, "filter {q:?}");
     }
+}
+
+/// The connection list's filter is the sidebar's filter (`components::sidebar`), without a
+/// refresh: `conn-filter` keeps its id and its value as typed; the field is 35 tall over a 1 px
+/// `line`, its placeholder `Filter connections`; what is typed is
+/// drawn as typed. A click gives it focus without the ring, Shift+Tab back to it shows the ring.
+#[test]
+fn the_connection_filter_is_the_sidebar_filter() {
+    let mut ui = cards();
+    let e = ui.tag("conn-filter").expect("the filter is drawn");
+    assert_eq!((&e["value"], e.get("enabled")), (&json!(""), None), "{e}");
+    let f = rect_of(&e);
+    assert_eq!(f.height(), 35.0, "the field, 35 above its line: {f:?}");
+    assert!(ui.text_in(f, "Filter connections").is_some(), "the placeholder");
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let line = ui.shapes().into_iter().any(|(_, s)| {
+        matches!(s, egui::Shape::Rect(r) if r.fill == t.line && r.rect.height() == 1.0 && (r.rect.top() - f.bottom()).abs() < 0.5
+            && r.rect.left() <= f.left() && r.rect.right() >= f.right())
+    });
+    assert!(line, "a 1 px line under the field");
+    let ink = t.ink;
+    let ring = |ui: &Ui| {
+        let at = f.shrink(2.0);
+        ui.shapes().iter().any(|(_, s)| {
+            matches!(s, egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == ink
+                && (r.rect.min - at.min).length() < 0.5 && (r.rect.max - at.max).length() < 0.5)
+        })
+    };
+    ui.click("conn-filter");
+    ui.text("Shop Live");
+    ui.frame();
+    assert_eq!(ui.value("conn-filter"), "Shop Live");
+    assert!(ui.text_in(f, "Shop Live").is_some() && ui.text_in(f, "SHOP LIVE").is_none(), "drawn as typed");
+    assert!(!ring(&ui), "a click shows no ring");
+    ui.key("Tab");
+    ui.frame();
+    ui.key_with("Tab", json!({ "shift": true }));
+    ui.frame();
+    assert!(ring(&ui), "Shift+Tab back shows the ring");
+    assert_eq!(rect_of(&ui.tag("conn-filter").expect("still drawn")), f, "nothing moved");
 }
 
 #[test]
@@ -424,17 +720,22 @@ fn an_upcoming_engine_cannot_be_chosen() {
         assert_eq!(card["value"]["upcoming"], upcoming, "{card}");
         assert_eq!(card.get("enabled").is_none(), !upcoming, "{card}");
     }
+    // The Upcoming chip, 8 px into the card's top right corner: its words 1 + 6 px inside it.
+    let [x, y, w, h] = rect(&tag_in(&i, "conn-kind-mysql").unwrap()).map(|v| v as f32);
+    let card = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+    let (words, cut) = ui.text_in(card, "UPCOMING").expect("the Upcoming chip's words");
+    assert!(!cut);
+    assert!((words.right() - (card.right() - 15.0)).abs() < 0.5 && (words.center().y - (card.top() + 17.0)).abs() < 0.5, "{words:?} in {card:?}");
+    assert!(ui.text_in(card, "Upcoming").is_none(), "only drawn in capitals");
     ui.click("conn-kind-mysql");
     assert!(ui.tag("conn-host").is_none() && ui.tag("conn-kind-mysql").is_some(), "nothing was chosen");
-    // Nor through a URL: the dialog names what this build opens.
+    // Nor through a URL: the error names what this build opens.
     ui.click("conn-fill-url");
-    let text = ui.value("dialog-text").as_str().unwrap().to_string();
-    assert!(text.contains("postgres://") && !text.contains("mysql://"), "{text}");
     ui.text("mysql://u@h/shop");
     ui.click("dialog-ok");
     assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
     let error = ui.value("dialog-error").as_str().unwrap().to_string();
-    assert!(error.contains("postgres://"), "{error}");
+    assert!(error.contains("postgres://") && !error.contains("mysql://"), "{error}");
     ui.click("dialog-cancel");
     assert!(ui.tag("conn-kind-mysql").is_some(), "still the cards");
 }
@@ -554,7 +855,7 @@ fn dialog_widgets_are_in_place_from_their_first_frame() {
 fn clicking_a_field_out_of_view_scrolls_to_it() {
     let mut ui = ui();
     // A short window: with the SSH tunnel on, the form's fields scroll.
-    ui.harness.set_size(egui::vec2(1100.0, 560.0));
+    ui.harness.set_size(egui::vec2(1100.0, 480.0));
     ui.frame();
     ui.click("conn-ssh-on");
     let user = ui.tag("conn-ssh-user").unwrap();
@@ -626,9 +927,9 @@ fn inline_error_on_refused_port() {
     let i = ui.inspect();
     let error = tag_in(&i, "conn-error").unwrap();
     assert!(error["value"].as_str().unwrap().contains("could not connect"), "{error}");
-    let [_, ey, _, _] = rect(&error);
-    let [_, cy, _, ch] = rect(&tag_in(&i, "conn-connect").unwrap());
-    assert!(ey >= cy + ch && ey - (cy + ch) < 60.0, "the error shows right under the buttons: {error}");
+    let [_, ey, _, eh] = rect(&error);
+    let [_, cy, _, _] = rect(&tag_in(&i, "conn-connect").unwrap());
+    assert!(ey + eh <= cy && cy - (ey + eh) < 36.0, "the error shows right above the form's bar: {error}");
     assert_eq!(i["screen"], "connections");
     // A port that is no number is caught before anything runs.
     ui.replace("conn-port", "54x");
@@ -703,6 +1004,40 @@ fn passphrase_dialog_saves_in_the_keyring() {
     assert!(!journal.to_string().contains(&db.keys.passphrase), "{journal}");
 }
 
+/// A saved connection with "Save passwords" ticked, a database password typed in the form and an
+/// SSH password login: the SSH password dialog's "Save in keyring" decides. Unticked, the secret
+/// store keeps neither password; ticked, both.
+#[test]
+fn the_ssh_password_dialogs_save_box_decides_for_a_saved_connection() {
+    let db = dbee_testkit::require_testdb!();
+    for keep in [false, true] {
+        let mut ui = ui_in(temp_home(None, Some(&db.sshd.known_hosts_line)), true);
+        let mut config = via_ssh(db, SshAuth::Password);
+        if let Some(ssh) = config.ssh.as_mut() {
+            ssh.user = db.sshd.password_user.clone();
+        }
+        let card = ui.save(&config, None);
+        let id = card.trim_start_matches("conn-saved-").to_string();
+        ui.click(&card);
+        assert_eq!(ui.value("conn-save-secrets"), true, "the form's Save passwords");
+        ui.replace("conn-password", &db.password);
+        ui.click("conn-connect");
+        ui.until("the SSH password dialog", |ui| ui.inspect()["dialog"] == "sshPassword");
+        assert_eq!(ui.value("dialog-save"), true, "starts as the form says");
+        if !keep {
+            ui.click("dialog-save");
+            assert_eq!(ui.value("dialog-save"), false);
+        }
+        ui.click("dialog-secret");
+        ui.text(&db.password);
+        ui.click("dialog-ok");
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        for kind in [SecretKind::DbPassword, SecretKind::SshPassword] {
+            assert_eq!(stored(&ui, &id, kind).as_deref(), keep.then_some(db.password.as_str()), "keep {keep}: {kind:?}");
+        }
+    }
+}
+
 #[test]
 fn single_click_loads_and_double_click_connects() {
     let db = dbee_testkit::require_testdb!();
@@ -718,11 +1053,36 @@ fn single_click_loads_and_double_click_connects() {
     assert_eq!(tag_in(&i, "conn-password").unwrap()["set"], false);
     ui.double_click(&card);
     ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
-    // Back on the connection screen, the recent list has it.
+    // Back on the connection screen, its saved row shows, and it isn't listed twice.
     ui.execute("connection.close", json!({}));
     let i = ui.inspect();
-    let recent = tag_in(&i, "conn-recent-0").expect("the recent card");
-    assert_eq!(recent["value"], "pg14");
+    assert_eq!(tag_in(&i, &card).expect("the saved row")["value"], "pg14");
+    assert!(!ids(&i).iter().any(|id| id.starts_with("conn-recent-")), "{}", ids(&i).join(" "));
+}
+
+/// A click on the scrim does nothing for a dialog. It stays open, and what is under the
+/// scrim gets no click: a saved card there is neither chosen nor, on a double click, opened.
+/// Escape still cancels.
+#[test]
+fn a_click_on_the_scrim_does_nothing() {
+    let mut ui = ui();
+    let card = ui.save(&silent_config(1), None);
+    let at = ui.centre(&card);
+    ui.right_click(&card);
+    ui.click("conn-menu-delete");
+    assert_eq!(ui.inspect()["dialog"], "deleteConnection");
+    let before = ui.document();
+    for count in [1, 2] {
+        ui.ok("ui.click", json!({ "x": at.x, "y": at.y, "count": count }));
+        ui.frame();
+        let i = ui.inspect();
+        assert_eq!(i["dialog"], "deleteConnection", "a click ({count}) on the scrim leaves the dialog open: {i}");
+    }
+    assert_eq!(ui.document(), before, "nothing under the scrim was clicked");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().map(Vec::len), Some(1), "nothing deleted");
+    ui.key("Escape");
+    assert_eq!(ui.inspect()["dialog"], Json::Null, "Escape cancels");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().map(Vec::len), Some(1), "nothing deleted");
 }
 
 #[test]
@@ -761,14 +1121,21 @@ fn test_and_connect_run_once_and_show_it() {
     let card = ui.save(&silent_config(silent.port), None);
     ui.click(&card);
     ui.click("conn-test");
-    ui.until("the running test", |ui| ui.value("conn-test") == "Testing…");
+    ui.until("the running test", |ui| ui.tag("conn-test").unwrap().get("enabled").is_some());
     let i = ui.inspect();
-    assert_eq!(tag_in(&i, "conn-test").unwrap()["enabled"], false, "{i}");
-    assert_eq!(tag_in(&i, "conn-connect").unwrap()["enabled"], false, "{i}");
+    // The buttons keep their words while a job runs, both off.
+    for (id, words) in [("conn-test", "Test"), ("conn-connect", "Connect")] {
+        let tag = tag_in(&i, id).unwrap();
+        assert_eq!((tag["value"].clone(), tag["enabled"].clone()), (json!(words), json!(false)), "{i}");
+    }
     // Clicking again starts nothing; double-clicking the card starts no connect.
     ui.click("conn-test");
     ui.click("conn-connect");
     ui.double_click(&card);
+    let at = ui.centre("conn-test");
+    ui.rest(at);
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    assert!(words.iter().any(|w| w == "Test: not now, a test or connect is running"), "TEST says why on hover: {words:?}");
     let d = ui.document();
     assert_eq!(d["jobs"].as_array().unwrap().len(), 1, "{d}");
     assert_eq!(d["jobs"][0]["label"], "connection.test", "{d}");
@@ -849,6 +1216,159 @@ fn store_warning_shows_while_set() {
     assert!(warning["value"].as_str().unwrap().contains("damaged"), "{warning}");
     ui.click("conn-new");
     assert!(ui.tag("conn-store-warning").is_some(), "it stays while the warning is set");
+    // Its own area under the filter, across the sidebar, its words 12 in.
+    let filter = rect_of(&ui.tag("conn-filter").unwrap());
+    let w = rect_of(&ui.tag("conn-store-warning").unwrap());
+    assert!(w.top() >= filter.bottom() + 8.0 - 0.5 && (w.left() - filter.left() - 12.0).abs() <= 0.5, "under the filter, 12 in: {w:?} {filter:?}");
+}
+
+/// The connection screen takes the workspace's frame: the menu bar on top, a 260 sidebar whose
+/// first row is `+ NEW CONNECTION` (a bar button in a 36 row from the sidebar's left edge), the
+/// filter under it, and the version bar along the window's bottom (gap 62).
+#[test]
+fn the_connection_screen_has_the_workspace_frame() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    // The window as the app gets it: inside the harness's own 8 round it.
+    let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 720.0)).shrink(KITTEST_MARGIN);
+    let i = ui.inspect();
+    for id in ["menu-File", "menu-View"] {
+        let r = rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}: {}", ids(&i).join(" "))));
+        assert!(r.top() < window.top() + 30.0 && r.bottom() <= window.top() + 30.5, "{id} in the menu bar: {r:?}");
+    }
+    let version = tag_in(&i, "conn-version").expect("the version bar");
+    assert!(version["value"].as_str().unwrap().starts_with("dbee "), "{version}");
+    let v = rect_of(&version);
+    let along = (v.bottom() - window.bottom()).abs() <= 0.5 && (v.height() - 30.0).abs() <= 0.5 && (v.left() - window.left()).abs() <= 0.5;
+    assert!(along, "the version bar along the bottom: {v:?}");
+    let new = rect_of(&tag_in(&i, "conn-new").unwrap());
+    let row = (new.left() - window.left()).abs() <= 0.5 && (new.height() - 36.0).abs() <= 0.5 && new.width() <= 260.0;
+    assert!(row, "`+ NEW CONNECTION`: {new:?}");
+    assert!((new.top() - window.top() - 30.0).abs() <= 0.5, "right under the menu bar: {new:?}");
+    let filter = rect_of(&tag_in(&i, "conn-filter").unwrap());
+    assert!(filter.top() >= new.bottom() - 0.5 && filter.right() <= window.left() + 260.5, "the filter under it, in the sidebar: {filter:?}");
+    // The words in caps, the version as written in the tag.
+    assert!(ui.text_in(v, &format!("DBEE {}", env!("CARGO_PKG_VERSION"))).is_some(), "`DBEE x.y.z` drawn in the bar");
+    // No boxed button: nothing stroked around `+ NEW CONNECTION`.
+    assert!(edges_on(&ui, new).is_empty(), "a bar button, not a boxed one");
+}
+
+/// Gap 62: View > Theme works before connecting.
+#[test]
+fn view_theme_works_before_connecting() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.click("menu-View");
+    ui.frame();
+    ui.click("menu-View-Theme");
+    ui.frame();
+    ui.frame();
+    ui.click("menu-ui.themeDark");
+    ui.frame();
+    assert_eq!(ui.inspect()["theme"]["choice"], "dark");
+    assert_eq!(ui.document()["screen"], "connections");
+}
+
+/// The room egui_kittest leaves round what the app draws.
+const KITTEST_MARGIN: f32 = 8.0;
+
+/// Writes a connections file to `home` with `saved` and `recent` (newest first).
+fn write_store(home: &TempHome, saved: &[&ConnectionConfig], recent: &[&ConnectionConfig]) {
+    let dir = home.home.join("config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let recent: Vec<Json> = recent.iter().enumerate().map(|(n, c)| json!({ "config": c, "usedAt": 1_700_000_000 - n as u64 * 60 })).collect();
+    let file = json!({ "version": 1, "saved": saved, "recent": recent });
+    std::fs::write(dir.join("connections.json"), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+}
+
+/// Review Focus 3: the saved rows, then each recent entry that isn't saved, newest first, in one
+/// list with no headings and no time words; a saved entry used lately isn't listed twice.
+#[test]
+fn recent_connections_stay_in_the_one_list() {
+    let with = |id: &str, name: &str| ConnectionConfig { id: id.into(), ..server_of(DbKind::Postgres, name) };
+    let (a, b, c, d) = (with("A", "Alpha"), with("B", "Beta"), with("C", "Gamma"), with("D", "Delta"));
+    let home = temp_home(None, None);
+    write_store(&home, &[&a, &b], &[&c, &a, &d]);
+    let mut ui = ui_in(home, true);
+    let i = ui.inspect();
+    let mut rows: Vec<(f32, String)> = ids(&i)
+        .into_iter()
+        .filter(|id| (id.starts_with("conn-saved-") || id.starts_with("conn-recent-")) && !id.ends_with("-kind"))
+        .map(|id| (rect_of(&tag_in(&i, &id).unwrap()).top(), id))
+        .collect();
+    rows.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let order: Vec<&str> = rows.iter().map(|(_, id)| id.as_str()).collect();
+    assert_eq!(order, ["conn-saved-A", "conn-saved-B", "conn-recent-0", "conn-recent-2"], "{rows:?}");
+    assert_eq!(tag_in(&i, "conn-recent-0").unwrap()["value"], "Gamma");
+    assert_eq!(tag_in(&i, "conn-recent-2").unwrap()["value"], "Delta");
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    for gone in ["SAVED", "RECENT", "2"] {
+        assert!(!words.iter().any(|w| w == gone), "`{gone}` painted: {words:?}");
+    }
+    assert!(!words.iter().any(|w| w.contains(" ago") || w.contains("just now")), "no time words: {words:?}");
+}
+
+/// On first start the list is empty, with no phrase, beside the cards.
+#[test]
+fn first_start_shows_an_empty_list_and_the_cards() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    let i = ui.inspect();
+    assert!(!ids(&i).iter().any(|id| id.starts_with("conn-saved-") || id.starts_with("conn-recent-")), "{}", ids(&i).join(" "));
+    assert!(tag_in(&i, "conn-kind-postgres").is_some());
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    for gone in ["No saved connections yet.", "Connections you open show here.", "No connection matches."] {
+        assert!(!words.iter().any(|w| w == gone), "`{gone}` painted: {words:?}");
+    }
+}
+
+/// A filter that hides every row says so once, in `body` `text_muted`.
+#[test]
+fn a_filter_that_matches_nothing_says_so() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.save(&server_of(DbKind::Postgres, "Shop"), None);
+    ui.click("conn-filter");
+    ui.text("zzz");
+    ui.frame();
+    let side = egui::Rect::from_min_max(
+        egui::pos2(KITTEST_MARGIN, KITTEST_MARGIN + 30.0),
+        egui::pos2(KITTEST_MARGIN + 260.0, 720.0 - KITTEST_MARGIN - 30.0),
+    );
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let (colour, font) = drawn_as(&ui, side, "No connection matches.").expect("the words in the sidebar");
+    assert_eq!((colour, font), (t.text_muted, dbee_ui_egui::theme::Text::Body.font()));
+    assert!(drawn_as(&ui, side, "No saved connection matches.").is_none() && drawn_as(&ui, side, "No recent connection matches.").is_none());
+}
+
+/// The row's menu: Connect, Edit, Duplicate, a line, Delete; Connect off while a test runs, its
+/// hover saying why.
+#[test]
+fn the_row_menu_says_why_connect_is_off() {
+    let silent = Silent::start();
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    let card = ui.save(&silent_config(silent.port), None);
+    ui.click(&card);
+    ui.click("conn-test");
+    ui.frame();
+    ui.right_click(&card);
+    ui.frame();
+    ui.frame();
+    let i = ui.inspect();
+    let connect = tag_in(&i, "conn-menu-connect").expect("the menu");
+    assert_eq!(connect["enabled"], false, "{connect}");
+    let duplicate = rect_of(&tag_in(&i, "conn-menu-duplicate").unwrap());
+    let delete = rect_of(&tag_in(&i, "conn-menu-delete").unwrap());
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let line = ui.shapes().into_iter().any(|(_, s)| match s {
+        egui::Shape::LineSegment { points, stroke } => {
+            stroke.color == t.raised_line && points[0].y > duplicate.bottom() - 0.5 && points[0].y < delete.top() + 0.5
+        }
+        _ => false,
+    });
+    assert!(line, "a separator between Duplicate and Delete");
+    let at = ui.centre("conn-menu-connect");
+    ui.rest(at);
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    assert!(words.iter().any(|w| w == "Connect: not now, a test or connect is running"), "the reason on hover: {words:?}");
+    ui.key("Escape");
+    ui.execute("connection.cancel", json!({}));
 }
 
 #[test]
@@ -856,9 +1376,10 @@ fn typing_and_errors_do_not_move_the_layout() {
     let mut ui = ui();
     ui.click("conn-ssh-on");
     // Every widget of the form and the side bar, but the message under the buttons, the cards and
-    // the key file buttons, which only the Key login shows (in its fixed slot).
+    // the login's row: the key file box and its buttons for a key, the line under USES otherwise
+    // (one fixed slot, as wide as each needs; `the_ssh_login_row_keeps_its_height`).
     let fixed = |i: &Json| -> Vec<(String, [f64; 4])> {
-        let varies = ["conn-error", "conn-result", "conn-ssh-change", "conn-ssh-auto"];
+        let varies = ["conn-error", "conn-error-heading", "conn-result", "conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
         ids(i)
             .into_iter()
             .filter(|id| {
@@ -871,7 +1392,7 @@ fn typing_and_errors_do_not_move_the_layout() {
             .collect()
     };
     let before = fixed(&ui.inspect());
-    assert!(before.iter().any(|(id, _)| id == "conn-ssh-host") && before.iter().any(|(id, _)| id == "conn-ssh-key"), "{before:?}");
+    assert!(before.iter().any(|(id, _)| id == "conn-ssh-host") && before.iter().any(|(id, _)| id == "conn-ssh-auth"), "{before:?}");
     ui.click("conn-name");
     ui.text("A very long connection name that goes on and on and on to see whether the title grows");
     ui.click("conn-ssh-host");
@@ -911,31 +1432,47 @@ fn confirm_dialog_closes_anyway() {
     assert_eq!((d["screen"].clone(), d["tabs"].clone()), (json!("connections"), json!([])), "{d}");
 }
 
+/// CONNECT on a new connection that asks for its password: the dialog's "Save in keyring" starts
+/// as the form's "Save passwords" and says what happens: ticked, the saved connection keeps the
+/// password; unticked, nothing goes to the secret store.
 #[test]
-fn password_dialog_for_an_unsaved_connection_keeps_nothing() {
+fn the_password_dialogs_save_box_decides_for_a_new_connection() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = ui();
-    let pg = pg14(db);
-    ui.replace("conn-host", &pg.host);
-    ui.replace("conn-port", &pg.port.to_string());
-    ui.replace("conn-user", &pg.user);
-    ui.replace("conn-database", &pg.database);
-    ui.click("conn-connect");
-    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
-    // Not saved: there is nothing to keep it for.
-    let save = ui.tag("dialog-save").unwrap();
-    assert_eq!((save["value"].clone(), save["enabled"].clone()), (json!(false), json!(false)), "{save}");
-    assert_eq!(ui.tag("dialog-ok").unwrap()["enabled"], false, "no password typed yet");
-    ui.text(&db.password);
-    ui.click("dialog-ok");
-    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
-    let list = ui.execute("connection.list", json!({}));
-    assert_eq!(list["saved"], json!([]), "{list}");
-    let id = list["recent"][0]["config"]["id"].as_str().unwrap().to_string();
-    let store = ui.secrets.clone().unwrap();
-    assert_eq!(store.get(&id, SecretKind::DbPassword).unwrap(), None);
-    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
-    assert!(!everything.contains(&db.password), "{everything}");
+    for keep in [true, false] {
+        let mut ui = ui();
+        let pg = pg14(db);
+        ui.replace("conn-host", &pg.host);
+        ui.replace("conn-port", &pg.port.to_string());
+        ui.replace("conn-user", &pg.user);
+        ui.replace("conn-database", &pg.database);
+        ui.click("conn-connect");
+        ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+        let save = ui.tag("dialog-save").unwrap();
+        assert_eq!(save["value"], true, "starts as the form's Save passwords: {save}");
+        assert!(save.get("enabled").is_none(), "it can be changed: {save}");
+        if !keep {
+            ui.click("dialog-save");
+            assert_eq!(ui.value("dialog-save"), false);
+        }
+        ui.click("dialog-secret");
+        ui.text(&db.password);
+        ui.click("dialog-ok");
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        // CONNECT saved it once it connected, the password only as the box said.
+        let list = ui.execute("connection.list", json!({}));
+        assert_eq!(list["saved"].as_array().unwrap().len(), 1, "{list}");
+        let id = list["saved"][0]["id"].as_str().unwrap().to_string();
+        let kept = stored(&ui, &id, SecretKind::DbPassword);
+        assert_eq!(kept.as_deref(), keep.then_some(db.password.as_str()), "keep {keep}");
+        if !keep {
+            let store = ui.secrets.clone().unwrap();
+            for kind in [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase] {
+                assert_eq!(store.get(&id, kind).unwrap(), None, "nothing in the store: {kind:?}");
+            }
+        }
+        let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+        assert!(!everything.contains(&db.password), "{everything}");
+    }
 }
 
 #[test]
@@ -999,6 +1536,19 @@ fn typed_password_stays_out_of_inspect_and_journal() {
     assert!(!everything.contains("typed-secret-1"), "{everything}");
     let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();
     assert!(!file.contains("typed-secret-1"), "{file}");
+    // A CONNECT that would save a new connection: `save` in the journal, the password not.
+    ui.click("conn-new");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-password");
+    ui.text("typed-secret-2");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let opens = journaled_opens(&mut ui);
+    assert_eq!(opens.last().map(|p| p["save"].clone()), Some(json!(true)), "{opens:?}");
+    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+    assert!(!everything.contains("typed-secret-2"), "{everything}");
 }
 
 #[test]
@@ -1202,10 +1752,10 @@ fn the_database_list_button_shows_that_it_lists() {
     let silent = Silent::start();
     ui.replace("conn-port", &silent.port.to_string());
     ui.click("conn-test");
-    ui.until("the running test", |ui| ui.value("conn-test") == "Testing…");
+    ui.until("the running test", |ui| ui.tag("conn-test").unwrap().get("enabled").is_some());
     assert_eq!(ui.tag("conn-database-list").unwrap()["enabled"], false);
     drop(silent);
-    ui.until("the test to fail", |ui| ui.value("conn-test") == "Test");
+    ui.until("the test to fail", |ui| ui.tag("conn-test").unwrap().get("enabled").is_none());
     assert!(ui.tag("conn-database-list").unwrap().get("enabled").is_none());
 }
 
@@ -1247,11 +1797,11 @@ fn tab_takes_the_keyboard_out_of_the_list() {
     ui.frame();
     assert!(!listed(&ui.inspect()).is_empty(), "on its button the list stays");
     ui.key("Tab");
-    ui.key("Enter");
     ui.frame();
     assert!(listed(&ui.inspect()).is_empty(), "the list closed");
+    assert!(ui.focused("conn-user"), "Tab went on to USER, under the database row");
     assert_eq!(ui.value("conn-database"), "", "nothing was picked");
-    assert_ne!(ui.value("conn-ssl"), before, "Enter pressed the first SSL choice, where Tab went");
+    assert_eq!(ui.value("conn-ssl"), before);
     assert_eq!((ui.document()["screen"].clone(), ui.document()["jobs"].clone()), (json!("connections"), json!([])));
 }
 
@@ -1271,4 +1821,1071 @@ fn typing_in_the_field_closes_the_list_and_enter_connects_with_the_text() {
     let journal = ui.ok("engine.journal", json!({}));
     let open = journal.as_array().unwrap().iter().find(|e| e["command"] == "connection.open").cloned().unwrap();
     assert_eq!(open["params"]["config"]["database"], "shop", "{open}");
+}
+
+/// The form's and the URL dialog's buttons, moved to `components::button`, say in `ui.inspect`
+/// what they said before: ids, values, enabled flags.
+#[test]
+fn moved_buttons_keep_their_ids_values_and_flags() {
+    let mut ui = ui();
+    ui.frame();
+    let form: [Moved<'_>; 6] = [
+        ("conn-password-show", Some(json!(false)), true, "SHOW"),
+        ("conn-ca-choose", None, true, "CHOOSE"),
+        ("conn-ca-clear", None, false, "CLEAR"),
+        ("conn-save", Some(json!("Save")), true, "SAVE"),
+        ("conn-test", Some(json!("Test")), true, "TEST"),
+        ("conn-connect", Some(json!("Connect")), true, "CONNECT"),
+    ];
+    assert_moved(&mut ui, &form, "the form");
+    ui.click("conn-password-show");
+    assert_moved(&mut ui, &[("conn-password-show", Some(json!(true)), true, "HIDE")], "the password shown");
+    ui.click("conn-fill-url");
+    ui.frame();
+    let dialog: [Moved<'_>; 2] = [("dialog-ok", Some(json!("Fill")), false, "FILL"), ("dialog-cancel", Some(json!("Cancel")), true, "CANCEL")];
+    assert_moved(&mut ui, &dialog, "the URL dialog");
+    ui.text("postgres://ann@db.example/shop");
+    ui.frame();
+    assert_moved(&mut ui, &[("dialog-ok", Some(json!("Fill")), true, "FILL")], "a URL typed");
+    ui.click("dialog-cancel");
+    assert!(ui.tag("dialog-ok").is_none(), "Cancel closed the dialog");
+}
+
+/// The rect of automation entry `e`.
+fn rect_of(e: &Json) -> egui::Rect {
+    let [x, y, w, h] = rect(e).map(|v| v as f32);
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+}
+
+/// The edges the last frame drew on `at`: each rect's stroke, drawn inside it, as (width, colour).
+fn edges_on(ui: &Ui, at: egui::Rect) -> Vec<(f32, egui::Color32)> {
+    let same = |a: egui::Rect| (a.min - at.min).length() < 0.5 && (a.max - at.max).length() < 0.5;
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke_kind == egui::StrokeKind::Inside && same(r.rect) => {
+                Some((r.stroke.width, r.stroke.color))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The form's fields and the URL dialog's, moved to `components::input`, say in `ui.inspect` what
+/// they said before (ids, values, secrets, enabled flags), are 28 tall, keep what is
+/// typed as typed, and have their label drawn in capitals over them.
+#[test]
+fn moved_inputs_keep_their_ids_values_and_secrets() {
+    const SECRET: &str = "typed-Secret-3";
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-ssh-on");
+    let fields = [
+        ("conn-name", "Shop (Live)", "NAME"),
+        ("conn-host", "Db.Example.COM", "HOST"),
+        ("conn-port", "6543", "PORT"),
+        ("conn-user", "Ann", "USER"),
+        ("conn-database", "Shop", "DATABASE"),
+        ("conn-ssh-host", "Bastion.Example.com", "SSH HOST"),
+        ("conn-ssh-port", "2222", "PORT"),
+        ("conn-ssh-user", "Deploy", "USER"),
+    ];
+    for (id, typed, _) in fields {
+        ui.replace(id, typed);
+    }
+    ui.click("conn-password");
+    ui.text(SECRET);
+    let i = ui.inspect();
+    for (id, typed, label) in fields {
+        let e = tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+        assert_eq!(e["value"], typed, "`{id}`'s value");
+        assert!(e.get("enabled").is_none() && e.get("masked").is_none(), "`{id}`: {e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 28.0, "`{id}` is 28 tall: {at:?}");
+        assert!(ui.text_in(at, typed).is_some(), "`{id}` draws `{typed}` as typed");
+        assert!(typed == typed.to_uppercase() || ui.text_in(at, &typed.to_uppercase()).is_none(), "`{id}`: never in capitals");
+        let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
+        assert!(ui.text_in(above, label).is_some(), "`{id}`: its label `{label}` 4 above it, in {above:?}");
+        assert_eq!(edges_on(&ui, at), [(1.0, t.line_strong)], "`{id}`: the input's edge");
+    }
+    let password = tag_in(&i, "conn-password").unwrap();
+    assert_eq!((password["masked"].clone(), password["set"].clone()), (json!(true), json!(true)), "conn-password stays a secret");
+    assert!(password.get("value").is_none(), "conn-password has no value in ui.inspect");
+    assert!(!i.to_string().contains(SECRET), "the typed password is not in ui.inspect");
+    let at = rect_of(&password);
+    assert_eq!(at.height(), 28.0, "conn-password is 28 tall: {at:?}");
+    assert!(ui.text_in(at, &"•".repeat(SECRET.len())).is_some(), "conn-password draws a dot for each letter");
+    let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
+    assert!(ui.text_in(above, "PASSWORD").is_some(), "conn-password: its label 4 above it");
+    ui.click("conn-password-show");
+    assert!(ui.text_in(at, SECRET).is_some(), "Show draws the password");
+    assert!(!ui.inspect().to_string().contains(SECRET), "shown, it is still not in ui.inspect");
+
+    // A click keeps a field's edge; Shift+Tab's focus shows, and nothing moves.
+    ui.click("conn-port");
+    let (host, port) = (rect_of(&ui.tag("conn-host").unwrap()), rect_of(&ui.tag("conn-port").unwrap()));
+    assert_eq!(edges_on(&ui, port), [(1.0, t.line_strong)], "clicked, conn-port keeps its edge");
+    ui.key_with("Tab", json!({ "shift": true }));
+    assert_eq!(edges_on(&ui, host), [(2.0, t.ink)], "Shift+Tab: conn-host shows the keyboard's focus");
+    assert_eq!(edges_on(&ui, port), [(1.0, t.line_strong)], "and conn-port its edge");
+    assert_eq!((rect_of(&ui.tag("conn-host").unwrap()), rect_of(&ui.tag("conn-port").unwrap())), (host, port), "nothing moved");
+
+    // The URL dialog: its field a secret, focused as it opens; the reason a URL didn't parse under
+    // it, with a red edge.
+    ui.click("conn-fill-url");
+    ui.frame();
+    let url = ui.tag("dialog-url").unwrap();
+    assert_eq!((url["masked"].clone(), url["set"].clone()), (json!(true), json!(false)), "{url}");
+    assert!(url.get("enabled").is_none(), "{url}");
+    let at = rect_of(&url);
+    assert_eq!(at.height(), 28.0, "dialog-url is 28 tall: {at:?}");
+    assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
+    ui.text("oracle://Nope.Example");
+    ui.click("dialog-ok");
+    let i = ui.inspect();
+    let url = tag_in(&i, "dialog-url").unwrap();
+    assert_eq!((url["masked"].clone(), url["set"].clone()), (json!(true), json!(true)), "{url}");
+    assert!(!i.to_string().contains("Nope.Example"), "the URL is not in ui.inspect");
+    let error = tag_in(&i, "dialog-error").expect("the reason shows");
+    let reason = error["value"].as_str().unwrap().to_string();
+    assert!(reason.contains("postgres://"), "{error}");
+    assert_eq!(rect_of(&url), at, "the field didn't move");
+    assert_eq!(edges_on(&ui, at), [(1.0, t.danger)], "a red edge");
+    let line = rect_of(&error);
+    assert!((line.top() - at.bottom() - 4.0).abs() < 0.5 && (line.left() - at.left()).abs() < 0.5, "the reason 4 under the field: {line:?} {at:?}");
+    assert!(ui.text_in(line, &reason).is_some(), "the reason is drawn as it reads");
+    ui.click("dialog-cancel");
+    assert!(ui.tag("dialog-url").is_none(), "Cancel closed the dialog");
+}
+
+/// The secret dialog's field, moved to `components::input`: a secret in `ui.inspect`, focused as
+/// the dialog opens, its text drawn as dots.
+#[test]
+fn the_moved_secret_field_stays_a_secret() {
+    const SECRET: &str = "not-the-Password-4";
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    let pg = pg14(db);
+    ui.replace("conn-host", &pg.host);
+    ui.replace("conn-port", &pg.port.to_string());
+    ui.replace("conn-user", &pg.user);
+    ui.replace("conn-database", &pg.database);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let secret = ui.tag("dialog-secret").unwrap();
+    assert_eq!((secret["masked"].clone(), secret["set"].clone()), (json!(true), json!(false)), "{secret}");
+    assert!(secret.get("enabled").is_none(), "{secret}");
+    let at = rect_of(&secret);
+    assert_eq!(at.height(), 28.0, "dialog-secret is 28 tall: {at:?}");
+    assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
+    ui.text(SECRET);
+    let i = ui.inspect();
+    let secret = tag_in(&i, "dialog-secret").unwrap();
+    assert_eq!((secret["masked"].clone(), secret["set"].clone()), (json!(true), json!(true)), "dialog-secret is set and masked");
+    assert!(!i.to_string().contains(SECRET), "the typed secret is not in ui.inspect");
+    assert!(!ui.document().to_string().contains(SECRET), "nor in document.inspect");
+    assert!(ui.text_in(at, &"•".repeat(SECRET.len())).is_some(), "a dot for each letter");
+    assert!(ui.text_in(at, SECRET).is_none(), "the secret itself is not drawn");
+    ui.click("dialog-cancel");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}
+
+/// The fills the last frame drew on `at`: each rect's ground.
+fn fills_on(ui: &Ui, at: egui::Rect) -> Vec<egui::Color32> {
+    let same = |a: egui::Rect| (a.min - at.min).length() < 0.5 && (a.max - at.max).length() < 0.5;
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill.a() > 0 && same(r.rect) => Some(r.fill),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The checkbox `id` (moved to `components::checkbox`) says `value` and `enabled` in `i` as before,
+/// is 18 tall, with its 14 box at its left, `ink` when ticked (`text_faint` when off),
+/// and its label drawn as written 8 after the box.
+fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, label: &str) {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let e = tag_in(i, id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+    assert_eq!(e["value"], value, "`{id}`'s value: {e}");
+    assert_eq!(e.get("enabled") != Some(&json!(false)), enabled, "`{id}` enabled: {e}");
+    let at = rect_of(&e);
+    assert_eq!(at.height(), 18.0, "`{id}` is 18 tall: {at:?}");
+    let boxed = egui::Rect::from_min_size(at.min + egui::vec2(0.0, 2.0), egui::Vec2::splat(14.0));
+    let ground = match (value, enabled) {
+        (true, true) => t.ink,
+        (true, false) => t.text_faint,
+        (false, _) => t.card,
+    };
+    assert_eq!(fills_on(ui, boxed), [ground], "`{id}`: its box");
+    let (words, _) = ui.text_in(at, label).unwrap_or_else(|| panic!("`{id}` draws `{label}` as written in {at:?}"));
+    assert!((words.left() - boxed.right() - 8.0).abs() < 0.5, "`{id}`: its label 8 after its box: {words:?} in {at:?}");
+}
+
+/// The form's checkboxes, SSL mode, SSH login and colours, moved to `components`, say in
+/// `ui.inspect` what they said before (ids, values, enabled flags) and change as before.
+#[test]
+fn moved_choices_keep_their_ids_and_values() {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-ssh-on");
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "conn-save-secrets", true, true, "Save passwords in the keyring");
+    assert_checkbox(&ui, &i, "conn-readonly", false, true, "Read-only");
+    assert_checkbox(&ui, &i, "conn-ssh-on", true, true, "Connect through an SSH tunnel");
+
+    // SSL mode: the box, then a segment for each mode, its words as written.
+    let ssl = tag_in(&i, "conn-ssl").expect("SSL mode is drawn");
+    assert_eq!(ssl["value"], "prefer", "{ssl}");
+    let row = rect_of(&ssl);
+    assert_eq!(row.height(), 28.0, "the SSL box is 28 tall: {row:?}");
+    assert_eq!((edges_on(&ui, row), fills_on(&ui, row)), (vec![(1.0, t.line_strong)], vec![t.card]), "the SSL box");
+    let modes = ["disable", "prefer", "require", "verify-ca", "verify-full"];
+    for mode in modes {
+        let e = tag_in(&i, &format!("conn-ssl-{mode}")).unwrap_or_else(|| panic!("`conn-ssl-{mode}` is drawn"));
+        assert_eq!(e["value"], mode == "prefer", "{e}");
+        assert!(e.get("enabled").is_none(), "{e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 26.0, "`conn-ssl-{mode}` is 26 tall inside the box: {at:?}");
+        assert!(row.shrink(1.0).expand(0.01).contains_rect(at), "`conn-ssl-{mode}` inside the box's edge: {at:?} {row:?}");
+        assert!(ui.text_in(at, mode).is_some(), "`conn-ssl-{mode}` draws `{mode}` as written");
+    }
+    assert_eq!(fills_on(&ui, rect_of(&tag_in(&i, "conn-ssl-prefer").unwrap())), [t.ink], "the chosen mode on ink");
+
+    // The colours: squares, none chosen.
+    let colours = tag_in(&i, "conn-color").expect("the colours are drawn");
+    assert_eq!(colours["value"], "none", "{colours}");
+    for name in ["none", "red", "orange", "yellow", "green", "blue", "purple", "gray"] {
+        let e = tag_in(&i, &format!("conn-color-{name}")).unwrap_or_else(|| panic!("`conn-color-{name}` is drawn"));
+        assert_eq!(e["value"], name == "none", "{e}");
+        assert_eq!(rect_of(&e).size(), egui::Vec2::splat(20.0), "`conn-color-{name}` is a 20 square");
+    }
+    let swatches = rect_of(&colours);
+    // The no-colour mark's round line ends are discs too, but small ones.
+    let dots = ui.shapes().into_iter().filter(|(_, s)| matches!(s, egui::Shape::Circle(c) if swatches.contains(c.center) && c.radius >= 4.0)).count();
+    assert_eq!(dots, 0, "a colour is a square, never a circle");
+    assert_eq!(edges_on(&ui, rect_of(&tag_in(&i, "conn-color-none").unwrap())), [(2.0, t.ink)], "the chosen one's 2 px ink edge");
+
+    // The SSH login, as SSL mode.
+    let login = tag_in(&i, "conn-ssh-auth").expect("the SSH login is drawn");
+    assert_eq!(login["value"], "key", "{login}");
+    let row = rect_of(&login);
+    assert_eq!((row.height(), edges_on(&ui, row)), (28.0, vec![(1.0, t.line_strong)]), "the login's box");
+    for (name, words) in [("key", "key"), ("agent", "agent"), ("password", "password")] {
+        let e = tag_in(&i, &format!("conn-ssh-auth-{name}")).unwrap_or_else(|| panic!("`conn-ssh-auth-{name}` is drawn"));
+        assert_eq!(e["value"], name == "key", "{e}");
+        assert!(e.get("enabled").is_none(), "{e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 26.0, "`conn-ssh-auth-{name}` is 26 tall inside the box: {at:?}");
+        assert!(ui.text_in(at, words).is_some(), "`conn-ssh-auth-{name}` draws `{words}` as written");
+    }
+
+    // They change as before.
+    ui.click("conn-ssl-require");
+    ui.click("conn-ssh-auth-agent");
+    assert_eq!(
+        (ui.value("conn-ssh-auth"), ui.value("conn-ssh-auth-agent"), ui.value("conn-ssh-auth-key")),
+        (json!("agent"), json!(true), json!(false))
+    );
+    ui.click("conn-color-green");
+    ui.click("conn-readonly");
+    ui.click("conn-save-secrets");
+    ui.click("conn-ssh-on");
+    let i = ui.inspect();
+    let shown = |id: &str| tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` is drawn"))["value"].clone();
+    assert_eq!(
+        [shown("conn-ssl"), shown("conn-ssl-require"), shown("conn-ssl-prefer"), shown("conn-color"), shown("conn-color-green")],
+        [json!("require"), json!(true), json!(false), json!("green"), json!(true)]
+    );
+    assert_eq!([shown("conn-readonly"), shown("conn-save-secrets"), shown("conn-ssh-on")], [json!(true), json!(false), json!(false)]);
+    assert!(tag_in(&i, "conn-ssh-host").is_none(), "the SSH tunnel is off");
+
+    // MySQL's own option.
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mysql");
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "conn-option-allowPublicKey", false, true, "Allow the server's public key without encryption");
+    ui.click("conn-option-allowPublicKey");
+    assert_eq!(ui.value("conn-option-allowPublicKey"), true);
+
+    // No keyring: Save passwords is off and says why.
+    let mut without = ui_in(temp_home(None, None), false);
+    without.click("conn-kind-postgres");
+    let i = without.inspect();
+    assert_checkbox(&without, &i, "conn-save-secrets", false, false, "Save passwords");
+    assert!(tag_in(&i, "conn-no-keyring").is_some(), "the note says why");
+}
+
+/// The colour is chosen with the keyboard as with a click: Tab to a swatch shows its focus box,
+/// Space chooses it. A click shows no focus.
+#[test]
+fn a_swatch_is_chosen_with_the_keyboard() {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-name");
+    ui.key("Tab");
+    ui.frame();
+    let none = rect_of(&ui.tag("conn-color-none").unwrap());
+    assert_eq!(edges_on(&ui, none.expand(4.0)), [(2.0, t.ink)], "Tab from the name: the first swatch shows the keyboard's focus");
+    ui.key("Tab");
+    ui.frame();
+    ui.key("Space");
+    ui.frame();
+    assert_eq!(ui.value("conn-color"), "red", "Space chose red, as a click does");
+    assert_eq!(ui.value("conn-color-red"), true);
+    let red = rect_of(&ui.tag("conn-color-red").unwrap());
+    assert_eq!(edges_on(&ui, red), [(2.0, t.ink)], "red is chosen");
+    assert_eq!(edges_on(&ui, red.expand(4.0)), [(2.0, t.ink)], "and keeps the keyboard's focus");
+    assert_eq!(edges_on(&ui, none.expand(4.0)), [], "the focus left none");
+    ui.click("conn-color-blue");
+    assert_eq!(ui.value("conn-color"), "blue", "a click chose blue");
+    let blue = rect_of(&ui.tag("conn-color-blue").unwrap());
+    assert_eq!(edges_on(&ui, blue.expand(4.0)), [], "a click shows no focus");
+    assert_eq!(edges_on(&ui, red), [], "red is no longer chosen");
+}
+
+/// The password dialog's "Save in keyring", moved to `components::checkbox`: its id, value and
+/// enabled flag as before, drawn as the shared checkbox.
+#[test]
+fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    let card = ui.save(&pg14(db), None);
+    ui.click(&card);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "dialog-save", true, true, "Save in keyring");
+    ui.click("dialog-save");
+    assert_eq!(ui.value("dialog-save"), false, "a click unticks it");
+    ui.click("dialog-cancel");
+    // A connection that isn't saved yet: CONNECT saves it, so the password can be kept too.
+    let mut ui = self::ui();
+    let pg = pg14(db);
+    ui.replace("conn-host", &pg.host);
+    ui.replace("conn-port", &pg.port.to_string());
+    ui.replace("conn-user", &pg.user);
+    ui.replace("conn-database", &pg.database);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "dialog-save", true, true, "Save in keyring");
+    ui.click("dialog-cancel");
+}
+
+/// The open database list moves its own highlight with Down and Up (its names take no keyboard
+/// focus), drawn as the menu item's hover: `raised_hover` over the 28 tall item.
+#[test]
+fn the_database_list_still_moves_with_the_arrows() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.frame();
+    for (keys, on) in [(&[][..], 0), (&["ArrowDown", "ArrowDown"][..], 2), (&["ArrowUp"][..], 1)] {
+        for key in keys {
+            ui.key(key);
+        }
+        ui.frame();
+        let i = ui.inspect();
+        for (n, (id, name)) in listed(&i).into_iter().enumerate().take(4) {
+            let r = rect(&tag_in(&i, &id).unwrap());
+            let at = egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32));
+            assert_eq!(at.height(), 28.0, "{id}: the 28 tall item");
+            let grounds: Vec<egui::Color32> = ui
+                .shapes()
+                .into_iter()
+                .filter_map(|(_, s)| match s {
+                    egui::Shape::Rect(r) if r.rect == at && r.fill.a() > 0 => Some(r.fill),
+                    _ => None,
+                })
+                .collect();
+            let want = if n == on { vec![t.raised_hover] } else { vec![] };
+            assert_eq!(grounds, want, "after {keys:?}: {name} highlighted: {}", n == on);
+        }
+    }
+    assert_eq!(ui.value("conn-database"), "", "nothing chosen yet");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.value("conn-database"), "odd", "Enter picks the highlighted name");
+}
+
+/// IN TRANSACTION comes from the engine's report of the query session: a `BEGIN` lights it, a
+/// job running in the transaction shows in its place (with its CANCEL) and gives it back, and
+/// `COMMIT` clears it. On Postgres and MySQL.
+#[test]
+fn in_transaction_shows_from_the_engine() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    for (server, sleep) in [("pg14", "select pg_sleep(30)"), ("mysql80", "select sleep(30)")] {
+        let target = dbee_testkit::target(db.server(server).unwrap());
+        let mut ui = connected_to_target(db, &target, None, APP_SIZE);
+        assert!(ui.tag("status-transaction").is_none(), "{server}: no transaction yet");
+        ui.execute("tab.newQuery", json!({ "text": "BEGIN" }));
+        ui.execute("query.run", json!({}));
+        ui.frame();
+        assert_eq!(ui.document()["connection"]["transaction"]["state"], "open", "{server}");
+        assert_eq!(ui.value("status-transaction"), "In transaction", "{server}");
+        let tag = ui.tag("status-transaction").unwrap();
+        let f = |i: usize| tag["rect"][i].as_f64().unwrap() as f32;
+        let at = egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)));
+        assert!(ui.text_in(at, "IN TRANSACTION").is_some(), "{server}: drawn in capitals");
+        let mark = egui::Rect::from_center_size(egui::pos2(at.left() - 8.0 - 4.0, at.center().y), egui::Vec2::splat(8.0));
+        let marked = ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == mark && r.fill == t.staged_strong));
+        assert!(marked, "{server}: the staged_strong square before it at {mark:?}");
+        // A job in the transaction shows in its place, with its CANCEL, and gives it back.
+        ui.execute("query.setText", json!({ "text": sleep }));
+        ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+        ui.until("the run", |ui| ui.tag("status-job").is_some());
+        assert!(ui.tag("status-transaction").is_none(), "{server}: one activity at a time");
+        assert!(ui.tag("status-cancel").is_some(), "{server}: the job's CANCEL");
+        ui.click("status-cancel");
+        ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+        ui.frame();
+        assert_eq!(ui.value("status-transaction"), "In transaction", "{server}: back once the job ended");
+        ui.execute("query.setText", json!({ "text": "COMMIT" }));
+        ui.execute("query.run", json!({}));
+        ui.frame();
+        assert_eq!(ui.document()["connection"]["transaction"], Json::Null, "{server}");
+        assert!(ui.tag("status-transaction").is_none(), "{server}: COMMIT clears it");
+    }
+}
+
+/// The text `words` the last frame drew within `within`: its colour and font.
+fn drawn_as(ui: &Ui, within: egui::Rect, words: &str) -> Option<(egui::Color32, egui::FontId)> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.expand(1.0).contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+            let section = t.galley.job.sections.first()?;
+            let colour = if section.format.color == egui::Color32::PLACEHOLDER { t.fallback_color } else { section.format.color };
+            Some((t.override_text_color.unwrap_or(colour), section.format.font_id.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// The status bar's address: after the name block, in `data`
+/// grey, the connection as typed in its form. Postgres and MySQL, through the SSH tunnel (the
+/// database's address as typed, then ` via ` and the SSH host, never the tunnel's local port),
+/// and a SQLite file with the home folder as `~`. `status-address` holds it.
+#[test]
+fn the_address_is_the_connection_as_typed() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap().display().to_string();
+    let home = dbee_config::home_dir().map(|h| h.display().to_string());
+    let in_home = home.as_deref().and_then(|h| file.strip_prefix(h)).filter(|rest| rest.starts_with('/'));
+    let file_address = in_home.map_or_else(|| file.clone(), |rest| format!("~{rest}"));
+    let plain = || temp_home(None, None);
+    let tunnel = || temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    let cases: Vec<(&str, ConnectionConfig, TempHome, String)> = vec![
+        ("pg14", pg14(db), plain(), format!("postgres@127.0.0.1:{}/dbee", pg14_server(db).port)),
+        ("mysql80, no database", config_of(&mysql), plain(), format!("root@127.0.0.1:{}", mysql.server().unwrap().port)),
+        ("through the tunnel", via_ssh(db, SshAuth::Key { path: None }), tunnel(), "postgres@pg14:5432/dbee via 127.0.0.1".to_string()),
+        ("sqlite", config_of(&sqlite), plain(), file_address),
+    ];
+    for (what, config, home, want) in cases {
+        let mut ui = ui_in(home, true);
+        ui.execute("connection.open", json!({ "config": config, "password": db.password }));
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        assert_eq!(ui.value("status-address"), json!(want), "{what}");
+        let at = rect_of(&ui.tag("status-address").unwrap());
+        let name = rect_of(&ui.tag("status-connection").unwrap());
+        let (colour, font) = drawn_as(&ui, at, &want).unwrap_or_else(|| panic!("{what}: `{want}` drawn as written in {at:?}"));
+        assert_eq!((colour, font), (t.text_muted, dbee_ui_egui::theme::Text::Data.font()), "{what}: in `data` grey");
+        assert!(at.left() > name.right() && (at.center().y - name.center().y).abs() < 1.0, "{what}: after the name {name:?}: {at:?}");
+    }
+}
+
+/// The address never holds the password: not a connection's whose URL held one (Fill from URL),
+/// named like a URL, nor one opened with a password and a name dbee made up. The password is in
+/// no drawn text, no hover and no tag.
+#[test]
+fn the_address_never_holds_the_password() {
+    let db = dbee_testkit::require_testdb!();
+    let port = pg14_server(db).port;
+    let mut ui = cards();
+    ui.click("conn-fill-url");
+    ui.text(&format!("postgres://postgres:{}@127.0.0.1:{port}/dbee", db.password));
+    ui.click("dialog-ok");
+    ui.replace("conn-name", &format!("postgres://postgres@127.0.0.1:{port}/dbee"));
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    let want = format!("postgres@127.0.0.1:{port}/dbee");
+    assert_eq!(ui.value("status-address"), json!(want), "the address shows");
+    let at = ui.centre("status-address");
+    ui.rest(at);
+    let nowhere = |ui: &mut Ui, what: &str| {
+        let texts: Vec<String> = ui.texts().iter().map(|(_, g)| g.text().to_string()).collect();
+        assert!(texts.iter().all(|t| !t.contains(&db.password)), "{what}: drawn: {texts:?}");
+        let inspect = ui.inspect().to_string();
+        assert!(!inspect.contains(&db.password), "{what}: tags: {inspect}");
+    };
+    nowhere(&mut ui, "a URL-shaped name");
+    // A name dbee made up: no address, and still no password.
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.execute("connection.open", json!({ "config": ConnectionConfig { name: String::new(), ..pg14(db) }, "password": db.password }));
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert!(ui.tag("status-address").is_none(), "the name block already is the address");
+    nowhere(&mut ui, "a made-up name");
+}
+
+/// The `connection.open` params the journal holds, in order.
+fn journaled_opens(ui: &mut Ui) -> Vec<Json> {
+    let journal = ui.ok("engine.journal", json!({}));
+    journal.as_array().unwrap().iter().filter(|e| e["command"] == "connection.open").map(|e| e["params"].clone()).collect()
+}
+
+/// The saved connections named `name`.
+fn saved_named(ui: &mut Ui, name: &str) -> Vec<Json> {
+    let list = ui.execute("connection.list", json!({}));
+    list["saved"].as_array().unwrap().iter().filter(|c| c["name"] == name).cloned().collect()
+}
+
+/// Review Focus 1 and 2: CONNECT on a new connection saves it once it connects, with its password
+/// in the keyring (Save passwords ticked), never in the file, `ui.inspect` or the journal.
+#[test]
+fn connect_saves_a_new_connection_once() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, pg14_server(db));
+    ui.click("conn-name");
+    ui.text("Day new");
+    assert_eq!(ui.value("conn-save-secrets"), true);
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    let d = ui.document();
+    let saved = saved_named(&mut ui, "Day new");
+    assert_eq!(saved.len(), 1, "saved once: {saved:?}");
+    assert_eq!(saved[0]["id"], d["connection"]["id"], "{d}");
+    assert_eq!(d["connection"]["saved"], true, "{d}");
+    assert!(ui.tag("status-save").is_none(), "nothing left to save");
+    let id = saved[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(stored(&ui, &id, SecretKind::DbPassword).as_deref(), Some(db.password.as_str()), "the password in the keyring");
+    let opens = journaled_opens(&mut ui);
+    assert!(opens.iter().any(|p| p["save"] == true), "{opens:?}");
+    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+    assert!(!everything.contains(&db.password), "the password stays out of inspect and the journal");
+    let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();
+    assert!(!file.contains(&db.password), "the password stays out of the file");
+    // Back on the screen the form is the saved connection: CONNECT again saves nothing more.
+    ui.execute("connection.close", json!({}));
+    ui.frame();
+    assert!(ui.tag("conn-more").is_some(), "the form shows the saved connection");
+    ui.click("conn-connect");
+    ui.until("the workspace again", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(saved_named(&mut ui, "Day new").len(), 1);
+    assert_eq!(journaled_opens(&mut ui).last().unwrap().get("save"), None, "a saved connection is not saved again");
+}
+
+/// A connect that fails saves nothing; the band names what failed.
+#[test]
+fn a_failed_connect_saves_nothing() {
+    let mut ui = ui();
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    assert_eq!(ui.value("conn-error-heading"), "The connection failed");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
+    // Each command's heading: Test, and a form that isn't usable under the button pressed.
+    ui.click("conn-test");
+    ui.until("the test's error", |ui| ui.tag("conn-error-heading").is_some_and(|h| h["value"] == "The test failed"));
+    ui.replace("conn-port", "54x");
+    ui.click("conn-save");
+    assert_eq!(ui.value("conn-error-heading"), "The connection was not saved");
+    ui.click("conn-connect");
+    assert_eq!(ui.value("conn-error-heading"), "The connection failed");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
+}
+
+/// Calls 2: CONNECT on a saved connection whose fields changed connects with them and leaves the
+/// saved entry as it was.
+#[test]
+fn connect_leaves_an_edited_saved_connection_as_saved() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    let card = ui.save(&ConnectionConfig { name: "Shop".into(), database: "dbee".into(), ..pg14(db) }, Some(&db.password));
+    ui.click(&card);
+    ui.replace("conn-database", "postgres");
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["connection"]["database"], "postgres");
+    let saved = saved_named(&mut ui, "Shop");
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0]["database"], "dbee", "the saved entry is unchanged");
+    assert_eq!(journaled_opens(&mut ui).last().unwrap().get("save"), None);
+}
+
+/// An unsaved recent connection is saved once it connects, and moves to the saved part.
+#[test]
+fn connecting_a_recent_row_saves_it() {
+    let home = temp_home(None, None);
+    let file = home.home.join("scratch.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let recent = ConnectionConfig { id: "R".into(), ..file_of(file.to_str().unwrap(), "Scratch") };
+    write_store(&home, &[], &[&recent]);
+    let mut ui = ui_in(home, true);
+    assert!(ui.tag("conn-recent-0").is_some());
+    ui.double_click("conn-recent-0");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(saved_named(&mut ui, "Scratch").len(), 1);
+    ui.execute("connection.close", json!({}));
+    ui.frame();
+    let i = ui.inspect();
+    assert!(tag_in(&i, "conn-saved-R").is_some(), "{}", ids(&i).join(" "));
+    assert!(tag_in(&i, "conn-recent-0").is_none(), "{}", ids(&i).join(" "));
+}
+
+/// The strip sits right above the form's bar, across the pane, and moves nothing else: an error,
+/// a test passed and `Saved.` alike.
+#[test]
+fn the_strip_sits_above_the_bar_and_moves_nothing() {
+    let others = |i: &Json| -> Vec<(String, [f64; 4])> {
+        let varies = ["conn-error", "conn-error-heading", "conn-result", "conn-note"];
+        ids(i)
+            .into_iter()
+            .filter(|id| id.starts_with("conn-") && !varies.contains(&id.as_str()))
+            .map(|id| (id.clone(), rect(&tag_in(i, &id).unwrap())))
+            .collect()
+    };
+    let above_the_bar = |i: &Json, id: &str| {
+        let strip = rect_of(&tag_in(i, id).unwrap_or_else(|| panic!("no {id}")));
+        let connect = rect_of(&tag_in(i, "conn-connect").unwrap());
+        let pane = rect_of(&tag_in(i, "conn-card").unwrap());
+        assert!(strip.bottom() <= connect.top() && strip.bottom() >= connect.top() - 36.0, "{id} right above the bar: {strip:?} {connect:?}");
+        assert!((strip.left() - pane.left()).abs() <= 0.5 && (strip.right() - pane.right()).abs() <= 0.5, "{id} across the pane: {strip:?} {pane:?}");
+    };
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    let before = others(&ui.inspect());
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let i = ui.inspect();
+    above_the_bar(&i, "conn-error");
+    assert_eq!(others(&i), before, "the error moved something");
+    ui.click("conn-save");
+    ui.until("Saved.", |ui| ui.tag("conn-result").is_some());
+    let i = ui.inspect();
+    assert_eq!(tag_in(&i, "conn-result").unwrap()["value"], "Saved.");
+    above_the_bar(&i, "conn-result");
+    // A test passed, on a SQLite file.
+    let file = ui.home.home.join("strip.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let card = ui.save(&file_of(file.to_str().unwrap(), "Strip"), None);
+    ui.click(&card);
+    let before = others(&ui.inspect());
+    ui.click("conn-test");
+    ui.until("the test passed", |ui| ui.tag("conn-result").is_some());
+    let i = ui.inspect();
+    assert!(tag_in(&i, "conn-result").unwrap()["value"].as_str().unwrap().starts_with("Test passed"), "{i}");
+    above_the_bar(&i, "conn-result");
+    assert_eq!(others(&i), before, "the result moved something");
+}
+
+/// `…` on a saved connection's form: Duplicate and Delete, as the row's menu has them.
+#[test]
+fn more_offers_duplicate_and_delete() {
+    let mut ui = ui();
+    assert!(ui.tag("conn-more").is_none(), "a new connection has no `…`");
+    let card = ui.save(&silent_config(1), None);
+    ui.click(&card);
+    let more = rect_of(&ui.tag("conn-more").expect("`…` on a saved connection"));
+    let test = rect_of(&ui.tag("conn-test").unwrap());
+    assert!(more.right() <= test.left() && (test.left() - more.right() - 8.0).abs() <= 0.5, "`…` 8 left of TEST: {more:?} {test:?}");
+    ui.click("conn-more");
+    ui.click("conn-more-delete");
+    let i = ui.inspect();
+    assert_eq!(i["dialog"], "deleteConnection", "{i}");
+    ui.click("dialog-cancel");
+    ui.click("conn-more");
+    ui.click("conn-more-duplicate");
+    assert_eq!(ui.value("conn-name"), "silent (copy)");
+    assert!(ui.tag("conn-change-engine").is_some(), "a copy can change its engine");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().len(), 2);
+}
+
+/// File > Connect runs the form's CONNECT; on the engine cards it is off.
+#[test]
+fn file_connect_from_the_menu_runs_the_form() {
+    let mut ui = cards();
+    ui.click("menu-File");
+    assert_eq!(ui.tag("menu-connection.open").expect("File > Connect")["enabled"], false, "off on the cards");
+    ui.key("Escape");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("menu-File");
+    ui.click("menu-connection.open");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let opens = journaled_opens(&mut ui);
+    assert_eq!(opens.len(), 1, "{opens:?}");
+    assert_eq!((opens[0]["config"]["host"].clone(), opens[0]["config"]["port"].clone()), (json!("127.0.0.1"), json!(1)));
+}
+
+/// Tab moves through the form in reading order: the database row comes under HOST, before USER.
+#[test]
+fn tab_follows_the_reading_order() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.focus("conn-host");
+    for next in ["conn-port", "conn-database", "conn-database-list", "conn-user", "conn-password", "conn-password-show", "conn-save-secrets"] {
+        ui.key("Tab");
+        ui.frame();
+        assert!(ui.focused(next), "Tab reaches {next}");
+    }
+}
+
+/// The tag `id` as the last frame drew it, read without running a frame.
+fn drawn_tag(ui: &Ui, id: &str) -> Option<Json> {
+    tag_in(&json!({ "automation": ui.harness.state().tags().to_json() }), id)
+}
+
+/// A 1200 × 900 window whose frames are 50 ms apart on egui's clock, showing the form of a saved
+/// connection to `silent`; its row's id.
+fn silent_form(silent: &Silent) -> (Ui, String) {
+    let mut ui = Ui::window(Setup { size: egui::vec2(1200.0, 900.0), step: Some(0.05), ..Setup::default() });
+    let card = ui.save(&silent_config(silent.port), None);
+    ui.click(&card);
+    (ui, card)
+}
+
+/// Clicks `button` (TEST or CONNECT) without waiting, runs frames until one draws CONNECT off (the
+/// first frame that sees the job), then on until egui's clock is `secs` past that frame; `check`
+/// sees each of those frames with the time gone.
+fn frames_while_running(ui: &mut Ui, button: &str, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+    let _reply = ui.send("ui.click", json!({ "id": button }));
+    let start = Instant::now();
+    while drawn_tag(ui, "conn-connect").is_some_and(|t| t.get("enabled").is_none()) {
+        assert!(start.elapsed() < Duration::from_secs(10), "{button} starts a job");
+        ui.frame();
+    }
+    let first = ui.clock();
+    check(ui, 0.0);
+    loop {
+        ui.frame();
+        let gone = ui.clock() - first;
+        check(ui, gone);
+        if gone >= secs - 1e-6 {
+            return;
+        }
+    }
+}
+
+/// CANCEL is clicked and the job ends: TEST and CONNECT on again, no facts, no CANCEL.
+fn cancel(ui: &mut Ui) {
+    ui.click("conn-cancel");
+    ui.until("the cancelled job's end", |ui| ui.tag("conn-connect").unwrap().get("enabled").is_none());
+    ui.frame();
+    assert!(drawn_tag(ui, "conn-running").is_none() && drawn_tag(ui, "conn-cancel").is_none(), "the facts and CANCEL go");
+    assert!(drawn_tag(ui, "conn-test").unwrap().get("enabled").is_none(), "TEST on again");
+}
+
+/// Review Focus 4: the facts and CANCEL show only once a connect has run 300 ms; a cancel shows
+/// nothing; the next connect waits its own 300 ms and its timer starts from 0.
+#[test]
+fn the_connecting_state_waits_300_ms_and_restarts() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    for run in ["first", "second"] {
+        let mut seen = false;
+        frames_while_running(&mut ui, "conn-connect", 0.36, |ui, gone| {
+            let connect = drawn_tag(ui, "conn-connect").unwrap();
+            assert_eq!((connect["value"].clone(), connect["enabled"].clone()), (json!("Connect"), json!(false)), "{run} at {gone:.2} s");
+            let (running, cancel) = (drawn_tag(ui, "conn-running"), drawn_tag(ui, "conn-cancel"));
+            if gone <= 0.25 {
+                assert!(running.is_none() && cancel.is_none(), "{run} at {gone:.2} s: no facts or CANCEL yet");
+            }
+            if gone >= 0.35 {
+                let running = running.unwrap_or_else(|| panic!("{run} at {gone:.2} s: the facts show"));
+                assert_eq!(running["value"]["words"], "Connecting", "{run} at {gone:.2} s");
+                // Each run's timer counts from its own start.
+                let timer = running["value"]["timer"].as_str().unwrap().to_string();
+                let want = if gone < 0.39 { "00:00.3" } else { "00:00.4" };
+                assert_eq!(timer, want, "{run} at {gone:.2} s");
+                let cancel = rect_of(&cancel.unwrap_or_else(|| panic!("{run} at {gone:.2} s: CANCEL shows")));
+                assert!(cancel.left() >= rect_of(&connect).right(), "{run}: CANCEL right of CONNECT");
+                seen = true;
+            }
+        });
+        assert!(seen, "{run}: the connecting state showed");
+        cancel(&mut ui);
+        assert!(ui.tag("conn-error").is_none(), "{run}: a cancel shows no strip");
+    }
+}
+
+/// A cancelled connect leaves the screen, the list and the form as they were.
+#[test]
+fn cancel_stops_a_connect_and_shows_nothing() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    let fields = ["conn-name", "conn-host", "conn-port", "conn-user", "conn-database", "conn-color"];
+    let before: Vec<Json> = fields.iter().map(|id| ui.value(id)).collect();
+    let list = ui.execute("connection.list", json!({}));
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some());
+    cancel(&mut ui);
+    let d = ui.document();
+    assert_eq!((d["jobs"].clone(), d["screen"].clone()), (json!([]), json!("connections")), "{d}");
+    assert_eq!(ui.execute("connection.list", json!({})), list);
+    let after: Vec<Json> = fields.iter().map(|id| ui.value(id)).collect();
+    assert_eq!(after, before);
+    for id in ["conn-error", "conn-result", "conn-note", "notice"] {
+        assert!(ui.tag(id).is_none(), "no {id}");
+    }
+}
+
+/// A test shows TESTING after 300 ms, and CANCEL ends it.
+#[test]
+fn a_test_shows_testing_and_can_be_cancelled() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-test", 0.35, |ui, gone| {
+        let test = drawn_tag(ui, "conn-test").unwrap();
+        assert_eq!((test["value"].clone(), test["enabled"].clone()), (json!("Test"), json!(false)), "at {gone:.2} s");
+    });
+    assert_eq!(ui.value("conn-running")["words"], "Testing");
+    cancel(&mut ui);
+    assert!(ui.tag("conn-error").is_none(), "a cancel shows no strip");
+    assert_eq!(ui.document()["jobs"], json!([]));
+}
+
+/// Review Focus 5: once a connect has run 300 ms, the form is dimmed and takes nothing: no click,
+/// no typing, and Tab never puts the keyboard in a field.
+#[test]
+fn the_form_takes_no_input_while_it_connects() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some());
+    let host = ui.value("conn-host");
+    ui.click("conn-host");
+    ui.text("x");
+    assert_eq!(ui.value("conn-host"), host, "a click and typing change nothing");
+    let colour = ui.value("conn-color");
+    ui.click("conn-color-blue");
+    assert_eq!(ui.value("conn-color"), colour, "a swatch click changes nothing");
+    let fields: Vec<egui::Id> =
+        ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"]
+            .into_iter()
+            .map(dbee_ui_egui::conn_form::field_id)
+            .collect();
+    ui.focus("conn-cancel");
+    for n in 0..10 {
+        ui.key_with("Tab", json!({ "shift": true }));
+        ui.frame();
+        let focused = ui.harness.ctx.memory(|m| m.focused());
+        assert!(focused.is_none_or(|f| !fields.contains(&f)), "Shift+Tab {n}: a field has the keyboard");
+    }
+    for n in 0..10 {
+        ui.key("Tab");
+        ui.frame();
+        let focused = ui.harness.ctx.memory(|m| m.focused());
+        assert!(focused.is_none_or(|f| !fields.contains(&f)), "Tab {n}: a field has the keyboard");
+    }
+    assert_eq!(ui.value("conn-host"), host);
+    cancel(&mut ui);
+}
+
+/// The colour `words` were painted in, last frame, within `id`'s rect: as seen, the painter's
+/// fading applied.
+fn painted_words(ui: &mut Ui, id: &str, words: &str) -> egui::Color32 {
+    let within = ui.drawn(id);
+    ui.shapes()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            egui::Shape::Text(t) if t.galley.text() == words && within.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+                let c = text_colours(&[(within, egui::Shape::Text(t.clone()))]).first().copied()?;
+                Some(if t.opacity_factor < 1.0 { c.gamma_multiply(t.opacity_factor) } else { c })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{words} painted in {id}"))
+}
+
+/// Review Focus 6: the connecting form at 50 % keeps the CA file's CLEAR, already off, at its own
+/// look: not fainter than off. CHOOSE, on, is at half.
+#[test]
+fn the_connecting_forms_off_clear_is_not_fainter_than_off() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    ui.frame();
+    assert_eq!(ui.tag("conn-ca-clear").unwrap()["enabled"], json!(false), "no CA file: CLEAR is off");
+    let (clear, choose) = (painted_words(&mut ui, "conn-ca-clear", "CLEAR"), painted_words(&mut ui, "conn-ca-choose", "CHOOSE"));
+    frames_while_running(&mut ui, "conn-connect", 0.4, |_, _| {});
+    assert!(drawn_tag(&ui, "conn-cancel").is_some(), "the form is dimmed");
+    let (clear_dimmed, choose_dimmed) = (painted_words(&mut ui, "conn-ca-clear", "CLEAR"), painted_words(&mut ui, "conn-ca-choose", "CHOOSE"));
+    let near = |a: egui::Color32, b: egui::Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 2);
+    assert!(near(clear_dimmed, clear), "CLEAR {clear_dimmed:?} while connecting, {clear:?} idle");
+    assert!(near(choose_dimmed, choose.gamma_multiply(dbee_ui_egui::theme::DIM)), "CHOOSE {choose_dimmed:?} while connecting, half of {choose:?}");
+    cancel(&mut ui);
+}
+
+/// `a` holds `b` (or `b` holds `a`): a group and one of its parts, which it draws in its own rect
+/// (a segmented row and its segments, the colour row and its swatches, a list row and its `-kind`
+/// twin, the error band and its heading).
+fn holds((a, ra): (&str, egui::Rect), (b, rb): (&str, egui::Rect)) -> bool {
+    let part = |whole: &str, rw: egui::Rect, of: &str, ro: egui::Rect| of.starts_with(&format!("{whole}-")) && rw.expand(0.5).contains_rect(ro);
+    part(a, ra, b, rb) || part(b, rb, a, ra)
+}
+
+/// Every tagged `conn-*` control of the last frame lies inside the sidebar or the pane, and no two
+/// overlap by more than 0.5 px; the database list's items (over the form) and the pane itself
+/// left out.
+fn nothing_overlaps(ui: &mut Ui, what: &str) {
+    let i = ui.inspect();
+    let pane = rect_of(&tag_in(&i, "conn-card").unwrap_or_else(|| panic!("{what}: no pane")));
+    let side = egui::Rect::from_min_max(egui::pos2(0.0, pane.top()), egui::pos2(pane.left(), pane.bottom()));
+    let shown: Vec<(String, egui::Rect)> = ids(&i)
+        .into_iter()
+        .filter(|id| id.starts_with("conn-") && !["conn-card", "conn-version"].contains(&id.as_str()) && !id.starts_with("conn-database-item-"))
+        .filter_map(|id| {
+            let e = tag_in(&i, &id).unwrap();
+            visible(&Some(e.clone())).then(|| (id, rect_of(&e)))
+        })
+        .filter(|(_, r)| r.width() > 0.0 && r.height() > 0.0)
+        .collect();
+    for (id, r) in &shown {
+        let inside = |area: egui::Rect| area.expand(0.5).contains_rect(*r);
+        assert!(inside(pane) || inside(side), "{what}: {id} {r:?} is in neither the pane {pane:?} nor the sidebar {side:?}");
+    }
+    for (n, (a, ra)) in shown.iter().enumerate() {
+        for (b, rb) in &shown[n + 1..] {
+            let o = ra.intersect(*rb);
+            let overlap = o.width() > 0.5 && o.height() > 0.5;
+            assert!(!overlap || holds((a, *ra), (b, *rb)), "{what}: {a} {ra:?} overlaps {b} {rb:?}");
+        }
+    }
+    let version = rect_of(&tag_in(&i, "conn-version").unwrap());
+    assert!(version.top() >= pane.bottom() - 0.5, "{what}: the version bar {version:?} under the pane {pane:?}");
+}
+
+/// Review Focus 6: at every width from 1920 to the smallest window, tall and short, nothing on the
+/// connection screen is drawn over anything else or past its area: the cards, each form, a saved
+/// connection's, connecting after 300 ms, an error.
+#[test]
+fn no_control_on_the_connection_screen_overlaps() {
+    let sweep = |ui: &mut Ui, what: &str| {
+        for h in [720.0, 420.0] {
+            for w in [1920.0, 1400.0, 1100.0, 900.0, 760.0, 640.0] {
+                ui.harness.set_size(egui::vec2(w, h));
+                ui.frame();
+                ui.frame();
+                nothing_overlaps(ui, &format!("{what} at {w}x{h}"));
+            }
+        }
+    };
+    let mut ui = Ui::fresh(APP_SIZE);
+    sweep(&mut ui, "the cards");
+    ui.harness.set_size(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.click("conn-ssh-on");
+    assert_eq!(ui.value("conn-ssh-on"), true);
+    sweep(&mut ui, "PostgreSQL with SSH");
+    for (kind, what) in [("mysql", "MySQL"), ("sqlite", "SQLite")] {
+        ui.harness.set_size(APP_SIZE);
+        ui.frame();
+        ui.click("conn-change-engine");
+        ui.click(&format!("conn-kind-{kind}"));
+        sweep(&mut ui, what);
+    }
+    // A saved connection's form, with `…`, and its row in the list.
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+    let card = ui.save(&ConnectionConfig { name: "A saved connection with a rather long name".into(), ..server_of(DbKind::Postgres, "") }, None);
+    ui.click(&card);
+    assert!(ui.tag("conn-more").is_some());
+    sweep(&mut ui, "a saved connection");
+    // An error band.
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+    ui.click("conn-new");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    sweep(&mut ui, "an error");
+    // Connecting, after 300 ms.
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some() && ui.tag("conn-running").is_some());
+    sweep(&mut ui, "connecting");
+    assert!(ui.tag("conn-cancel").is_some(), "still connecting");
+    cancel(&mut ui);
+}
+
+/// At the smallest window the form keeps SAVE, TEST and CONNECT whole in the pane, and FILL FROM
+/// URL its words while the title keeps 80; with the sidebar dragged wider, the title's room goes
+/// under 80 and FILL FROM URL shows its icon alone, which still opens the dialog.
+#[test]
+fn at_640_the_form_keeps_its_buttons() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    let wide = rect_of(&ui.tag("conn-fill-url").unwrap());
+    ui.harness.set_size(egui::vec2(640.0, 420.0));
+    ui.frame();
+    ui.frame();
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    for (id, words) in [("conn-save", "SAVE"), ("conn-test", "TEST"), ("conn-connect", "CONNECT"), ("conn-fill-url", "FILL FROM URL")] {
+        let r = at(id);
+        assert!(pane.expand(0.5).contains_rect(r), "{id} {r:?} inside the pane {pane:?}");
+        assert!(ui.text_in(r, words).is_some_and(|(_, cut)| !cut), "{id} draws {words} whole in {r:?}");
+    }
+    assert!(at("conn-title").right() <= at("conn-fill-url").left(), "the title ends before FILL FROM URL");
+    // The sidebar dragged 150 wider: the title's room under 80.
+    let pane_w = pane.width();
+    let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    let from = egui::pos2(pane.left(), pane.center().y);
+    let to = from + egui::vec2(150.0, 0.0);
+    ui.frame_with(vec![egui::Event::PointerMoved(from)]);
+    ui.frame_with(vec![press(from, true)]);
+    for n in 1..=8 {
+        ui.frame_with(vec![egui::Event::PointerMoved(from + (to - from) * (n as f32 / 8.0))]);
+    }
+    ui.frame_with(vec![press(to, false)]);
+    ui.frame();
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    assert!((pane.width() - (pane_w - 150.0)).abs() <= 1.0, "the pane is 150 narrower: {pane:?}");
+    let narrow = at("conn-fill-url");
+    assert!(pane.expand(0.5).contains_rect(narrow), "FILL FROM URL {narrow:?} inside the pane {pane:?}");
+    assert!(narrow.width() < wide.width(), "FILL FROM URL icon only: {narrow:?} (was {wide:?})");
+    assert!(ui.text_in(narrow, "FILL FROM URL").is_none(), "no words");
+    assert!(at("conn-title").right() <= narrow.left(), "the title ends before FILL FROM URL");
+    ui.click("conn-fill-url");
+    assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
+}
+
+/// A chosen file's path in the form is data: drawn in the data font and, when long, cut in the
+/// middle so its file name stays whole; the whole path is the box's value.
+#[test]
+fn a_chosen_files_path_is_data_cut_in_the_middle() {
+    let mut ui = ui();
+    let long = "/srv/backups/clients/northwind-traders/archive/2026/november/nightly/orders-and-invoices.sqlite";
+    let card = ui.save(&file_of(long, "Archive"), None);
+    ui.click(&card);
+    ui.until("the file box", |ui| ui.tag("conn-file").is_some());
+    assert_eq!(ui.value("conn-file"), long);
+    let r = ui.tag("conn-file").unwrap()["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect::<Vec<_>>();
+    let boxed = egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]));
+    let texts = ui.texts();
+    let (_, drawn) = texts.iter().find(|(at, _)| boxed.contains(at.center())).unwrap_or_else(|| panic!("the path drawn"));
+    // What the box shows, cut or not (a galley's text is the whole job's).
+    let words: String = drawn.rows.iter().map(|r| r.text()).collect();
+    assert!(words.contains('…') && words.ends_with("/orders-and-invoices.sqlite"), "cut in the middle, the name whole: {words}");
+    let family = drawn.job.sections.first().map(|s| s.format.font_id.family.clone());
+    assert_eq!(family, Some(dbee_ui_egui::theme::Text::Data.font().family), "the data font");
 }

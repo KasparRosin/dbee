@@ -1,6 +1,6 @@
 # Installing dbee
 
-> **Last reviewed:** 2026-11-10 · **Last updated:** 2026-11-10 · **Change:** major (new: installing each download, and opening an unsigned build)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-10 · **Change:** major (new: installing each download, and opening an unsigned build)
 
 Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
 

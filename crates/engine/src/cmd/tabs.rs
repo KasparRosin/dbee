@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
+use super::query::{self, End};
 use super::{CommandSpec, active_query, always, bad, connection_param, has_tabs, p};
-use crate::{ConnectionId, EngineError, Json, Need, Outcome, QueryTab, Session, Tab, TabId, Which};
+use crate::{ConnectionId, EndAbout, EngineError, Json, Need, Outcome, QueryTab, Session, Tab, TabId, TransactionState, Which};
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -20,11 +21,11 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
     CommandSpec {
-        id: "tab.close",
+        id: CLOSE,
         label: "Close Tab",
         menu: &["File"],
         shortcut: Some("Ctrl+W"),
-        params: "{tab?, force?}",
+        params: "{tab?, force?, end?: \"commit\" or \"rollback\"}",
         enabled: has_tabs,
         run: close,
         journal: true,
@@ -64,6 +65,8 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
 ];
+
+const CLOSE: &str = "tab.close";
 
 /// The prefix of query tab titles: `Query 1`, `Query 2`, …
 const QUERY_TITLE: &str = "Query ";
@@ -129,44 +132,76 @@ fn set_text(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
 }
 
-/// `{tab?, force?}` → `{closed, active}`: closes the tab (default: the active one). A query tab
-/// with text, or a table tab with staged edits, asks first unless `force`
-/// (`Needs::Confirm { what: "queryText" | "stagedEdits" }`). A query run of the tab is cancelled;
-/// any other job still running for the tab goes on (an Apply too). Either way its result is
-/// ignored. Closing the active tab activates the one to its right, else the one to its left.
+/// `{tab?, force?, end?}` → `{closed, active}`: closes the tab (default: the active one). Unless
+/// `force` or `end`, it asks first:
+/// - the query tab whose run opened its connection's transaction, while it is open or failed:
+///   `Needs::EndTransaction` ([`query::end_question`]), which comes before the question below and
+///   carries its sentence in `lost`;
+/// - a query tab with text, or a table tab with staged edits: `Needs::Confirm`, `what` being
+///   `queryText` or `stagedEdits`.
+///
+/// With `end` (`"commit"` or `"rollback"`) it is a job that ends the query session's transaction
+/// first, and closes the tab unless that fails ([`query::end_then_close`]). A query run of the tab
+/// is cancelled; any other job still running for the tab goes on (an Apply too). Either way its
+/// result is ignored. Closing the active tab activates the one to its right, else the one to its
+/// left.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
+    let end = End::param(params)?;
     let id = match p::opt_tab_id(params, "tab")? {
         Some(id) => existing(s, id)?,
         None => s.state.active_tab().map(Tab::id).ok_or_else(|| bad("no tab is active; name one with `tab`"))?,
     };
-    let at = s.state.tabs.iter().position(|t| t.id() == id).ok_or_else(|| bad(format!("no tab {}", id.0)))?;
+    let tab = s.state.tab(id).ok_or_else(|| bad(format!("no tab {}", id.0)))?;
+    if let Some(end) = end {
+        let connection = tab.connection();
+        return query::end_then_close(s, connection, end, CLOSE, move |s| Some(close_now(s, id)));
+    }
     if !force {
-        match s.state.tabs.get(at) {
-            Some(Tab::Query(q)) if !q.text.trim().is_empty() => {
-                return Err(EngineError::Needs {
-                    need: Need::Confirm { what: "queryText".into() },
-                    message: format!("Close {}? Its query text will be lost.", q.title),
-                });
-            }
-            Some(Tab::Table(t)) if t.has_staged_edits() => {
-                return Err(EngineError::Needs {
-                    need: Need::Confirm { what: "stagedEdits".into() },
-                    message: format!("Close {}? Its {} will be lost.", t.table.display(), staged_changes(t.edits.count())),
-                });
-            }
-            _ => {}
+        let question = format!("Close {}?", tab.title());
+        let lost = lost(tab);
+        if let Tab::Query(q) = tab
+            && let Some(c) = q.connection.and_then(|c| s.state.connection(Which::Id(c)))
+            && let Some(t) = c.transaction()
+            && t.tab == Some(id)
+            && matches!(t.state, TransactionState::Open | TransactionState::Failed)
+        {
+            return Err(query::end_question(s, c.id, t.state, EndAbout::Tab, q.title.clone(), &question, lost.map(|(_, l)| l)));
+        }
+        if let Some((what, lost)) = lost {
+            return Err(EngineError::Needs { need: Need::Confirm { what: what.into() }, message: format!("{question} {lost}") });
         }
     }
+    Ok(Outcome::Done(close_now(s, id)))
+}
+
+/// What closing `tab` loses: the `what` of its `Needs::Confirm`, and the sentence its question
+/// says it in after asking ("Its query text will be lost.").
+fn lost(tab: &Tab) -> Option<(&'static str, String)> {
+    match tab {
+        Tab::Query(q) if !q.text.trim().is_empty() => Some(("queryText", "Its query text will be lost.".to_owned())),
+        Tab::Table(t) if t.has_staged_edits() => Some(("stagedEdits", format!("Its {} will be lost.", staged_changes(t.edits.count())))),
+        _ => None,
+    }
+}
+
+/// Closes tab `id` when it is still open (see [`close`]): `{closed, active}`.
+fn close_now(s: &mut Session, id: TabId) -> Json {
+    let Some(at) = s.state.tabs.iter().position(|t| t.id() == id) else { return json!({ "closed": id, "active": s.state.active }) };
     if let Tab::Query(q) = s.state.tabs.remove(at)
-        && let (Some(job), Some(connection)) = (q.running, q.connection)
+        && let Some(connection) = q.connection
     {
-        super::query::stop_run(s, connection, job);
+        if let Some(job) = q.running {
+            super::query::stop_run(s, connection, job);
+        }
+        if let Some(c) = s.state.connection_mut(Which::Id(connection)) {
+            c.tab_closed(id);
+        }
     }
     if s.state.active == Some(id) {
         s.state.active = s.state.tabs.get(at).or_else(|| at.checked_sub(1).and_then(|i| s.state.tabs.get(i))).map(Tab::id);
     }
-    Ok(Outcome::Done(json!({ "closed": id, "active": s.state.active })))
+    json!({ "closed": id, "active": s.state.active })
 }
 
 /// `1 staged change`, `3 staged changes`.

@@ -12,8 +12,8 @@
 //! drag on a grid cell takes the keyboard from a text field ([`crate::grid`]), so the grid gets
 //! those keys from then on.
 //!
-//! An open cell editor ([`crate::editors`]) of text counts as a focused text field; the boolean
-//! choice has no text, so the text keys run there (after committing it). Its Enter keys
+//! An open cell editor ([`crate::editors`]) holds text, so it counts as a focused text field. Its
+//! Enter keys
 //! ([`EDITOR_KEYS`]) are the editor's own: it takes Ctrl+Enter as commit before this step, and
 //! Ctrl+Shift+Enter does nothing there. Any shortcut that runs commits the editor first, so
 //! Ctrl+S writes the value being typed.
@@ -22,13 +22,20 @@
 //! editor has the keyboard: with text selected in it, the copy is its own (Ctrl+C copies that
 //! text and `clipboard.copy` does not run), and while it has the keyboard Ctrl+A selects its
 //! text, not the grid's cells.
+//!
+//! While the active table tab shows STRUCTURE, the grid's keys ([`GRID_KEYS`]) are taken and do
+//! nothing: they would act on a selection out of sight.
+//!
+//! The tree ([`crate::tree::take_keys`]) comes next, under the same rule: while its menu is open,
+//! Ctrl+C copies the menu's table's name, and while a table row has the keyboard, that table's;
+//! `clipboard.copy` does not run. Ctrl+Shift+C stays the grid's.
 
 use std::sync::LazyLock;
 
 use egui::{Event, Key, Modifiers};
 use serde_json::{Value as Json, json};
 
-use crate::{DbeeApp, editors, value_panel};
+use crate::{DbeeApp, editors, tree, value_panel};
 
 /// `(keys, command id, params)`.
 pub static SHORTCUTS: LazyLock<Vec<(&'static str, &'static str, Json)>> = LazyLock::new(|| {
@@ -55,15 +62,24 @@ pub const TEXT_KEYS: &[&str] = &["Ctrl+C", "Ctrl+Shift+C", "Ctrl+A", "Ctrl+Z", "
 /// The shortcuts an open cell editor keeps from running: Enter is the editor's.
 pub const EDITOR_KEYS: &[&str] = &["Ctrl+Enter", "Ctrl+Shift+Enter"];
 
+/// The shortcuts that act on a table tab's grid selection: while the tab shows STRUCTURE they do
+/// nothing (the grid is out of sight), though their commands stay callable.
+pub const GRID_KEYS: &[&str] = &["Ctrl+A", "Ctrl+C", "Ctrl+Shift+C"];
+
+/// Whether the active tab is a table tab showing STRUCTURE.
+pub(crate) fn grid_unseen(app: &DbeeApp) -> bool {
+    matches!(app.session.state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.showing == dbee_engine::Showing::Structure)
+}
+
 /// Whether the shortcut `keys` runs its command, given that a text field has keyboard focus.
 pub fn fires(keys: &str, text_focused: bool) -> bool {
     !(text_focused && TEXT_KEYS.contains(&keys))
 }
 
-/// [`fires`], with whether a cell editor is open, and whether it edits text (which counts as a
-/// focused text field).
-pub fn fires_while(keys: &str, text_focused: bool, editing: bool, editing_text: bool) -> bool {
-    fires(keys, text_focused || editing_text) && !(editing && EDITOR_KEYS.contains(&keys))
+/// [`fires`], with whether a cell editor is open (it holds text, so it counts as a focused text
+/// field).
+pub fn fires_while(keys: &str, text_focused: bool, editing: bool) -> bool {
+    fires(keys, text_focused || editing) && !(editing && EDITOR_KEYS.contains(&keys))
 }
 
 /// `Ctrl+Shift+Enter` → the modifiers and the key; `None` for text that names no key.
@@ -103,21 +119,24 @@ pub(crate) fn take(events: &mut Vec<Event>, pattern: Modifiers, key: Key, held: 
 /// Runs the commands of this frame's shortcut presses (step 4 of the frame).
 pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let text_focused = ctx.text_edit_focused();
-    let editor = editors::open_kind(app);
-    let (editing, editing_text) = (editor.is_some(), editor.is_some_and(|k| k != editors::Kind::Bool));
-    if !text_focused && !editing_text {
+    let editing = editors::open_kind(app).is_some();
+    let unseen = grid_unseen(app);
+    if !text_focused && !editing {
         value_panel::take_keys(app, ctx);
+        tree::take_keys(app, ctx);
     }
     let mut fired: Vec<(&'static str, Json)> = Vec::new();
     ctx.input_mut(|i| {
         let held = i.modifiers;
         for (keys, id, params) in SHORTCUTS.iter() {
-            if !fires_while(keys, text_focused, editing, editing_text) {
+            if !fires_while(keys, text_focused, editing) {
                 continue;
             }
             let Some((pattern, key)) = parse(keys) else { continue };
             while take(&mut i.events, pattern, key, held) {
-                fired.push((id, params.clone()));
+                if !(unseen && GRID_KEYS.contains(keys)) {
+                    fired.push((id, params.clone()));
+                }
             }
         }
     });
@@ -178,18 +197,11 @@ mod tests {
     #[test]
     fn an_open_cell_editor_keeps_enter_and_the_text_keys() {
         for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+A", "Ctrl+C"] {
-            assert!(!fires_while(keys, false, true, true), "{keys} is the text editor's");
-            assert!(fires_while(keys, false, false, false), "{keys} fires with no editor");
+            assert!(!fires_while(keys, false, true), "{keys} is the editor's");
+            assert!(fires_while(keys, false, false), "{keys} fires with no editor");
         }
         for keys in ["Ctrl+S", "Ctrl+P", "Ctrl+T", "Ctrl+W"] {
-            assert!(fires_while(keys, true, true, true), "{keys} still fires (after committing the editor)");
-        }
-        // The boolean choice has no text: the text keys run (after committing it), Enter stays.
-        for keys in ["Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+C", "Ctrl+A"] {
-            assert!(fires_while(keys, false, true, false), "{keys} runs over the boolean choice");
-        }
-        for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter"] {
-            assert!(!fires_while(keys, false, true, false), "{keys} is the choice's");
+            assert!(fires_while(keys, true, true) && fires_while(keys, false, true), "{keys} still fires (after committing the editor)");
         }
     }
 

@@ -32,7 +32,7 @@ use crate::query::{Columns, run_text};
 use crate::values;
 
 /// The one schema dbee shows: attached databases are not listed.
-const SCHEMA: &str = "main";
+pub(crate) const SCHEMA: &str = "main";
 
 /// The name dbee gives a table's primary key.
 const PRIMARY_KEY: &str = "primary key";
@@ -122,7 +122,7 @@ impl Relation {
 }
 
 /// A catalog query's rows; a result cut by the limits is an error.
-fn query(s: &mut Session, running: &Running, sql: &str) -> Result<Vec<Vec<Cell>>, DbError> {
+pub(crate) fn query(s: &mut Session, running: &Running, sql: &str) -> Result<Vec<Vec<Cell>>, DbError> {
     Ok(require_complete(run_text(s, running, sql, CATALOG_LIMITS, Columns::Unnamed)?)?.rows)
 }
 
@@ -329,7 +329,7 @@ fn estimates(s: &mut Session, running: &Running) -> Result<HashMap<String, u64>,
 }
 
 /// A pragma's flag: `1` or `0`.
-fn flag(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
+pub(crate) fn flag(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
     match text(row, i, what)? {
         "1" => Ok(true),
         "0" => Ok(false),
@@ -338,12 +338,12 @@ fn flag(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
 }
 
 /// Cell `i` of `row`, which may be NULL; a missing cell is [`bad`].
-fn nullable<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<Option<&'a str>, DbError> {
+pub(crate) fn nullable<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<Option<&'a str>, DbError> {
     row.get(i).map(Option::as_deref).ok_or_else(|| bad(what))
 }
 
 /// `name` as a string literal, for a pragma's argument.
-fn literal(name: &str) -> Result<String, DbError> {
+pub(crate) fn literal(name: &str) -> Result<String, DbError> {
     Dialect::Sqlite.literal(name).map_err(|e| DbError::Other(format!("a name cannot be used: {e}")))
 }
 

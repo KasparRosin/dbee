@@ -7,8 +7,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState};
+use dbee_core::{Catalog, DatabaseAfter, ForeignKey, ResultSet, TableInfo, TableRef, TableStructure};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState, TransactionState};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -88,8 +88,12 @@ pub struct Connected {
     /// after a run that names `session_track`.
     pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
-    /// a time and a cancel request hits whatever runs on it.
+    /// a time and a cancel request hits whatever runs on it. A `query.commit` or `query.rollback`
+    /// counts as one.
     pub(crate) query_run: Option<QueryRun>,
+    /// The query session's transaction, as the driver reported it after the last run, commit or
+    /// rollback on the query connection; read it through [`Connected::transaction`].
+    pub(crate) transaction: Option<Transaction>,
     /// The SSH tunnel both connections run through, when the config has one.
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
@@ -119,6 +123,7 @@ impl std::fmt::Debug for Connected {
             .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
             .field("query_database", &self.query_database)
             .field("query_run", &self.query_run)
+            .field("transaction", &self.transaction)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
             .field("apply_gate", &self.apply_gate.as_ref().map(|(job, _, _)| job))
@@ -164,11 +169,12 @@ impl CurrentDatabase {
 
     /// Where a statement that failed with `error` leaves it, on a dialect where a statement can
     /// move it (`moves`): where it was, after an error the server answered with; not known any
-    /// more after any other end, a cancel among them (its kill can land just after the statement
-    /// took effect, and the server's error then hides the change).
+    /// more after any other end, an interrupt among them, dbee's or not (its kill can land just
+    /// after the statement took effect, and the server's error then hides the change).
     pub(crate) fn after_failure(self, error: &DbError, moves: bool) -> CurrentDatabase {
         match error {
             _ if !moves => self,
+            e if e.is_interrupted() => CurrentDatabase { known: false, ..self },
             DbError::Server(_) | DbError::ReadOnly { .. } => self,
             _ => CurrentDatabase { known: false, ..self },
         }
@@ -180,7 +186,61 @@ impl CurrentDatabase {
     }
 }
 
+/// The query session's open transaction: its state and the tab whose run opened it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    /// `Open`, `Failed` or `Unknown`; never `Idle`, which is no transaction.
+    pub state: TransactionState,
+    /// The query tab whose run found the session idle and left it in a transaction; `None` once
+    /// that tab has closed, or when the state is unknown.
+    pub tab: Option<TabId>,
+}
+
+impl Transaction {
+    /// The transaction after a run of `tab` (`None` once it has closed), or a commit or rollback
+    /// (`None`), left the session in `state`, where it was `before`: none when idle; else the
+    /// owner it had, or the run's tab when it found the session idle.
+    pub(crate) fn after(before: Option<Transaction>, state: TransactionState, tab: Option<TabId>) -> Option<Transaction> {
+        match (state, before) {
+            (TransactionState::Idle, _) => None,
+            (TransactionState::Unknown, _) => Some(Transaction { state, tab: None }),
+            (_, Some(before)) => Some(Transaction { state, tab: before.tab }),
+            (_, None) => Some(Transaction { state, tab }),
+        }
+    }
+
+    /// `{state, tab}`: `state` is `open`, `failed` or `unknown` ([`transaction_state`]).
+    pub fn summary(&self) -> Json {
+        json!({ "state": transaction_state(self.state), "tab": self.tab })
+    }
+}
+
+/// A transaction's state as the engine names it: `open`, `failed` or `unknown` (`Idle` is no
+/// transaction, so it never names one).
+pub fn transaction_state(state: TransactionState) -> &'static str {
+    match state {
+        TransactionState::Open => "open",
+        TransactionState::Failed => "failed",
+        TransactionState::Idle | TransactionState::Unknown => "unknown",
+    }
+}
+
 impl Connected {
+    /// The query session's transaction; none while the query connection is not open, or has
+    /// closed, which ends its session.
+    pub fn transaction(&self) -> Option<Transaction> {
+        self.query.as_ref().filter(|q| !q.is_closed()).and(self.transaction)
+    }
+
+    /// Query tab `tab` has closed: a transaction it opened has no tab any more.
+    pub(crate) fn tab_closed(&mut self, tab: TabId) {
+        if let Some(t) = &mut self.transaction
+            && t.tab == Some(tab)
+        {
+            t.tab = None;
+        }
+    }
+
     /// The database a run of `q` starts in: the tab's own, which the run makes current first;
     /// else the query connection's while it is open, or the settings' before it opens.
     pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
@@ -192,11 +252,12 @@ impl Connected {
     }
 
     /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, tls,
-    /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
+    /// lost, saved, transaction}`, as `inspect()` and `connection.open` show it: `connection` is its
     /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
     /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
     /// `unchecked`, `certificateChecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
-    /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
+    /// (`ConnectionStore::is_saved`, which the caller asks), `transaction` the query session's
+    /// ([`Transaction::summary`], or null). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
@@ -215,6 +276,7 @@ impl Connected {
             "tls": self.info.tls.map(TlsState::id),
             "lost": self.lost,
             "saved": saved,
+            "transaction": self.transaction().map(|t| t.summary()),
         })
     }
 }
@@ -255,6 +317,31 @@ impl std::fmt::Debug for Credentials {
 pub struct Selection {
     pub anchor: (usize, usize),
     pub focus: (usize, usize),
+    /// Whole rows, selected by their numbers (`selection.rows`, issue #17): the rectangle spans
+    /// every column the grid has, also when those change.
+    #[serde(default)]
+    pub whole: bool,
+}
+
+impl Selection {
+    /// The selection on a grid of `rows` × `columns` that replaces the one it was made on (a
+    /// refresh, another page or result): kept while its cells are there; whole rows while their
+    /// rows are, across the new grid's columns.
+    pub fn kept(self, rows: usize, columns: usize) -> Option<Selection> {
+        if self.whole {
+            let last = columns.checked_sub(1)?;
+            let (a, f) = (self.anchor.0, self.focus.0);
+            return (a < rows && f < rows).then_some(Selection { anchor: (a, 0), focus: (f, last), whole: true });
+        }
+        let fits = |(row, column): (usize, usize)| row < rows && column < columns;
+        (fits(self.anchor) && fits(self.focus)).then_some(self)
+    }
+
+    /// `{anchor: [row, column], focus: [row, column], whole}`, as the selection commands and
+    /// `inspect()` give it.
+    pub fn to_json(self) -> Json {
+        json!({ "anchor": [self.anchor.0, self.anchor.1], "focus": [self.focus.0, self.focus.1], "whole": self.whole })
+    }
 }
 
 /// A query editor tab.
@@ -306,6 +393,8 @@ pub struct StatementOutcome {
     pub range: Range<usize>,
     /// Behind `Arc`: up to 10,000 rows or 256 MiB of text, and the state is cloned per command.
     pub result: Arc<ResultSet>,
+    /// How long the statement took, in milliseconds from sending it to its result.
+    pub ms: u64,
 }
 
 /// Why a query run stopped before its last statement.
@@ -321,7 +410,8 @@ pub struct QueryError {
     /// `1054`).
     pub server_code: Option<String>,
     /// What the server error means, when the driver knows: `transactionAborted` (a statement
-    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).
+    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK) or
+    /// `interrupted` (the server stopped the statement, and dbee had sent no cancel for it).
     #[serde(serialize_with = "meaning_id")]
     pub meaning: Option<Meaning>,
     pub detail: Option<String>,
@@ -330,12 +420,17 @@ pub struct QueryError {
     pub position: Option<usize>,
     /// The 0-based index of the statement that failed, among those the run ran.
     pub statement: usize,
+    /// How long the failing or stopped statement ran, in milliseconds from sending it until it
+    /// failed; `None` when the run stopped before it was sent (connecting, the tab's `USE`, a NUL
+    /// in the text, a stop between statements).
+    pub ms: Option<u64>,
 }
 
 fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S::Error> {
     match meaning {
         None => s.serialize_none(),
         Some(Meaning::TransactionAborted) => s.serialize_str("transactionAborted"),
+        Some(Meaning::Interrupted) => s.serialize_str("interrupted"),
     }
 }
 
@@ -377,6 +472,50 @@ pub struct PageView {
     pub page: u64,
 }
 
+/// What a table tab shows: its rows (DATA) or its structure (STRUCTURE). A tab opens in DATA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Showing {
+    #[default]
+    Data,
+    Structure,
+}
+
+/// A table's structure as a tab read it: the catalog's table (columns and keys) as it was when
+/// the read started, the foreign keys of every table that reference it, and what the read
+/// brought (indexes, triggers, defaults, the foreign keys' actions).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructureRead {
+    pub info: TableInfo,
+    /// Each with the table it belongs to.
+    pub referenced_by: Vec<(TableRef, ForeignKey)>,
+    pub structure: TableStructure,
+}
+
+/// A table tab's STRUCTURE view: the read running (`loading`), the last one that landed
+/// (`shown`), and why the last read failed (`error`; `shown` stays). Only the read `loading`
+/// names lands: a newer read, a cancel or a reconnect leaves an older one ignored.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabStructure {
+    pub loading: Option<JobId>,
+    pub shown: Option<Arc<StructureRead>>,
+    pub error: Option<String>,
+    /// The server's DETAIL and HINT of the read that failed, when it gave them (`error` ends with
+    /// them too, as the server error's text does).
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl TabStructure {
+    /// The last read failed with `error`, and the server's `detail` and `hint`; or, with `None`,
+    /// nothing failed.
+    pub(crate) fn failed(&mut self, error: Option<String>, detail: Option<String>, hint: Option<String>) {
+        self.error = error;
+        self.detail = detail;
+        self.hint = hint;
+    }
+}
+
 /// A table data tab.
 ///
 /// `applied`, `sort` and `page` are what the tab asks for: what the rows were loaded with, or are
@@ -393,6 +532,11 @@ pub struct PageView {
 /// `edits` holds the staged edits, on the rows of `data`: while any are staged, the tab loads no
 /// other page ([`TableTab::has_staged_edits`]), and they are not changed while a page loads or
 /// an Apply runs. A new page starts a new undo history.
+///
+/// `saved` lists the cells of `data` the last successful Apply wrote, found on the page it loaded
+/// by their rows' keys (`Edits::written`). Only that page sets it. An Apply starting, any other
+/// page load, a reconnect, and a reset, undo or redo empty it; staging an edit on a cell takes
+/// that cell out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
@@ -438,6 +582,12 @@ pub struct TableTab {
     pub edits: Arc<Edits>,
     /// The job writing the edits (`edit.apply`).
     pub applying: Option<JobId>,
+    /// The cells the last successful Apply wrote, `(row, column)` of `data`, in order (see above).
+    pub saved: Vec<(usize, usize)>,
+    /// What the tab shows (`table.view`); DATA's state above is kept while STRUCTURE shows.
+    pub showing: Showing,
+    /// The STRUCTURE view's read.
+    pub structure: TabStructure,
 }
 
 impl TableTab {
@@ -466,6 +616,9 @@ impl TableTab {
             shown: view,
             edits: Arc::default(),
             applying: None,
+            saved: Vec::new(),
+            showing: Showing::Data,
+            structure: TabStructure::default(),
         }
     }
 
@@ -477,8 +630,11 @@ impl TableTab {
     /// The connection the tab's jobs ran on was replaced (a reconnect): they are dead, and their
     /// results will be ignored. A load in flight counts as failed without a message (the view
     /// goes back to `shown`), a count in flight leaves the estimate it showed, and an Apply in
-    /// flight ends with an unknown outcome (the edits stay, `failed` says so).
+    /// flight ends with an unknown outcome (the edits stay, `failed` says so). The saved cells
+    /// lose their mark, and a structure read in flight is forgotten (STRUCTURE keeps what it showed).
     pub(crate) fn drop_dead_jobs(&mut self) {
+        self.saved.clear();
+        self.structure.loading = None;
         if self.loading.take().is_some() {
             self.back_to_shown();
         }
@@ -493,6 +649,9 @@ impl TableTab {
     /// that still names it is cleared as [`TableTab::drop_dead_jobs`] would clear it, so no
     /// marker outlives its job.
     pub(crate) fn job_ended(&mut self, job: JobId) {
+        if self.structure.loading == Some(job) {
+            self.structure.loading = None;
+        }
         if self.loading == Some(job) {
             self.loading = None;
             self.back_to_shown();
@@ -736,9 +895,13 @@ mod tests {
         // The server answered with an error: the statement did nothing.
         assert_eq!(shop().after_failure(&refused, true), shop());
         assert_eq!(shop().after_failure(&DbError::ReadOnly { message: "read-only".into() }, true), shop());
-        // A cancel: a kill that lands as a `USE` finishes is answered with an error after the
-        // change. A lost connection, or an answer that broke: the outcome is unknown too.
-        for error in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+        // A cancel, dbee's or the server's interrupt whoever asked for it: a kill that lands as a
+        // `USE` finishes is answered with an error after the change. A lost connection, or an
+        // answer that broke: the outcome is unknown too.
+        let DbError::Server(s) = &refused else { panic!("a server error") };
+        let interrupted =
+            DbError::Server(Box::new(dbee_driver::ServerError { code: "1317".into(), meaning: Some(Meaning::Interrupted), ..(**s).clone() }));
+        for error in [DbError::Cancelled, interrupted, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
             assert_eq!(shop().after_failure(&error, true), unknown, "{error:?}");
             assert_eq!(shop().after_failure(&error, false), shop(), "{error:?}: where no statement can move it");
         }

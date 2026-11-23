@@ -66,7 +66,7 @@ pub async fn apply(conn: &PgConnection, statements: &[String]) -> Result<u64, Ap
 
 /// [`apply`] that `gate` can cancel until it decides to commit ([`ApplyGate`]). A cancelled apply
 /// rolls back and fails with [`DbError::Cancelled`] at the statement it stopped at (the last one
-/// when every statement had run).
+/// when every statement had run), also when the cancel request interrupted that statement.
 pub async fn apply_gated(conn: &PgConnection, statements: &[String], gate: &ApplyGate) -> Result<u64, ApplyError> {
     dbee_driver::apply::apply(Dialect::Postgres, statements, gate, locked(conn)).await
 }

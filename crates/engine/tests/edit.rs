@@ -183,6 +183,44 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
     });
 }
 
+/// Text that reads as a boolean (`true`, `no`, `1`… any case, spaces around it ignored) in a Bool
+/// column is staged in the engine's own spelling; other text as typed, for the database to judge.
+#[test]
+fn text_that_reads_as_a_boolean_takes_the_databases_spelling() {
+    let _db = require_testdb!();
+    on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
+        let (yes, no) = s.state().dialect(Which::Active).bool_literals();
+        // Rows 0, 1 and 2 hold true, false and NULL.
+        set_cell(s, 1, "flag", "TRUE");
+        set_cell(s, 0, "flag", " no ");
+        set_cell(s, 2, "flag", "1");
+        assert_eq!((staged(s, 1, 4), staged(s, 0, 4), staged(s, 2, 4)), (Some(json!(yes)), Some(json!(no)), Some(json!(yes))), "{}", t.name());
+        set_cell(s, 2, "flag", "maybe");
+        assert_eq!(staged(s, 2, 4), Some(json!("maybe")), "{}: other text as typed", t.name());
+        for (word, want) in [("Off", no), ("t", yes), ("F", no), ("yes", yes), ("ON", yes), ("0", no), ("false", no)] {
+            set_cell(s, 2, "flag", word);
+            assert_eq!(staged(s, 2, 4), Some(json!(want)), "{}: {word}", t.name());
+        }
+        // The loaded value again in another spelling unstages it.
+        set_cell(s, 0, "flag", "true");
+        assert_eq!(staged(s, 0, 4), None, "{}", t.name());
+        set_cell(s, 0, "flag", "no");
+        set_cell(s, 2, "flag", "true");
+        // A text column keeps the word as typed.
+        set_cell(s, 0, "name", "true");
+        assert_eq!(staged(s, 0, 1), Some(json!("true")));
+        apply(s);
+        let flag = "CASE WHEN flag IS NULL THEN 'null' WHEN flag THEN 'true' ELSE 'false' END";
+        assert_eq!(
+            rows_of(t, &format!("SELECT CONCAT({flag}, ':', name) FROM {sc}.{name} ORDER BY id")),
+            "false:true,true:Bob,true:Cy",
+            "{}",
+            t.name()
+        );
+    });
+}
+
 #[test]
 fn a_json_boolean_keeps_its_text_outside_bool_columns() {
     let _db = require_testdb!();
@@ -228,6 +266,29 @@ fn failed_apply_writes_nothing_and_marks_the_row() {
         assert_eq!(summary(s)["failed"], Json::Null);
         assert_eq!(q(t, &both), "ok|2025-01-02\nBob|2026-10-20");
     });
+}
+
+/// The Apply's failure keeps the server's detail and hint, as a query's error does: Postgres
+/// gives a detail for a NOT NULL violation, MySQL only the message.
+#[test]
+fn an_apply_failure_keeps_detail_and_hint() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_not_null");
+        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int PRIMARY KEY, name varchar(40) NOT NULL); INSERT INTO {t} VALUES (1, 'Alice')");
+        let mut s = opened_rows(&t, &name, 1);
+        set_cell(&mut s, 0, "name", Json::Null);
+        let e = run_err(&mut s, "edit.apply", json!({}));
+        assert_eq!(e.code(), "server", "{}: {e}", t.name());
+        let failed = summary(&s)["failed"].clone();
+        assert_eq!((failed["row"].as_u64(), failed["code"].as_str()), (Some(0), Some("server")), "{}: {failed}", t.name());
+        assert_eq!(failed["hint"], Json::Null, "{}: {failed}", t.name());
+        if t.name().starts_with("pg") {
+            assert!(failed["detail"].as_str().is_some_and(|d| d.starts_with("Failing row contains")), "{}: {failed}", t.name());
+        } else {
+            assert_eq!(failed["detail"], Json::Null, "{}: {failed}", t.name());
+        }
+    }
 }
 
 #[test]
@@ -777,11 +838,12 @@ fn an_apply_cancelled_in_the_queue_stops_no_other_tab() {
         let mut s = opened(&t, &name);
         let first = s.inspect()["active"].clone();
         set_cell(&mut s, 0, "name", "queued");
-        // Another tab's load holds the connection: it waits for the lock, or on a file counts.
+        // Another tab's load holds the connection: it waits for the lock, or on a file counts for
+        // about 1 s.
         open_table(&mut s, t.schema("shop"), "orders");
         let key = unique("dbee_gate");
         let gate = t.server().map(|_| t.hold_lock(&key).unwrap());
-        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        let slow = if t.is_file() { t.slow_condition_sql(1) } else { t.waits_for_lock_sql(&key) };
         let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
         until_running(&t, &key);
         run(&mut s, "tab.activate", json!({ "tab": first }));
@@ -790,7 +852,8 @@ fn an_apply_cancelled_in_the_queue_stops_no_other_tab() {
         assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true, "apply": true }));
         let applied = s.wait(job, T);
         drop(gate);
-        let loaded = s.wait(load, T).unwrap_or_else(|e| panic!("{}: the other tab's load: {e}", t.name()));
+        // The load's own time is not what this tests: a count can take long on a loaded machine.
+        let loaded = s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the other tab's load: {e}", t.name()));
         assert_eq!(loaded["rows"], 100, "{}: {loaded}", t.name());
         assert_eq!(applied.map_err(|e| e.code()), Err("cancelled"), "{}: the Apply", t.name());
         assert_eq!(rows_of(&t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "Alice,Bob,Cy", "{}: nothing was written", t.name());
@@ -910,6 +973,151 @@ fn a_page_that_does_not_load_after_the_write_says_the_changes_were_written() {
         assert!(error.starts_with("The changes were written (1 row), but the page did not load again: "), "{table}");
         assert!(error.ends_with(r["reloadError"].as_str().unwrap_or_default()), "{table}");
         assert_eq!((count(s), &table["failed"]), (0, &Json::Null), "the edits went with the write: {table}");
+        assert_eq!(table["saved"], json!([]), "the rows shown are from before the write: {table}");
+    });
+}
+
+/// `scratch.<u> (id int PK DEFAULT 99, name text, total numeric(12,2))` with 6 rows: ids 1 to 6,
+/// named Ann, Bob, Cy, Dee, Eve and Fay. Made before the session connects, so the catalog has it.
+fn make_six(t: &TestTarget) -> (String, Scratch<'_>) {
+    let name = unique("t_saved");
+    let guard = scratch_table(
+        t,
+        &name,
+        "CREATE TABLE {t} (id int PRIMARY KEY DEFAULT 99, name text, total numeric(12,2));
+         INSERT INTO {t} VALUES (1, 'Ann', 1.00), (2, 'Bob', 2.00), (3, 'Cy', 3.00), (4, 'Dee', 4.00), (5, 'Eve', 5.00), (6, 'Fay', 6.00);",
+    );
+    (name, guard)
+}
+
+/// Runs `test` on every engine with the six-row table made and open.
+fn on_each_six(mut test: impl FnMut(&TestTarget, &mut TestSession)) {
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let (name, _drop) = make_six(&t);
+        let mut s = opened_rows(&t, &name, 6);
+        test(&t, &mut s);
+    }
+}
+
+/// The cells the last Apply wrote, as `inspect()` lists them: `[[row, column], ..]`.
+fn saved(s: &Session) -> Json {
+    s.inspect()["table"]["saved"].clone()
+}
+
+/// Stages `value` in `column` of loaded row `row`, applies it, and checks the cell is marked saved.
+fn apply_one(s: &mut Session, row: usize, column: &str, value: &str) {
+    set_cell(s, row, column, value);
+    apply(s);
+    let col = col(&read(s), column);
+    assert_eq!(saved(s), json!([[row, col]]), "{column} {value}");
+}
+
+#[test]
+fn a_successful_apply_marks_the_written_cells() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        assert_eq!(saved(s), json!([]), "{}: nothing before an Apply", t.name());
+        set_cell(s, 1, "name", "Bobby");
+        set_cell(s, 1, "total", "2.50");
+        set_cell(s, 4, "name", "Eva");
+        apply(s);
+        assert_eq!(saved(s), json!([[1, 1], [1, 2], [4, 1]]), "{}", t.name());
+        // A new row whose key was given is marked where it lands, in the columns given; one whose
+        // key the database chose is not, and a deleted row has none.
+        run(s, "row.delete", json!({ "rows": [0] }));
+        let ten = run(s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
+        set_cell(s, ten, "id", "10");
+        set_cell(s, ten, "name", "Ten");
+        let keyless = run(s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
+        set_cell(s, keyless, "name", "Keyless");
+        apply(s);
+        let d = read(s);
+        let ids: Vec<Option<&str>> = (0..rows(&d)).map(|r| cell(&d, r, "id")).collect();
+        assert_eq!(ids, ["2", "3", "4", "5", "6", "10", "99"].map(Some), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 0], [5, 1]]), "{}: only the new row with its key", t.name());
+    });
+}
+
+#[test]
+fn a_saved_mark_follows_the_row_key_not_its_position() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        // Sorted by name, Ann is row 0; renamed Zed, she sorts last.
+        run(s, "table.sort", json!({ "column": "name", "dir": "asc" }));
+        set_cell(s, 0, "name", "Zed");
+        apply(s);
+        let d = read(s);
+        assert_eq!((cell(&d, 0, "name"), cell(&d, 5, "name")), (Some("Bob"), Some("Zed")), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 1]]), "{}: where the row went, not row 0", t.name());
+        // A key that was edited is the row's key after the write.
+        run(s, "table.sort", json!({ "column": "name", "dir": "none" }));
+        assert_eq!(cell(&read(s), 0, "id"), Some("1"));
+        set_cell(s, 0, "id", "50");
+        apply(s);
+        assert_eq!(cell(&read(s), 5, "id"), Some("50"), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 0]]), "{}", t.name());
+        // A row the write moved off the page has no mark, and the row now in its place takes none.
+        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "lt", "value": "4" }] }));
+        assert_eq!(cell(&read(s), 0, "id"), Some("2"));
+        set_cell(s, 0, "id", "40");
+        apply(s);
+        let d = read(s);
+        assert_eq!((rows(&d), cell(&d, 0, "id")), (1, Some("3")), "{}", t.name());
+        assert_eq!(saved(s), json!([]), "{}", t.name());
+    });
+}
+
+#[test]
+fn a_failed_apply_marks_nothing_saved() {
+    let _db = require_testdb!();
+    on_each_table(|t, _, s| {
+        apply_one(s, 0, "name", "Ann");
+        set_cell(s, 2, "name", "Cyd");
+        set_cell(s, 1, "shipped_at", "not a date");
+        let e = run_err(s, "edit.apply", json!({}));
+        assert_eq!(e.code(), "server", "{}: {e}", t.name());
+        let table = summary(s);
+        assert_eq!(table["saved"], json!([]), "{}: not this Apply's cells, nor the last one's: {table}", t.name());
+        assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["column"].as_u64()), (Some(1), Some(3)), "the failed cell keeps its mark");
+        assert_eq!(count(s), 2, "every edit stays");
+    });
+}
+
+#[test]
+fn any_reload_clears_saved() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        // An edit on a saved cell clears that cell only.
+        set_cell(s, 0, "name", "Ann 2");
+        set_cell(s, 0, "total", "1.50");
+        set_cell(s, 1, "name", "Bob 2");
+        apply(s);
+        assert_eq!(saved(s), json!([[0, 1], [0, 2], [1, 1]]), "{}", t.name());
+        set_cell(s, 0, "name", "Ann 3");
+        assert_eq!(saved(s), json!([[0, 2], [1, 1]]), "{}", t.name());
+        run(s, "cell.setNull", json!({ "row": 1, "column": "name" }));
+        assert_eq!(saved(s), json!([[0, 2]]), "{}", t.name());
+        // Undo and reset clear it all.
+        run(s, "edit.undo", json!({}));
+        assert_eq!((saved(s), count(s)), (json!([]), 1), "{}: undo", t.name());
+        apply_one(s, 0, "name", "Ann 4");
+        set_cell(s, 2, "name", "Cy 2");
+        run(s, "edit.reset", json!({}));
+        assert_eq!((saved(s), count(s)), (json!([]), 0), "{}: reset", t.name());
+        // So does every page load, and a reconnect.
+        let loads = [
+            ("table.refresh", json!({})),
+            ("table.page", json!({ "to": "next" })),
+            ("table.setFilters", json!({ "filters": [{ "column": "id", "op": "gt", "value": "0" }] })),
+            ("table.sort", json!({ "column": "name", "dir": "desc" })),
+            ("connection.reconnect", json!({})),
+        ];
+        for (i, (id, params)) in loads.into_iter().enumerate() {
+            apply_one(s, 0, "total", &format!("{}.25", 10 + i));
+            run(s, id, params);
+            assert_eq!(saved(s), json!([]), "{}: {id}", t.name());
+        }
     });
 }
 

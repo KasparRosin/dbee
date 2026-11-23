@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use dbee_config::DbKind;
-use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target};
+use dbee_core::{Catalog, ResultSet, TableRef, TableStructure};
+use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target, TransactionState};
 use dbee_sql::Dialect;
 
 use crate::catalog;
@@ -68,11 +68,19 @@ impl Connection for MySqlConnection {
         Box::pin(MySqlConnection::load_catalog(self))
     }
 
+    fn table_structure<'a>(&'a self, table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(MySqlConnection::table_structure(self, table))
+    }
+
     fn list_databases(&self) -> DbFuture<'_, Vec<String>> {
         Box::pin(MySqlConnection::list_databases(self))
     }
 
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
         Box::pin(MySqlConnection::apply(self, statements, gate))
+    }
+
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(MySqlConnection::transaction(self))
     }
 }

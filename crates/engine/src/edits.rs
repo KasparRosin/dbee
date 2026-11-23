@@ -17,7 +17,7 @@
 //!
 //! **`failed`** is how the last Apply failed ([`Failed`]): the grid row of the change that failed,
 //! its column when that change wrote one column, the message and the error's code (`cancelled`
-//! for an Apply cancelled before its commit). It stays while the user fixes things,
+//! for an Apply cancelled before its commit), and the server's detail and hint when it gave them. It stays while the user fixes things,
 //! moves up with the rows when a new row before it is deleted, and goes with Reset, with the next
 //! Apply and when nothing is staged any more.
 //!
@@ -33,8 +33,12 @@
 //! row key with the values the row was loaded with, so editing the key works; a key column the
 //! grid does not show was loaded beside the page. Page columns are matched to the catalog by
 //! name: a catalog refreshed since the page loaded still fits, or the statements are refused.
+//!
+//! **What was written** ([`Edits::written`]) is found again on the page that loads after a
+//! successful Apply by the rows' keys, never their places: a write can move a row (a sorted
+//! column, an edited key) or take it off the page.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -68,6 +72,9 @@ pub struct Failed {
     /// The error's code: `server`, `rowNotFound`, `readOnly`, `cancelled`, `connectionLost` (the
     /// outcome is unknown), ….
     pub code: &'static str,
+    /// The server's detail and hint, when it gave them (a server error only).
+    pub detail: Option<String>,
+    pub hint: Option<String>,
 }
 
 /// The staged edits of one table tab (see the module docs). Undo and redo stacks are private.
@@ -130,6 +137,48 @@ impl Staged {
         let bytes =
             cells.values().map(value).chain(new_rows.iter().map(values)).fold(deleted.len().saturating_mul(ENTRY_BYTES), usize::saturating_add);
         Staged { cells, new_rows, deleted, bytes }
+    }
+}
+
+/// What a successful Apply wrote ([`Edits::written`]): the table's row key, and each row written
+/// by its key values after the writes, with the columns written, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Written {
+    key: Vec<String>,
+    rows: Vec<(Vec<String>, Vec<String>)>,
+}
+
+impl Written {
+    /// Its cells on page `data` (with `hidden`, its key columns not shown, beside it), as
+    /// `(row, column)` in order: each row written whose key is on the page, in the columns written
+    /// that the page shows.
+    pub(crate) fn cells(&self, data: &ResultSet, hidden: &ResultSet) -> Vec<(usize, usize)> {
+        if self.rows.is_empty() {
+            return Vec::new();
+        }
+        let find = |page: &ResultSet, name: &str| page.columns.iter().position(|c| c.name == name);
+        let at: Option<Vec<(&ResultSet, usize)>> =
+            self.key.iter().map(|k| find(data, k).map(|i| (data, i)).or_else(|| find(hidden, k).map(|i| (hidden, i)))).collect();
+        let Some(at) = at else { return Vec::new() };
+        let mut rows: HashMap<Vec<&str>, usize> = HashMap::with_capacity(data.rows.len());
+        for row in 0..data.rows.len() {
+            let key: Option<Vec<&str>> = at.iter().map(|&(page, i)| page.rows.get(row)?.get(i)?.as_deref()).collect();
+            if let Some(key) = key {
+                rows.entry(key).or_insert(row);
+            }
+        }
+        let mut cells: Vec<(usize, usize)> = self
+            .rows
+            .iter()
+            .filter_map(|(key, columns)| {
+                let row = *rows.get(&key.iter().map(String::as_str).collect::<Vec<_>>())?;
+                Some(columns.iter().filter_map(move |name| Some((row, find(data, name)?))))
+            })
+            .flatten()
+            .collect();
+        cells.sort_unstable();
+        cells.dedup();
+        cells
     }
 }
 
@@ -237,6 +286,45 @@ impl Edits {
         Ok(out)
     }
 
+    /// What these edits write, to find on the page that loads after them ([`Written::cells`]):
+    /// each changed loaded row by its key after the writes (a staged key value in place of the
+    /// loaded one), and each new row whose every key column was given a value. Rows to delete,
+    /// and rows whose key is NULL or not on the page, are left out. `hidden` as in
+    /// [`Edits::statements`].
+    pub(crate) fn written(&self, info: &TableInfo, data: &ResultSet, hidden: &ResultSet) -> Written {
+        let Some(key) = info.row_key() else { return Written::default() };
+        let shown = |name: &str| data.columns.iter().position(|c| c.name == name);
+        let names = |values: &BTreeMap<usize, &NewValue>| -> Vec<String> {
+            values.keys().filter_map(|&col| data.columns.get(col)).map(|c| c.name.clone()).collect()
+        };
+        // A key column's value: the one staged for it, else the row's loaded one.
+        let value = |staged: &BTreeMap<usize, &NewValue>, row: Option<usize>, name: &str| -> Option<String> {
+            if let Some(v) = shown(name).and_then(|col| staged.get(&col)) {
+                return text(v).map(str::to_owned);
+            }
+            let page = if info.visible_column(name).is_some() { data } else { hidden };
+            let at = page.columns.iter().position(|c| c.name == name)?;
+            page.rows.get(row?)?.get(at)?.clone()
+        };
+        let mut changed: BTreeMap<usize, BTreeMap<usize, &NewValue>> = BTreeMap::new();
+        for (&(row, col), v) in &self.cells {
+            if !self.deleted.contains(&row) {
+                changed.entry(row).or_default().insert(col, v);
+            }
+        }
+        let new_rows = self.new_rows.iter().map(|values| (None, values.iter().map(|(&col, v)| (col, v)).collect()));
+        let rows = changed
+            .into_iter()
+            .map(|(row, values)| (Some(row), values))
+            .chain(new_rows)
+            .filter_map(|(row, values)| {
+                let values_of_key: Option<Vec<String>> = key.iter().map(|k| value(&values, row, &k.name)).collect();
+                Some((values_of_key?, names(&values)))
+            })
+            .collect();
+        Written { key: key.iter().map(|k| k.name.clone()).collect(), rows }
+    }
+
     /// The one column the change on grid `row` writes, when it writes exactly one (`loaded` is
     /// the page's row count).
     pub(crate) fn only_column(&self, loaded: usize, row: usize) -> Option<usize> {
@@ -266,7 +354,7 @@ impl Edits {
 
     /// [`Edits::mark_unknown`] at grid row `row`.
     pub(crate) fn unknown_at(&mut self, row: usize) {
-        self.failed = Some(Failed { row, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" });
+        self.failed = Some(Failed { row, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost", detail: None, hint: None });
         self.unknown = true;
     }
 
@@ -628,6 +716,57 @@ mod tests {
     }
 
     #[test]
+    fn what_was_written_is_found_again_by_its_key() {
+        let (i, d) = (info(), data());
+        let page = |rows: &[(&str, &str)]| ResultSet {
+            rows: rows.iter().map(|(id, name)| vec![Some((*id).to_owned()), Some((*name).to_owned()), Some("1.00".to_owned())]).collect(),
+            ..data()
+        };
+        let mut e = Edits::default();
+        // Row 0's key and name changed; row 1 deleted, its staged cell with it; a new row with its
+        // key given, and one without.
+        e.stage(&d, 0, 0, text("10"), None).unwrap();
+        e.stage(&d, 0, 1, text("b"), None).unwrap();
+        e.stage(&d, 1, 2, text("3"), None).unwrap();
+        e.delete_rows(&d, &[1]).unwrap();
+        let new = e.add_row(&d);
+        e.stage(&d, new, 0, text("5"), None).unwrap();
+        e.stage(&d, new, 2, NewValue::Null, None).unwrap();
+        let keyless = e.add_row(&d);
+        e.stage(&d, keyless, 1, text("x"), None).unwrap();
+        let w = e.written(&i, &d, &shown_all());
+        // Found where they are now, whatever row sits where they were.
+        let after = page(&[("7", "a"), ("10", "b"), ("5", "")]);
+        assert_eq!(w.cells(&after, &shown_all()), [(1, 0), (1, 1), (2, 0), (2, 2)]);
+        assert!(w.cells(&page(&[("1", "a"), ("2", "x")]), &shown_all()).is_empty(), "off the page: no mark, on no other row");
+        // A NULL given for the key is no key; a table without one marks nothing.
+        let mut null_key = Edits::default();
+        let row = null_key.add_row(&d);
+        null_key.stage(&d, row, 0, NewValue::Null, None).unwrap();
+        null_key.stage(&d, row, 1, text("a"), None).unwrap();
+        assert!(null_key.written(&i, &d, &shown_all()).cells(&page(&[("1", "a")]), &shown_all()).is_empty());
+        let mut keyless_table = info();
+        keyless_table.primary_key.clear();
+        assert_eq!(e.written(&keyless_table, &d, &shown_all()), Written::default());
+
+        // A key the grid does not show is read beside the page, before and after.
+        let mut hidden_key = info();
+        hidden_key.columns.insert(0, ColumnInfo { hidden: true, ..col("rowid", "INTEGER", "INTEGER", 'N') });
+        hidden_key.primary_key = vec!["rowid".into()];
+        let rowids = |ids: &[&str]| ResultSet {
+            columns: vec![hidden_key.columns[0].column()],
+            rows: ids.iter().map(|id| vec![Some((*id).to_owned())]).collect(),
+            ..ResultSet::default()
+        };
+        let mut e = Edits::default();
+        e.stage(&d, 1, 2, text("4"), None).unwrap();
+        let new = e.add_row(&d);
+        e.stage(&d, new, 1, text("new"), None).unwrap();
+        let w = e.written(&hidden_key, &d, &rowids(&["7", "8"]));
+        assert_eq!(w.cells(&page(&[("2", ""), ("1", "a"), ("3", "new")]), &rowids(&["8", "7", "9"])), [(0, 2)], "the new row's rowid was not given");
+    }
+
+    #[test]
     fn a_key_that_went_out_of_sight_is_refused() {
         let cell = |v: &str| Some(v.to_owned());
         let hide = |c: ColumnInfo| ColumnInfo { hidden: true, ..c };
@@ -714,7 +853,7 @@ mod tests {
         let mut e = Edits::default();
         e.stage(&d, 0, 1, text("1"), None).unwrap();
         e.stage(&d, 1, 1, text("2"), None).unwrap();
-        e.failed = Some(Failed { row: 1, column: Some(1), message: "bad".into(), code: "server" });
+        e.failed = Some(Failed { row: 1, column: Some(1), message: "bad".into(), code: "server", detail: None, hint: None });
         e.stage(&d, 0, 2, text("3"), None).unwrap();
         assert!(e.failed.is_some(), "fixing another cell keeps the mark");
         e.reset();
@@ -722,7 +861,10 @@ mod tests {
         // The unknown outcome marks the first change.
         e.undo();
         e.mark_unknown(d.rows.len());
-        assert_eq!(e.failed, Some(Failed { row: 0, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" }));
+        assert_eq!(
+            e.failed,
+            Some(Failed { row: 0, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost", detail: None, hint: None })
+        );
         while e.undo() {}
         assert_eq!(e.failed, None, "nothing staged, nothing failed");
         e.mark_unknown(d.rows.len());
@@ -730,7 +872,7 @@ mod tests {
         // A new row before the failed one moves it up when it goes.
         let mut e = Edits::default();
         let (a, b) = (e.add_row(&d), e.add_row(&d));
-        e.failed = Some(Failed { row: b, column: None, message: "bad".into(), code: "server" });
+        e.failed = Some(Failed { row: b, column: None, message: "bad".into(), code: "server", detail: None, hint: None });
         e.delete_rows(&d, &[a]).unwrap();
         assert_eq!(e.failed.as_ref().map(|f| f.row), Some(a));
         e.delete_rows(&d, &[a]).unwrap();

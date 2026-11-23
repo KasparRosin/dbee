@@ -18,8 +18,9 @@
 //!    through the question about the query text; the same steps there, the chip moving the query tab
 //!    to `many`; Ctrl+P switches back to the SQLite file.
 //!
-//! It opens a window on the desktop, so it runs by hand only, with the test servers up and the
-//! window shown (a hidden window runs no frames on Wayland, `docs/testing.md` §4):
+//! It opens a window on the desktop, so `cargo xtask ci` skips it: the CI workflow runs it on a
+//! virtual screen, and by hand it runs with the test servers up and the window shown (a hidden
+//! window runs no frames on Wayland, `docs/testing.md` §4):
 //!
 //! ```sh
 //! cargo xtask testdb up
@@ -88,6 +89,19 @@ impl Engine {
     fn q(&self, sql: &str) -> String {
         self.t.sql(sql).unwrap_or_else(|e| panic!("{}: {e}", self.t.name())).trim().to_string()
     }
+}
+
+/// `n` with a comma between thousands, as the app writes counts.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Removes the day's rows: the orders of the customers marked [`MARK`], then those customers.
@@ -169,15 +183,23 @@ impl Drop for DayRows<'_> {
     }
 }
 
-/// Opens the editor of cell `(row, column)`, types `text` over its value and commits it.
-fn edit_cell(app: &mut App, row: usize, column: usize, text: &str) {
+/// Opens the editor of cell `(row, column)`, in the cell, types `text` over its value and commits
+/// it: a several-line one with the value panel's SAVE when `save`, else with Ctrl+Enter.
+fn edit_cell(app: &mut App, row: usize, column: usize, text: &str, save: bool) {
     app.double_click(&format!("grid-cell-{row}-{column}"));
     let editor = app.value("cell-editor");
     app.ctrl("A");
     app.text(text);
-    // A multi-line editor takes Enter as a newline.
+    // Every editor is over its cell; the value panel shows the same draft under CANCEL and SAVE.
+    assert!(!app.inside("cell-editor", "value-panel"), "edited in the cell");
     if editor["multiline"] == true {
-        app.ctrl("Enter");
+        assert_eq!(app.value("value-editor")["text"].as_str(), Some(text), "the panel follows the typing");
+        if save {
+            app.click("value-save");
+        } else {
+            app.ctrl("Enter");
+        }
+        assert!(app.tag("cell-editor").is_none(), "the editor closed");
     } else {
         app.key("Enter");
     }
@@ -185,10 +207,10 @@ fn edit_cell(app: &mut App, row: usize, column: usize, text: &str) {
     assert_eq!(cell["text"].as_str(), Some(text), "{cell}");
 }
 
-/// Shows result `n` (1-based) with its selector button, or from the `…` list, pictured as `shot`.
+/// Shows result `n` (1-based) with its tab in the result bar, or from the ⌄ list, pictured as `shot`.
 fn show_result(app: &mut App, root: &Path, n: u64, shot: &str) {
     let button = format!("result-{n}");
-    if app.tag(&button).is_some() {
+    if app.tag(&button).is_some_and(|t| t["visible"] != false) {
         app.click(&button);
     } else {
         let item = format!("result-list-{n}");
@@ -212,8 +234,22 @@ fn query_done(app: &mut App) -> Json {
 fn switch(app: &mut App, root: &Path, shot: &str, query: &str, name: &str, label: &str, from: &str) -> Json {
     app.ctrl("P");
     app.text(query);
-    app.until("the connection's hit", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == name));
-    assert_eq!(app.value("qs-item-0-kind"), label);
+    // The connection's row, under OTHER CONNECTIONS, wherever the open connection's tables put it.
+    let row = |app: &mut App| {
+        let i = app.inspect();
+        let rows = i["automation"].as_array().unwrap().clone();
+        (0..64).find(|n| rows.iter().any(|a| a["id"] == format!("qs-item-{n}") && a["value"] == name))
+    };
+    app.until("the connection's hit", |app| row(app).is_some());
+    let n = row(app).unwrap();
+    assert_eq!(app.value(&format!("qs-item-{n}-kind")), label);
+    let at = app.rect(&format!("qs-item-{n}"));
+    let others = (0..8).map(|g| format!("qs-group-{g}")).find(|g| app.tag(g).is_some_and(|t| t["value"] == "Other connections"));
+    let others = others.unwrap_or_else(|| panic!("an OTHER CONNECTIONS heading over `{name}`"));
+    assert!(app.rect(&others)[1] < at[1], "OTHER CONNECTIONS above `{name}`");
+    for _ in 0..n {
+        app.key("ArrowDown");
+    }
     app.shot(root, shot);
     app.key("Enter");
     app.until("the question", |app| app.inspect()["dialog"] == "confirm");
@@ -252,6 +288,8 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.text("ord");
     let orders = format!("{shop}.orders");
     app.until("the quick search's hits", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == orders.as_str()));
+    let open = app.document()["connection"]["name"].clone();
+    assert_eq!(app.value("qs-group-0"), open, "{name}: the open connection's heading");
     app.shot(root, &format!("{p}-2a-quick-search"));
     app.key("Enter");
     let t = app.settled("the orders page");
@@ -260,6 +298,95 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let orders_tab = app.document()["active"].as_u64().unwrap();
     assert_eq!(app.value(&format!("tab-{orders_tab}")), "orders");
     app.shot(root, &format!("{p}-2b-orders"));
+    // The table bar's controls stand apart, inside the window.
+    app.assert_apart(&["table-view-data", "table-refresh", "row-add", "page-count", "table-import", "table-export"], &format!("{name}: 2b"));
+    // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE on, EXPORT off
+    // (when it has room), the estimate (none on SQLite: COUNT ROWS); a click counts exactly.
+    assert_eq!(app.value("table-view-data"), true, "{name}");
+    assert!(app.tag("table-view-structure").is_some_and(|e| e["enabled"] != false), "{name}: STRUCTURE on");
+    assert!(app.tag("table-export").is_none_or(|e| e["enabled"] == false), "{name}: EXPORT off");
+    let (filter, refresh, header) = (app.rect("filter-0-column"), app.rect("table-refresh"), app.rect("grid-header-0"));
+    assert!(
+        filter[1] < refresh[1] && refresh[1] < header[1],
+        "{name}: the table bar under the filters, over the rows: {filter:?} {refresh:?} {header:?}"
+    );
+    let count = app.value("page-count");
+    assert!(count == "Count rows" || count.as_str().is_some_and(|v| v.starts_with('~')), "{name}: the estimate or COUNT ROWS: {count}");
+    app.click("page-count");
+    app.until("the count", |app| app.table()["total"]["exact"].is_u64());
+    let n = app.table()["total"]["exact"].as_u64().unwrap();
+    assert_eq!(n.to_string(), e.q(&format!("SELECT COUNT(*) FROM {shop}.orders")), "{name}: the server's count");
+    assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)), "{name}");
+    app.shot(root, &format!("{p}-2c-counted"));
+    // 2d. STRUCTURE: the page reads the orders' structure (COLUMNS as the server has them, the
+    //     facts with the count from 2c), and DATA comes back with its rows and filters.
+    let switch = app.rect("table-view-data");
+    app.click("table-view-structure");
+    app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
+    assert_eq!(app.rect("table-view-data"), switch, "{name}: the view switch stands where it stood in DATA, in the bottom bar");
+    assert_eq!(app.value("structure-columns-0-name"), "id", "{name}");
+    assert_eq!(app.value("structure-columns-0-keys"), "primary key", "{name}");
+    assert_eq!(app.value("structure-columns-1-keys"), format!("{shop}.customers.id"), "{name}");
+    let default = if e.t.kind() == Kind::Sqlite { "" } else { "auto_increment" };
+    assert_eq!(app.value("structure-columns-0-default"), default, "{name}: the id's default");
+    assert_eq!(app.value("structure-facts"), format!("9 columns  {} rows", thousands(n)), "{name}");
+    assert!(app.tag("filter-0-column").is_none(), "{name}: no filter bar in STRUCTURE");
+    app.shot(root, &format!("{p}-2d-structure"));
+    // The bar's parts and COLUMNS' first row (those drawn) stand apart, inside the window.
+    let row: Vec<String> = ["position", "name", "type", "nullable", "default", "keys"].iter().map(|k| format!("structure-columns-0-{k}")).collect();
+    let mut apart = vec!["table-view-data", "table-view-structure", "table-refresh", "structure-facts"];
+    apart.extend(row.iter().map(String::as_str));
+    app.assert_apart(&apart, &format!("{name} 2d"));
+    // A double-click on a column's edge fits the column to its content: Name, 150 as drawn.
+    let drawn = app.value("structure-columns-edge-name").as_f64().unwrap();
+    app.double_click("structure-columns-edge-name");
+    app.until("the fitted column", |app| app.value("structure-columns-edge-name").as_f64().is_some_and(|w| w < drawn - 1.0));
+    app.shot(root, &format!("{p}-2d-fitted"));
+    // The other sections (SQLite's rowid key has no index), REFERENCED BY below the page's
+    // bottom (listed, out of view); a foreign key's link opens its table, and closing that comes
+    // back to orders' STRUCTURE.
+    if e.t.kind() == Kind::Sqlite {
+        assert!(app.tag("structure-indexes-0-name").is_none(), "{name}: the rowid has no index");
+    } else {
+        assert_eq!(app.value("structure-indexes-0-keys"), "primary key", "{name}");
+    }
+    assert_eq!(app.value("structure-referenced-by-0-from"), format!("{shop}.order_items.order_id"), "{name}");
+    assert!(app.tag("structure-triggers-0-name").is_none(), "{name}: orders has no triggers");
+    let orders_tab = app.document()["active"].clone();
+    app.click("structure-columns-1-keys");
+    app.until("customers", |app| app.table()["name"] == "customers");
+    assert_eq!(app.table()["view"], "data", "{name}: a link opens DATA");
+    app.until("the customers' rows", |app| app.tag("grid-header-0").is_some());
+    app.shot(root, &format!("{p}-2d-link"));
+    app.ctrl("W");
+    app.until("back on orders", |app| app.document()["active"] == orders_tab);
+    assert_eq!(app.table()["view"], "structure", "{name}: orders still in STRUCTURE");
+    app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
+    app.click("table-view-data");
+    app.until("the rows", |app| app.tag("grid-header-0").is_some());
+    assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)), "{name}");
+    assert!(app.tag("filter-0-column").is_some(), "{name}: the filter bar back");
+    // 2e. On a server, a first load held by a table lock shows the shipments' header over rows
+    //     of bars; once it loads the tab closes, back to orders. (A file has no other session.)
+    if let Some(server) = e.t.server() {
+        let lock = match e.t.kind() {
+            Kind::Postgres => format!("LOCK TABLE {shop}.shipments IN ACCESS EXCLUSIVE MODE"),
+            _ => format!("LOCK TABLES {shop}.shipments WRITE"),
+        };
+        let held = dbee_testkit::hold(server, &lock).unwrap();
+        app.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": shop, "table": "shipments" }, "wait": false }));
+        app.until("the skeleton", |app| app.tag("grid-skeleton").is_some());
+        assert!(app.tag("status-job").is_none(), "{name}: a page load is no footer job");
+        let shipments_tab = app.document()["active"].as_u64().unwrap();
+        app.shot(root, &format!("{p}-2e-skeleton"));
+        drop(held);
+        let t = app.settled("the shipments page");
+        assert_eq!(t["name"], "shipments", "{name}: {t}");
+        assert!(app.tag("grid-skeleton").is_none(), "{name}: the rows in its place");
+        app.execute("tab.close", json!({ "tab": shipments_tab, "force": true }));
+        app.execute("tab.activate", json!({ "tab": orders_tab }));
+        assert_eq!(app.table()["name"], "orders", "{name}");
+    }
 
     // 3. The three filters through the bar, then Enter in the last value field.
     app.click("filter-add");
@@ -303,7 +430,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     // 4. The billing cell's JSON in the value panel; its second line selected and copied.
     app.click(&format!("grid-cell-{r}-5"));
     let d = app.document();
-    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5] }));
+    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5], "whole": false }));
     let v = &d["value"];
     assert_eq!(
         (v["column"].clone(), v["typeLabel"].clone(), v["kind"].clone(), v["pretty"].clone(), v["isNull"].clone()),
@@ -312,20 +439,22 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     );
     let panel = app.value("value-panel");
     assert_eq!((panel["column"].clone(), panel["type"].clone()), (json!("billing"), json!(info.plain_json_label)), "{name}: {panel}");
+    app.panel_between_the_bars(&format!("{name}, step 4"));
     let text = app.value("value-text")["text"].as_str().unwrap().to_string();
     assert!(text.starts_with("{\n") && text.contains("\"city\": \"Testville\""), "{name}: formatted: {text}");
     let lines: Vec<&str> = text.split('\n').collect();
     let line = lines[1];
     assert!(line.contains(&day.typo), "{name}: the second line holds the name: {text}");
-    let [x, y, w, _] = app.rect("value-text");
-    let second = y + f64::from(LINE_H) * 1.5;
-    app.click_at(x + 1.0, second, false);
-    app.click_at(x + w - f64::from(PAD), second, true);
     let start = lines[0].len() + 1;
-    assert_eq!(app.value("value-text")["selection"], json!([start, start + line.len()]));
+    app.select_value_line(1, start, line.len(), f64::from(PAD), f64::from(LINE_H));
     app.ctrl("C");
     let d = app.document();
     assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(line), Some(line.len() as u64)), "{name}: the line was copied");
+    // `value.copy` gives the whole value as stored: the same JSON as the panel's pretty text.
+    let copied = app.execute("value.copy", json!({}));
+    assert_eq!((copied["bytes"].clone(), copied["row"].clone()), (d["value"]["bytes"].clone(), json!(false)), "{name}: {copied}");
+    let parsed: Json = serde_json::from_str(copied["text"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed, serde_json::from_str::<Json>(&text).unwrap(), "{name}: the stored text is the shown JSON");
     app.shot(root, &format!("{p}-4-json"));
 
     // 5. The order's row selected, its customer_id link: a new customers tab filtered to the id.
@@ -350,20 +479,29 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let t = app.settled("the day's customers");
     assert_eq!(t["rows"], 2, "{name}: {t}");
     assert_eq!((app.cell(0, 0)["text"].clone(), app.cell(1, 0)["text"].clone()), (json!(day.customer), json!(day.extra)), "{name}");
-    edit_cell(app, 0, 1, &day.fixed);
+    // Several lines are saved with SAVE on Postgres and with Ctrl+Enter on the others, so both
+    // ways run each day.
+    let save = e.t.kind() == Kind::Postgres;
+    edit_cell(app, 0, 1, &day.fixed, save);
     app.right_click("grid-cell-1-1");
     app.click("grid-menu-delete");
     assert_eq!(app.cell(1, 1)["deleted"], true);
     app.click("row-add");
     assert_eq!(app.cell(2, 0)["state"], "new");
-    edit_cell(app, 2, 1, &day.added);
-    edit_cell(app, 2, 4, MARK);
+    edit_cell(app, 2, 1, &day.added, save);
+    edit_cell(app, 2, 4, MARK, save);
     assert_eq!(app.table()["edits"]["count"], 3, "{name}: a changed cell, a row to delete and a new row");
     app.click("grid-cell-0-1");
+    // The paging bar counts them; paging and REFRESH wait for them.
+    assert_eq!(app.value("edits-count"), "3 changes", "{name}");
+    for id in ["page-next", "table-refresh"] {
+        assert_eq!(app.tag(id).map(|e| e["enabled"].clone()), Some(json!(false)), "{name}: `{id}` waits for the staged changes");
+    }
     app.shot(root, &format!("{p}-6a-staged"));
     app.ctrl("S");
     app.until("the Apply", |app| app.table()["edits"]["count"] == 0);
     let t = app.settled("the Apply");
+    assert!(app.tag("edits-count").is_none(), "{name}: nothing staged, no count of changes");
     assert!(t["failed"].is_null() && t["error"].is_null(), "{name}: {t}");
     assert_eq!(e.q(&format!("SELECT name FROM {shop}.customers WHERE id = {}", day.customer)), day.fixed, "{name}: the name is fixed");
     assert_eq!(
@@ -416,12 +554,23 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let q = query_done(app);
     assert!(q["error"].is_null(), "{name}: {q}");
     assert_eq!((q["results"].as_array().map(Vec::len), q["shown"].as_u64()), (Some(3), Some(2)), "{name}: the last result shows: {q}");
+    assert!(q["results"].as_array().is_some_and(|r| r.iter().all(|o| o["ms"].is_u64())), "{name}: each statement says how long it took: {q}");
     assert_eq!(app.cell(0, 0)["text"], "3");
+    // A tab per result, in view or listed behind the ⌄ list.
+    for n in 1..=3 {
+        assert!(app.tag(&format!("result-{n}")).is_some(), "{name}: result {n}'s tab");
+    }
     show_result(app, root, 1, &format!("{p}-7b-results-list"));
     assert_eq!(app.cell(0, 0)["text"], cell, "{name}: the unqualified statement ran where the chip says");
     app.shot(root, &format!("{p}-7b-results"));
+    // The run row and the result bar give way in order: none of their controls over another or
+    // past the window.
+    let bars = ["query-database", "query-run", "query-run-current", "query-facts", "query-export", "value-toggle"];
+    app.assert_apart(&bars, &format!("{name}: the query tab's bars"));
+    assert!(app.tag("query-facts").is_some() && app.tag("value-toggle").is_some(), "{name}: the facts and the toggle drawn");
+    app.shot(root, &format!("{p}-7e-bars"));
 
-    //    A statement that runs until cancelled; Cancel in the toolbar stops it.
+    //    A statement that runs until cancelled; Cancel in the run row stops it.
     let marker = unique("m2day_run");
     let (slow, held) = held_statement(e, &marker);
     app.click("query-editor");
@@ -433,13 +582,26 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     } else {
         app.until("the run", |app| !app.document()["query"]["running"].is_null());
     }
+    // CANCEL shows once the run has gone 300 ms, and RUN is off while it shows.
+    app.until("CANCEL in the run row", |app| app.tag("query-cancel").is_some());
     assert!(app.tag("query-cancel").is_some_and(|t| t.get("enabled") != Some(&json!(false))), "{name}: Cancel is enabled while it runs");
+    assert!(app.tag("query-run").is_some_and(|t| t.get("enabled") == Some(&json!(false))), "{name}: Run is off while it runs");
+    // The footer's job shows from 300 ms too, with its timer.
+    app.until("the footer's timer", |app| app.tag("status-timer").is_some());
+    assert!(app.value("status-job").as_str().is_some_and(|j| j.starts_with("Running ")), "{name}: the run is the footer's job");
+    let timer = app.value("status-timer");
+    let read = timer.as_str().unwrap_or_default();
+    let timed = read.len() == 7
+        && read.chars().enumerate().all(|(i, c)| [(2, ':'), (5, '.')].iter().find(|(at, _)| *at == i).map_or(c.is_ascii_digit(), |(_, s)| c == *s));
+    assert!(timed, "{name}: the timer reads like 00:00.0: {timer}");
     app.shot(root, &format!("{p}-7c-running"));
     app.click("query-cancel");
     let q = query_done(app);
     drop(held);
+    app.until("no Cancel once the run ended", |app| app.tag("query-cancel").is_none());
     assert_eq!(q["error"]["code"], "cancelled", "{name}: {q}");
-    assert_eq!(app.value("query-error")["code"], "cancelled");
+    assert!(app.tag("query-error").is_none(), "{name}: dbee's own cancel shows no band");
+    assert!(app.value("query-facts").as_str().is_some_and(|f| f.starts_with("Cancelled")), "{name}: the bar says the run was cancelled");
     app.shot(root, &format!("{p}-7d-cancelled"));
 
     //    The join, copied with its header: a click on a cell, Ctrl+A, Ctrl+Shift+C.
@@ -467,6 +629,31 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert!(copied.lines().any(|l| l == format!("{}\t{}\t4242.42\t2026-10-26", day.order, day.fixed)), "{name}: the day's order: {copied}");
     assert_eq!((copied.lines().count() as u64, d["clipboardBytes"].as_u64()), (n + 1, Some(copied.len() as u64)), "{name}: {copied}");
     app.shot(root, &format!("{p}-7e-copied"));
+
+    // 7f. The tree's menu on `orders`: New query opens on its schema (the chip names it on MySQL
+    //     and MariaDB); Ctrl+W closes the empty tab.
+    let tabs = app.document()["tabs"].as_array().map(Vec::len).unwrap_or_default();
+    let row = format!("tree-table-{shop}.orders");
+    // Step 7's click may have closed it (SQLite's `main` starts open).
+    if app.tag(&row).is_none() {
+        app.click(&shop_row);
+        app.until("the schema open", |app| app.tag(&row).is_some());
+    }
+    app.right_click(&row);
+    app.until("the tree's menu", |app| app.tag("tree-menu-new-query").is_some());
+    app.click("tree-menu-new-query");
+    app.until("the new query tab", |app| {
+        let d = app.document();
+        d["tabs"].as_array().map(Vec::len) == Some(tabs + 1) && d["query"].is_object() && d["query"]["text"] == ""
+    });
+    let chip = app.tag("query-database");
+    match &e.chip {
+        Some(_) => assert_eq!(chip.map(|t| t["value"].clone()), Some(json!(shop)), "{name}: the chip names the row's schema"),
+        None => assert!(chip.is_none(), "{name}: no chip without USE"),
+    }
+    app.shot(root, &format!("{p}-7f-tree-new-query"));
+    app.ctrl("W");
+    app.until("the empty tab closed", |app| app.document()["tabs"].as_array().map(Vec::len) == Some(tabs));
 }
 
 #[test]
@@ -530,9 +717,18 @@ fn m2_day_end_to_end() {
         let card = app.value(&format!("conn-kind-{kind}"));
         assert_eq!(card["upcoming"], false, "{kind}: {card}");
     }
+    //    The engine cards: 104 tall, side by side.
+    let cells = ["postgres", "mysql", "mariadb", "sqlite"].map(|kind| app.rect(&format!("conn-kind-{kind}")));
+    for (n, c) in cells.iter().enumerate() {
+        assert!((c[3] - 104.0).abs() <= 0.5 && (c[1] - cells[0][1]).abs() <= 0.5, "card {n}: {cells:?}");
+        assert!(n == 0 || c[0] >= cells[n - 1][0] + cells[n - 1][2] - 1.0, "card {n} after the one before: {cells:?}");
+    }
     app.shot(&root, "2-mysql80-0a-cards");
     app.click("conn-kind-postgres");
     assert_eq!((app.value("conn-kind"), app.value("conn-port")), (json!("postgres"), json!("5432")));
+    //    The engine row under the title row.
+    let (title, change) = (app.rect("conn-title"), app.rect("conn-change-engine"));
+    assert!(change[1] > title[1] + title[3], "Change engine under the title: {title:?} {change:?}");
     app.click("conn-name");
     app.text("Shop mysql80");
     app.click("conn-change-engine");
@@ -555,6 +751,9 @@ fn m2_day_end_to_end() {
     app.text(&db.sshd.user);
     app.until("the key line", |app| app.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ") && t.ends_with("id_ed25519")));
     app.shot(&root, "2-mysql80-0b-form");
+    //    The title row, the engine row and the form's bar stand apart, inside the window.
+    let rows = ["conn-title", "conn-fill-url", "conn-kind", "conn-change-engine", "conn-save", "conn-test", "conn-connect"];
+    app.assert_apart(&rows, "2-mysql80-0b-form");
     //    List…: the server's databases through the tunnel, its own last; `shop` picked.
     app.click("conn-database-list");
     app.until("the list", |app| !app.tags_with("conn-database-item-").is_empty());
@@ -567,10 +766,12 @@ fn m2_day_end_to_end() {
     app.click(shop_item["id"].as_str().unwrap());
     assert_eq!(app.value("conn-database"), "shop");
     assert!(app.tags_with("conn-database-item-").is_empty(), "picking closes the list");
-    app.click("conn-save");
-    app.until("the save", |app| app.tag("conn-result").is_some());
+    //    CONNECT saves it once it connects: no SAVE first.
     app.click("conn-connect");
     app.until("the MySQL workspace", |app| app.document()["screen"] == "workspace");
+    let saved = app.execute("connection.list", json!({}))["saved"].clone();
+    let named = saved.as_array().unwrap().iter().filter(|c| c["name"] == "Shop mysql80").count();
+    assert_eq!(named, 1, "CONNECT saved it once: {saved}");
     let d = app.document();
     let c = &d["connection"];
     assert_eq!(

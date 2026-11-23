@@ -62,6 +62,9 @@ pub(crate) const INFO: KindInfo = KindInfo {
     running_with_sql: |m| {
         format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")
     },
+    running_ids_sql: |m| format!("SELECT pid FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'"),
+    cancel_sql: |pid| format!("SELECT pg_cancel_backend({pid})"),
+    cancel_error: ("57014", "canceling statement due to user request"),
     take_lock_sql: |key| format!("SELECT pg_advisory_xact_lock(hashtext('{key}'))"),
     waits_for_lock_sql: |key| format!("(SELECT true FROM pg_advisory_xact_lock_shared(hashtext('{key}')))"),
     json_type_label: "jsonb",

@@ -15,7 +15,8 @@ enum Becomes {
 /// The result codes dbee acts on, matched exactly. Every other code is the server's error with its
 /// extended code: `SQLITE_BUSY` (the file is locked past the busy timeout) among them, and the
 /// extended codes of `SQLITE_READONLY` (the file moved, a lock it cannot take), which say more
-/// than that the connection is read-only.
+/// than that the connection is read-only. `SQLITE_INTERRUPT` comes only from dbee's canceller, as
+/// SQLite has no timeout or other session that interrupts, so it is always dbee's cancel.
 const CODES: &[(c_int, Becomes)] = &[(ffi::SQLITE_INTERRUPT, Becomes::Cancelled), (ffi::SQLITE_READONLY, Becomes::ReadOnly)];
 
 /// What the text shows before the code: `no such column: x (SQLite error 1)`.

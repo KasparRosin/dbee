@@ -34,11 +34,12 @@ use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
-pub use dbee_driver::{Meaning, allowed_file};
+pub use dbee_driver::{Meaning, TlsState, TransactionState, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{
-    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Which,
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, Showing, State, StatementOutcome, StructureRead, Tab,
+    TabStructure, TableTab, Total, Transaction, Which,
 };
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
@@ -81,6 +82,28 @@ pub enum Need {
     SshPassword,
     /// Something will be lost (`what`, e.g. `queryText`); run again with `force` to go ahead.
     Confirm { what: String },
+    /// Closing would drop the query session's transaction, in `state` (never `Idle`): run again
+    /// with `end` (`"commit"` or `"rollback"`) to end it first, or with `force` to close without.
+    /// `name` is the tab's title or the connection's display name, as `about` says. `lost` is what
+    /// the close loses besides, as the `needsConfirm` it comes before words it after its question
+    /// ("Its query text will be lost."). `running` is the connection's query runs still going.
+    EndTransaction { state: TransactionState, about: EndAbout, name: String, lost: Option<String>, running: Option<Running> },
+}
+
+/// What a [`Need::EndTransaction`] asks about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndAbout {
+    /// The query tab whose run opened the transaction.
+    Tab,
+    /// The connection whose query session holds it.
+    Connection,
+}
+
+/// The query runs still going on a connection: the first one's tab title, and how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Running {
+    pub title: String,
+    pub count: usize,
 }
 
 /// Why a command or a job failed. [`EngineError::code`] is the stable id the UI and the control
@@ -113,7 +136,7 @@ pub enum EngineError {
 
 impl EngineError {
     /// A stable id: `unknownCommand`, `disabled`, `badParams`, `needsHostKey`, `needsPassphrase`,
-    /// `needsPassword`, `needsSshPassword`, `needsConfirm`, a database code (`server`,
+    /// `needsPassword`, `needsSshPassword`, `needsConfirm`, `needsTransactionEnd`, a database code (`server`,
     /// `connectionLost`, …), `busy`, `timeout`, `internal` or `config`.
     pub fn code(&self) -> &'static str {
         match self {
@@ -126,6 +149,7 @@ impl EngineError {
                 Need::Password => "needsPassword",
                 Need::SshPassword => "needsSshPassword",
                 Need::Confirm { .. } => "needsConfirm",
+                Need::EndTransaction { .. } => "needsTransactionEnd",
             },
             EngineError::Db { code, .. } => code,
             EngineError::Busy(_) => "busy",
@@ -146,6 +170,16 @@ impl EngineError {
                 Need::HostKey { host, key_type, fingerprint } => json!({ "host": host, "keyType": key_type, "fingerprint": fingerprint }),
                 Need::Passphrase { key } => json!({ "key": key }),
                 Need::Confirm { what } => json!({ "what": what }),
+                Need::EndTransaction { state, about, name, lost, running } => json!({
+                    "state": crate::state::transaction_state(*state),
+                    "about": match about {
+                        EndAbout::Tab => "tab",
+                        EndAbout::Connection => "connection",
+                    },
+                    "name": name,
+                    "lost": lost,
+                    "running": running.as_ref().map(|r| json!({ "title": r.title, "count": r.count })),
+                }),
                 Need::Password | Need::SshPassword => json!({}),
             },
             EngineError::Db { data, .. } => data.clone(),
@@ -436,6 +470,28 @@ impl Session {
         self.jobs.is_running_label(command)
     }
 
+    /// The oldest running job of command `command`, when one runs: a window that times a job
+    /// keys its clock by it, so a second run of the same command starts its own once the first
+    /// has ended.
+    pub fn running_job(&self, command: &str) -> Option<JobId> {
+        self.jobs.running().filter(|(_, label)| *label == command).map(|(job, _)| job).min_by_key(|job| job.0)
+    }
+
+    /// Whether job `job` still runs.
+    pub fn job_running(&self, job: JobId) -> bool {
+        self.jobs.is_running(job)
+    }
+
+    /// Whether command `id` can run now, or why not: its `enabled` check alone, for a window that
+    /// draws one button every frame. An unknown id, or a panicking check, is a reason.
+    pub fn enabled(&self, id: &str) -> Result<(), String> {
+        let spec = cmd::find(id).ok_or_else(|| format!("no command `{id}`"))?;
+        catch_unwind(AssertUnwindSafe(|| (spec.enabled)(self))).unwrap_or_else(|_| {
+            log::error!("command {}: its enabled check panicked", spec.id);
+            Err("internal error in its enabled check".into())
+        })
+    }
+
     /// Every registered command with whether it can run now. A panicking `enabled` check shows
     /// as disabled.
     pub fn commands(&self) -> Vec<CommandInfo> {
@@ -555,6 +611,17 @@ impl Session {
         self.jobs.spawn_stoppable(label, stop, fut)
     }
 
+    /// [`Session::spawn_job`] for a connection attempt, made by `attempt` with the `Stop` that
+    /// `connection.cancel` sets.
+    pub(crate) fn spawn_attempt<F>(&mut self, label: &'static str, attempt: impl FnOnce(Arc<jobs::Stop>) -> F) -> JobId
+    where
+        F: Future<Output = Apply> + Send + 'static,
+    {
+        let stop = Arc::new(jobs::Stop::default());
+        let fut = attempt(Arc::clone(&stop));
+        self.jobs.spawn_attempt(label, stop, fut)
+    }
+
     /// The job whose result is being applied, inside an [`Apply`]; `None` elsewhere.
     pub(crate) fn applying_job(&self) -> Option<JobId> {
         self.jobs.applying()
@@ -586,13 +653,15 @@ impl Session {
 
     /// No marker outlives its job: once `job`'s result was applied, or dropped because the job's
     /// future or its `Apply` panicked (and the state was put back with the markers it had), every
-    /// marker that still names it is cleared. A query run whose marker is still there was not
-    /// applied, so where it left the query connection is not known.
+    /// marker that still names it is cleared. A query run (or a commit or rollback) whose marker
+    /// is still there was not applied, so where it left the query connection, and its transaction,
+    /// are not known.
     fn job_ended(&mut self, job: JobId) {
         for c in &mut self.state.connections {
             if c.query_run.as_ref().is_some_and(|run| run.job == job) {
                 c.query_run = None;
                 c.query_database.known = false;
+                c.transaction = Some(Transaction { state: dbee_driver::TransactionState::Unknown, tab: None });
             }
         }
         for tab in &mut self.state.tabs {

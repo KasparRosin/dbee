@@ -53,7 +53,7 @@ fn select_all_copy_tsv_has_no_header() {
         let r = copy(s, "tsv");
         assert_eq!(text(&r), "1\tAnn\t{\"a\": 1, \"b\": 2}\t\n2\t\t\tx");
         assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(2), json!(4)));
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 3], "whole": false }));
     });
 }
 
@@ -157,6 +157,54 @@ fn value_view_labels() {
         let mut other = connected_to(&t);
         assert_eq!(run(&mut other, "value.show", json!({})), Json::Null);
         assert!(other.value_view().is_none());
+    }
+}
+
+/// The object Copy as JSON writes for grid row `row`, selected across every column: the list's one
+/// object, without the list.
+fn copied_object(s: &mut Session, row: usize) -> String {
+    run(s, "selection.set", json!({ "anchor": [row, 0], "focus": [row, 999] }));
+    let list = text(&copy(s, "json")).to_owned();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]"));
+    object.unwrap_or_else(|| panic!("one object: {list}")).to_owned()
+}
+
+/// A whole-row selection's value view is the focus row's object as Copy as JSON writes it,
+/// pretty-printed, titled with the row's number as the grid shows it (the page's offset counted
+/// in), staged values included.
+#[test]
+fn the_value_view_of_a_row_is_its_json() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let mut s = connected_to(&t);
+        open_table(&mut s, t.schema("shop"), "customers");
+        let object = copied_object(&mut s, 2);
+        run(&mut s, "selection.rows", json!({ "first": 2 }));
+        let view = s.value_view().unwrap_or_else(|| panic!("{}: a view of the row", t.name()));
+        assert_eq!(Some(view.text.as_str()), dbee_core::json::pretty(&object).as_deref(), "{}", t.name());
+        assert!(view.text.starts_with("{\n  \"id\": 3,\n  \"name\": \"Customer 3\","), "{}: {}", t.name(), view.text);
+        assert_eq!((view.title(), view.row, view.pretty, view.truncated, view.is_null), ("Row 3".into(), Some(3), true, false, false));
+        assert_eq!((view.byte_len, view.column.as_str(), view.type_label.as_str(), view.kind_label.as_str()), (object.len(), "", "", ""));
+        assert_eq!(s.inspect()["value"]["row"], 3);
+        // Built once, until the row or its values change; a staged value shows.
+        let built = s.value_view_computations();
+        s.value_view();
+        assert_eq!(s.value_view_computations(), built);
+        set_cell(&mut s, 2, "name", "Zed");
+        assert!(s.value_view().unwrap().text.contains("\"name\": \"Zed\""));
+        run(&mut s, "edit.reset", json!({}));
+        // A cell again: its own view.
+        run(&mut s, "selection.set", json!({ "anchor": [2, 1] }));
+        let cell = s.value_view().unwrap();
+        assert_eq!((cell.row, cell.title()), (None, "name".into()));
+        // The second page's third row is the 103rd.
+        run(&mut s, "table.page", json!({ "to": "next" }));
+        let object = copied_object(&mut s, 2);
+        run(&mut s, "selection.rows", json!({ "first": 2 }));
+        let view = s.value_view().unwrap();
+        assert_eq!((view.title(), view.row), ("Row 103".into(), Some(103)), "{}", t.name());
+        assert_eq!(Some(view.text), dbee_core::json::pretty(&object));
     }
 }
 
@@ -287,11 +335,11 @@ fn selection_out_of_range_is_bad_params() {
         assert_eq!(s.inspect()["selection"], Json::Null);
         // A focus past the edge is clamped.
         run(s, "selection.set", json!({ "anchor": [0, 1], "focus": [999, 999] }));
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3], "whole": false }));
         assert_eq!(copy(s, "tsv")["rows"], 2);
         // A bad call changes nothing.
         assert_eq!(s.execute("selection.set", json!({ "anchor": [5, 5] })).unwrap_err().code(), "badParams");
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3], "whole": false }));
     });
 }
 
@@ -420,4 +468,77 @@ fn copy_and_value_view_skip_the_hidden_key() {
         assert_eq!(s.value_view().map(|v| v.column), Some("body".to_owned()));
         assert_eq!(s.execute("selection.set", json!({ "anchor": [0, 2] })).unwrap_err().code(), "badParams", "no third column");
     });
+}
+
+/// The `why` of `value.copy` refused as disabled.
+fn copy_refused(s: &mut Session) -> String {
+    match s.execute("value.copy", json!({})) {
+        Ok(Outcome::Done(v)) => panic!("copied {} bytes", v["text"].as_str().map_or(0, str::len)),
+        Ok(other) => panic!("{other:?}"),
+        Err(e) => {
+            assert_eq!(e.code(), "disabled", "{e}");
+            e.data()["why"].as_str().unwrap_or_default().to_string()
+        }
+    }
+}
+
+/// `value.copy` gives the focus cell's whole value as stored (staged over loaded), not the
+/// pretty-printed text the panel shows; a whole row as Copy as JSON writes its object. NULL, no
+/// selection and a value over the copy cap are refused, saying why.
+#[test]
+fn value_copy_gives_the_whole_value_as_stored() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let name = unique("t_vcopy");
+    let mib = 1024 * 1024;
+    let _g = scratch_table(
+        &t,
+        &name,
+        &format!(
+            "CREATE TABLE {{t}} (id int PRIMARY KEY, billing jsonb, note text);
+             INSERT INTO {{t}} VALUES (1, '{{\"b\": 2, \"a\": [1, 2]}}', NULL), (2, NULL, ''),
+                 (3, NULL, repeat('x', {})), (4, NULL, repeat('y', {}));",
+            5 * mib,
+            9 * mib
+        ),
+    );
+    let mut s = connected_to(&t);
+    // Nothing selected.
+    open_table(&mut s, t.schema("scratch"), &name);
+    assert_eq!(copy_refused(&mut s), "nothing is selected");
+    let at = |s: &mut Session, row: usize, col: usize| {
+        run(s, "selection.set", json!({ "anchor": [row, col] }));
+        run(s, "value.copy", json!({}))
+    };
+    // The database's text, not the panel's pretty form.
+    let stored = q(&t, &format!("SELECT billing::text FROM {}.{name} WHERE id = 1", t.schema("scratch")));
+    let r = at(&mut s, 0, 1);
+    assert_eq!((text(&r), r["bytes"].clone(), r["row"].clone()), (stored.as_str(), json!(stored.len()), json!(false)), "{r}");
+    assert_ne!(s.value_view().unwrap().text, stored, "the panel shows it pretty");
+    // A staged value; the empty string.
+    set_cell(&mut s, 0, "billing", "[3]");
+    assert_eq!(text(&at(&mut s, 0, 1)), "[3]");
+    let r = at(&mut s, 1, 2);
+    assert_eq!((text(&r), r["bytes"].clone()), ("", json!(0)));
+    // NULL.
+    run(&mut s, "selection.set", json!({ "anchor": [1, 1] }));
+    assert_eq!(copy_refused(&mut s), "the value is NULL");
+    // 5 MiB, whole; 9 MiB is more than a copy takes.
+    let r = at(&mut s, 2, 2);
+    assert_eq!((text(&r).len(), r["bytes"].clone()), (5 * mib, json!(5 * mib)));
+    assert!(text(&r).bytes().all(|b| b == b'x'));
+    run(&mut s, "selection.set", json!({ "anchor": [3, 2] }));
+    assert_eq!(copy_refused(&mut s), "the value is 9.0 MiB, more than the 8 MiB a copy can take");
+    // `enabled` says the same, without building anything.
+    assert_eq!(s.enabled("value.copy").unwrap_err(), "the value is 9.0 MiB, more than the 8 MiB a copy can take");
+    // A whole row: the object Copy as JSON writes, staged values included.
+    let object = copied_object(&mut s, 0);
+    assert!(object.contains("\"billing\": [3]"), "{object}");
+    run(&mut s, "selection.rows", json!({ "first": 0 }));
+    let r = run(&mut s, "value.copy", json!({}));
+    assert_eq!((text(&r), r["bytes"].clone(), r["row"].clone()), (object.as_str(), json!(object.len()), json!(true)));
+    // A row over the cap.
+    run(&mut s, "selection.rows", json!({ "first": 3 }));
+    let why = copy_refused(&mut s);
+    assert!(why == "the value is 9.1 MiB, more than the 8 MiB a copy can take", "{why}");
 }

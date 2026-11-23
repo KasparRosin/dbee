@@ -3,14 +3,28 @@
 //!
 //! **What it shows** is the engine's value view (`Session::value_view_shared`): the value as the
 //! grid shows it, a staged one included, pretty-printed when it is JSON and cut to
-//! `VALUE_VIEW_MAX_BYTES` (10 MiB). The header names the column, its real type and, when one
-//! applies, what JSON it is (`jsonb`, `json`, `text containing JSON`, `JSON string containing
-//! JSON`); a cut value says how much of it shows ([`note`]). With no cell selected it says how
-//! to fill it. NULL shows as a dim `NULL`, with no text to select.
+//! `VALUE_VIEW_MAX_BYTES` (10 MiB). The bar names the column and its real type, a cut one whole
+//! on hover; the facts along the bottom say its lines and size, `Formatted as JSON` when the
+//! engine pretty-printed text the database doesn't call JSON (`ValueView::formatted`), and for a
+//! cut value how much of it shows (`First 10 MiB of 19.1 MiB`). What JSON it is and the old note
+//! on a cut value ([`note`]) are no longer drawn; the tag keeps them. With no cell selected it
+//! says so. NULL shows as a dim `NULL`, with no text to select. A whole selected row (issue #17)
+//! shows as its JSON object under `Row <n>` and no type ([`State::Row`]); one cut at the cap says
+//! so as a long value does. The look is the component's ([`crate::components::value`]); this
+//! screen keeps the rows, colours, selection and scrolling.
 //!
-//! **The text** is read-only, in a monospace font, wrapped at the panel's width by characters
-//! ([`Rows`]: a row ends at a line break or before the character that would take it past the
-//! box). Widths are counted in columns of an `x` ([`Columns`]): a tab takes the font's four, other
+//! **COPY** runs `clipboard.copyValue`: the engine's `value.copy`, the whole value as stored
+//! (staged over loaded; a row as Copy as JSON writes it), onto the clipboard. It then reads
+//! ✓ COPIED for [`COPIED_FOR`] on the window's clock, with no notice; another value ends that. It
+//! is off, saying why on hover, whenever `value.copy` is (no cell, NULL, past 8 MiB).
+//!
+//! **The text** is read-only, in a monospace font. With WRAP on (it starts on) it is wrapped at
+//! the panel's width by characters ([`Rows`]: a row ends at a line break or before the character
+//! that would take it past the box). With WRAP off ([`Wrap::Lines`]) a row ends only at a line
+//! break, or past [`NOWRAP_MAX_COLUMNS`] columns, so a huge one-line value lays out no more a
+//! frame; the text then scrolls sideways too, as wide as its widest row, and selecting works
+//! with the sideways offset. WRAP runs `ui.toggleValueWrap` (also View > Wrap Values): one
+//! setting for the window and the session (`View::value_wrap`). Widths are counted in columns of an `x` ([`Columns`]): a tab takes the font's four, other
 //! ASCII one, any other character its glyph's width rounded up to whole columns (an emoji or a
 //! CJK character two), so no row runs past the box. Only the rows in view are laid out, so a
 //! 10 MiB text costs a frame what a short one does: the rows are found from marks kept every
@@ -21,14 +35,14 @@
 //! or more, which is accepted.
 //!
 //! **Colours.** JSON that parsed (or the start of one that was cut) gets syntax colours from
-//! `json::highlight` ([`spans`], theme [`crate::theme::Syntax`]); up to [`SYNC_COLOUR_BYTES`]
+//! `json::highlight` ([`spans`], colours from [`crate::theme::Tokens`]); up to [`SYNC_COLOUR_BYTES`]
 //! they are worked out in the frame, above that by one worker thread ([`ColourWorker`]) while
 //! the text shows uncoloured. The worker takes one value at a time, and a value asked for while
 //! it works replaces any still waiting, so at most one `highlight` runs.
 //!
 //! **Another view of the same text** (a staged edit of another cell, an undo or a redo: the
-//! engine builds a new view) keeps the place it is scrolled to, the selection and the colours;
-//! another text starts afresh, at its top.
+//! engine builds a new view) keeps the place it is scrolled to (sideways too), the selection and
+//! the colours; another text starts afresh, at its top and left.
 //!
 //! **Selecting.** A press places the caret and takes the keyboard, a drag or a shift-click
 //! selects from there (scrolling when the drag leaves the text), a double-click selects a word.
@@ -37,19 +51,35 @@
 //! selects all of its text. A press outside the text, another text, or hiding the panel ends the
 //! selection. A hidden panel asks the session for no value view.
 //!
-//! **The panel** starts [`DEFAULT_WIDTH`] wide, less in a narrow window ([`start_width`]), is
-//! resizable from its left edge, and is hidden or shown with `ui.toggleValuePanel` (the View
-//! menu, and `value-toggle` at the right end of the status bar). Its width (egui's
-//! panel state) and whether it shows (`View::value_panel`) last for the session, in memory only.
-//! It is drawn after the tab's body ([`reserve`], then [`fill`]), so a click on a cell shows its
-//! value in the same frame.
+//! **The panel** stands inside the tab, beside its results: in a query tab beside the result bar,
+//! the band and the grid (the editor and the run row keep the body's width), in a table tab
+//! between the table bar and the paging bar, beside the band and the grid (the filter bar and the
+//! two bars keep the body's width). The tab gives it its area ([`reserve`]), and draws its toggle,
+//! `value-toggle`, at the right end of the result bar or the table bar: a query tab before its
+//! first result has neither. It starts [`VALUE_PANEL_W`] wide, is resizable from its left edge
+//! (a 1 px `line` down it), and is hidden or shown with `ui.toggleValuePanel` (the View menu, and
+//! the toggle). Its width (egui's panel state) and whether it shows (`View::value_panel`) last for
+//! the session, in memory only, one for every tab. It is drawn after the tab's grid ([`reserve`],
+//! then [`fill`]), so a click on a cell shows its value in the same frame.
 //!
-//! Automation ids: `value-panel` (value `{column, type, label, null, bytes, truncated, note}`,
-//! `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
-//! says; `null` when no cell is selected), `value-text` (value `{text, cut, selection,
-//! highlighted, rows, firstRow}`: the text's first [`TAG_BYTES`] bytes and whether there is more,
-//! the selection as `[start, end]` byte offsets or null, whether the JSON colours show, the
-//! number of rows and the first row in view) and `value-toggle` (value: whether the panel shows).
+//! **Editing.** While a cell editor is open on the tab ([`crate::editors`]), the panel shows its
+//! draft, live: its bar names the column, CANCEL and SAVE at its right in place of COPY and WRAP,
+//! the draft in the value's box, the facts counting it as it is typed. The editor opens in its
+//! cell; a press in the panel's text moves the keyboard and the caret here, where a text of
+//! several lines takes Enter as a newline.
+//!
+//! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
+//! note, facts, wrap, editing}`, `row` the number of a whole selected row (`column` and `type` then empty) or
+//! null, `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
+//! says (not drawn), `facts` the facts as written before capitals or null with no facts strip;
+//! `wrap` whether WRAP is on; `editing` whether the panel shows an open cell editor's draft; `null` when no cell
+//! is selected), `value-cancel` and `value-save` (CANCEL and SAVE while editing), `value-copy` (COPY; value
+//! `{label, why}`, `label` `Copy` or `Copied`, `why` while it is off), `value-wrap` (WRAP; value
+//! whether it is on), `value-text` (value `{text, cut, selection, highlighted, rows, firstRow,
+//! firstColumn}`: the text's first [`TAG_BYTES`] bytes and whether there is more, the selection
+//! as `[start, end]` byte offsets or null, whether the JSON colours show, the number of rows as
+//! WRAP cuts them, and the first row and column in view, the column 0 while wrapped) and `value-toggle` (the toggle the result bar and the
+//! table bar draw; value: whether the panel shows).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -60,34 +90,39 @@ use dbee_core::json::{self, JsonKind, JsonToken};
 use dbee_engine::view::cut;
 use dbee_engine::{Screen, ValueView};
 use egui::containers::scroll_area::{DragScroll, ScrollSource};
-use egui::text::{CCursor, LayoutJob, TextFormat};
-use egui::{
-    Align, Color32, CornerRadius, Event, FontId, Frame, Galley, Id, Key, Label, Layout, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, UiBuilder, pos2, vec2,
-};
+use egui::text::CCursor;
+use egui::{Align, CornerRadius, Event, Frame, Galley, Id, Key, Layout, Modifiers, Pos2, Rect, Response, ScrollArea, Sense, UiBuilder, pos2, vec2};
 use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
-use crate::connections::line_galley;
-use crate::editors::size_text;
-use crate::theme::{RADIUS, Syntax, TOKENS, syntax};
-use crate::{icons, shortcuts};
+use crate::components::toast::Kind;
+use crate::components::tooltip::Hint;
+use crate::components::value::{self, COPY_HOVER, COPY_ROW_HOVER, CopyButton, Facts, Panel, Shown, State};
+use crate::editors::{self, EditorKey, size_text};
+use crate::shortcuts;
+use crate::theme::{
+    self, Text,
+    size::{RESULTS_MIN_W, VALUE_PANEL_W},
+};
 
 /// The automation ids.
 pub const PANEL: &str = "value-panel";
 pub const TEXT: &str = "value-text";
 pub const TOGGLE: &str = "value-toggle";
+pub const COPY: &str = "value-copy";
+pub const WRAP: &str = "value-wrap";
+pub const CANCEL: &str = "value-cancel";
+pub const SAVE: &str = "value-save";
 
-/// The width the panel starts at, and how narrow and wide it can be made.
-pub const DEFAULT_WIDTH: f32 = 360.0;
+/// How long COPY reads ✓ COPIED after a copy, in seconds.
+pub const COPIED_FOR: f64 = 1.5;
+
+/// How narrow and wide the panel can be made; it starts [`VALUE_PANEL_W`] wide.
 pub const MIN_WIDTH: f32 = 240.0;
 pub const MAX_WIDTH: f32 = 960.0;
-/// The height of a row of text, and the text's inset from the left of its box.
-pub const LINE_H: f32 = 18.0;
-pub const PAD: f32 = 8.0;
-/// The text's size, in the monospace font.
-pub const FONT_SIZE: f32 = 12.5;
+/// The height of a row of text, and the text's inset from the sides of its box.
+pub use crate::components::value::{LINE_H, PAD};
 /// How much of the text the `value-text` tag carries.
 pub const TAG_BYTES: usize = 4 * 1024;
 /// The longest JSON text coloured in the frame that shows it; longer is coloured on a thread.
@@ -95,8 +130,7 @@ pub const SYNC_COLOUR_BYTES: usize = 256 * 1024;
 /// Rows between two marks (see [`Rows`]): finding a row walks at most this many.
 pub const MARK_EVERY: usize = 128;
 
-/// The panel's inset, and the room kept at the text's right for the scroll bar.
-const MARGIN: f32 = 8.0;
+/// The room kept at the text's right for the scroll bar.
 const BAR_ROOM: f32 = 12.0;
 /// How often a panel waiting for its colours looks again.
 const COLOUR_POLL: Duration = Duration::from_millis(30);
@@ -189,25 +223,57 @@ impl Columns {
 
 // ---- rows ---------------------------------------------------------------------------------------
 
-/// The rows a text wraps into at a width of so many columns ([`Columns`]): a row ends at a line
-/// break (which belongs to no row) or before the character that would take it past the width (a
-/// row holds one character at least), so a text of `n` line breaks has at least `n + 1` rows,
-/// the empty text one. Only marks are kept, the start of every [`MARK_EVERY`]-th row; a row is
-/// found by walking from the mark before it.
+/// The most columns a row holds with WRAP off: a longer line goes on in the next row, so a
+/// 10 MiB value on one line lays out no more a frame than a wrapped one (a row of 1,000 columns
+/// is about 7,200 points wide).
+pub const NOWRAP_MAX_COLUMNS: usize = 1_000;
+
+/// How the text is cut into rows: at a width of so many columns (WRAP on), or only at line
+/// breaks (WRAP off; still at [`NOWRAP_MAX_COLUMNS`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wrap {
+    At(usize),
+    Lines,
+}
+
+impl Wrap {
+    /// The most columns a row holds (at least 1).
+    fn width(self) -> usize {
+        match self {
+            Wrap::At(w) => w.max(1),
+            Wrap::Lines => NOWRAP_MAX_COLUMNS,
+        }
+    }
+}
+
+/// The rows a text is cut into ([`Wrap`]) at a width of so many columns ([`Columns`]): a row ends
+/// at a line break (which belongs to no row) or before the character that would take it past the
+/// width (a row holds one character at least), so a text of `n` line breaks has at least `n + 1`
+/// rows, the empty text one. Only marks are kept, the start of every [`MARK_EVERY`]-th row; a row
+/// is found by walking from the mark before it.
 #[derive(Clone, Debug)]
 pub struct Rows {
+    wrap: Wrap,
     width: usize,
     count: usize,
+    /// The columns of the widest row.
+    widest: usize,
+    /// The text's lines: its line breaks and one.
+    lines: usize,
     marks: Vec<usize>,
 }
 
 impl Rows {
-    /// The rows of `text` at `width` columns (0 counts as 1): one pass over the text.
-    pub fn new(text: &str, width: usize, columns: &Columns) -> Rows {
-        let width = width.max(1);
-        let mut rows = Rows { width, count: 0, marks: Vec::new() };
+    /// The rows of `text` as `wrap` cuts them (`Wrap::At(0)` counts as 1): one pass over the text.
+    pub fn new(text: &str, wrap: Wrap, columns: &Columns) -> Rows {
+        let wrap = match wrap {
+            Wrap::At(w) => Wrap::At(w.max(1)),
+            Wrap::Lines => Wrap::Lines,
+        };
+        let mut rows = Rows { wrap, width: wrap.width(), count: 0, widest: 0, lines: 0, marks: Vec::new() };
         let mut start = 0;
         loop {
+            rows.lines += 1;
             let end = next_break(text, start);
             rows.line(text, start..end.unwrap_or(text.len()), columns);
             match end {
@@ -224,6 +290,7 @@ impl Rows {
         let line = text.get(line).unwrap_or_default();
         // ASCII without a tab: a column a byte.
         if line.is_ascii() && !line.as_bytes().contains(&b'\t') {
+            self.widest = self.widest.max(line.len().min(self.width));
             let mut at = 0;
             loop {
                 self.push(start + at);
@@ -241,11 +308,13 @@ impl Rows {
             match used {
                 Some(u) if u.saturating_add(w) <= self.width => used = Some(u + w),
                 _ => {
+                    self.widest = self.widest.max(used.unwrap_or(0));
                     self.push(start + i);
                     used = Some(w);
                 }
             }
         }
+        self.widest = self.widest.max(used.unwrap_or(0));
     }
 
     fn push(&mut self, at: usize) {
@@ -259,8 +328,18 @@ impl Rows {
         self.count
     }
 
-    pub fn width(&self) -> usize {
-        self.width
+    /// How the rows were cut.
+    pub fn wrap(&self) -> Wrap {
+        self.wrap
+    }
+
+    /// The columns of the widest row.
+    pub fn widest(&self) -> usize {
+        self.widest
+    }
+
+    pub fn lines(&self) -> usize {
+        self.lines
     }
 
     /// The bytes of row `row` of `text` (the text the rows were made of, with the same columns),
@@ -353,13 +432,7 @@ pub fn note(view: &ValueView) -> Option<String> {
 
 // ---- colours ------------------------------------------------------------------------------------
 
-/// A coloured token of a JSON text: its bytes (the text is at most 10 MiB) and what it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub start: u32,
-    pub end: u32,
-    pub token: JsonToken,
-}
+pub use crate::components::value::Span;
 
 /// The tokens `json::highlight` finds in `text`, without the punctuation (the colour of
 /// everything between tokens), in order.
@@ -544,6 +617,8 @@ pub struct PanelState {
     worker: Option<ColourWorker>,
     /// The panel's edge is being dragged: the text keeps its rows until it is let go.
     holding_rows: bool,
+    /// COPY copied the value shown: it reads ✓ COPIED until then, on egui's clock.
+    copied_until: Option<f64>,
 }
 
 /// Leaves the value out: it is a cell's.
@@ -561,6 +636,7 @@ impl PanelState {
     pub fn clear(&mut self) {
         self.doc = None;
         self.selection = None;
+        self.copied_until = None;
     }
 
     /// Ends the selection.
@@ -602,11 +678,11 @@ impl PanelState {
         }
     }
 
-    /// Makes it show `view` wrapped at `width` columns, `change` being how it differs from the
-    /// value shown: another text starts afresh (no selection, at its top, its colours to work
-    /// out), the same text in another view keeps all that; a new width wraps it again, unless
-    /// the rows are held.
-    fn prepare(&mut self, view: &Arc<ValueView>, width: usize, change: Change) {
+    /// Makes it show `view` cut into rows as `wrap` says, `change` being how it differs from the
+    /// value shown: another text starts afresh (no selection, at its top and left, its colours to
+    /// work out), the same text in another view keeps all that; a new width wraps it again,
+    /// unless the rows are held; WRAP turned on or off cuts it again.
+    fn prepare(&mut self, view: &Arc<ValueView>, wrap: Wrap, change: Change) {
         let columns = self.columns.get_or_insert_with(|| Columns::new(4));
         match (change, self.doc.as_mut()) {
             (Change::None, Some(_)) => {}
@@ -618,45 +694,86 @@ impl PanelState {
             }
             _ => {
                 self.selection = None;
-                let rows = Rows::new(&view.text, width, columns);
+                self.copied_until = None;
+                let rows = Rows::new(&view.text, wrap, columns);
                 let colours = colours_of(view, &mut self.worker);
                 self.doc = Some(Doc { view: Arc::clone(view), rows, colours, fresh: true });
                 return;
             }
         }
-        if let Some(doc) = self.doc.as_mut()
-            && doc.rows.width() != width.max(1)
-            && !self.holding_rows
-        {
-            doc.rows = Rows::new(&doc.view.text, width, columns);
+        let Some(doc) = self.doc.as_mut() else { return };
+        let again = match (doc.rows.wrap(), wrap) {
+            (Wrap::At(a), Wrap::At(b)) => a != b.max(1) && !self.holding_rows,
+            (a, b) => a != b,
+        };
+        if again {
+            doc.rows = Rows::new(&doc.view.text, wrap, columns);
         }
     }
 }
 
 // ---- the panel ----------------------------------------------------------------------------------
 
-/// The width the panel starts at in a window `window` wide: [`DEFAULT_WIDTH`], less in a narrow
-/// window (about a quarter of it), so the table tab keeps room for its filter row.
-pub fn start_width(window: f32) -> f32 {
-    if window.is_finite() { (window * 0.27).clamp(MIN_WIDTH, DEFAULT_WIDTH) } else { DEFAULT_WIDTH }
+/// Where the panel stands this frame ([`reserve`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Placed {
+    /// The panel's left edge, its line included: the results end there.
+    pub left: f32,
+    /// Where its contents go ([`fill`]).
+    pub contents: Rect,
 }
 
-/// Before the tab's body: the panel's place at the right, when it shows. Returns where its
-/// contents go ([`fill`] draws them once the body has run).
-pub(crate) fn reserve(app: &DbeeApp, ui: &mut egui::Ui) -> Option<Rect> {
-    if !app.view.value_panel {
+/// What the bars' toggle says while the panel has no room beside the results.
+pub(crate) const TOO_NARROW: &str = "Value panel: not now, the window is too narrow";
+
+/// Tags the toggle `r` a bar drew as [`TOGGLE`] (value: whether the panel is asked for), with its
+/// hover; off while the panel has no room (`narrow`), saying why.
+pub(crate) fn tag_toggle(tags: &mut Tags, r: Response, open: bool, narrow: bool) {
+    let r = if narrow { r.hint_disabled(TOO_NARROW) } else { r.hint(if open { "Hide the value panel" } else { "Show the value panel" }) };
+    tags.tag_value(TOGGLE, &r, open);
+}
+
+/// Whether the panel has room in a results area `width` wide: the results keep
+/// [`RESULTS_MIN_W`], and the panel can be made no narrower than [`MIN_WIDTH`].
+pub(crate) fn has_room(width: f32) -> bool {
+    width - RESULTS_MIN_W >= MIN_WIDTH
+}
+
+/// Before the tab's grid: the panel's place at the right of `area` (the tab's results), when it
+/// shows (`open`) and has room ([`has_room`]). It is as wide as it was made (it starts
+/// [`VALUE_PANEL_W`]), but never so wide that the results keep less than [`RESULTS_MIN_W`]; that
+/// cap leaves its own width as it was, so it comes back at it once there is room. [`fill`] draws
+/// its contents once the grid has run; the results take the rest of `area`, left of
+/// [`Placed::left`].
+pub(crate) fn reserve(open: bool, ui: &mut egui::Ui, area: Rect) -> Option<Placed> {
+    if !open || !has_room(area.width()) {
         return None;
     }
-    let frame = Frame::new().fill(TOKENS.panel);
-    let start = start_width(ui.ctx().content_rect().width());
-    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(start).size_range(MIN_WIDTH..=MAX_WIDTH).frame(frame);
-    let out = panel.show(ui, |ui| {
+    let most = (area.width() - RESULTS_MIN_W).min(MAX_WIDTH);
+    let ctx = ui.ctx().clone();
+    let own_id = panel_id().with("own");
+    let own = ctx.data(|d| d.get_temp::<f32>(own_id)).unwrap_or(VALUE_PANEL_W);
+    let given = own.clamp(MIN_WIDTH, most);
+    // egui keeps the size it drew last; it is told the one this frame gives.
+    let at = Rect::from_min_max(pos2(area.right() - given, area.top()), area.max);
+    ctx.data_mut(|d| d.insert_persisted(panel_id(), egui::PanelState { outer_rect: at }));
+    let mut room = ui.new_child(UiBuilder::new().id_salt("dbee-value-room").max_rect(area).layout(Layout::top_down(Align::Min)));
+    room.set_clip_rect(area.intersect(ui.clip_rect()));
+    // The ground is the panel's own ([`fill`]); egui draws the line down its left edge, which
+    // lights while it is dragged.
+    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(given).size_range(MIN_WIDTH..=most).frame(Frame::NONE);
+    let out = panel.show(&mut room, |ui| {
         // The whole width: the panel keeps the size its contents take.
         let rect = ui.max_rect();
         ui.expand_to_include_rect(rect);
         rect
     });
-    Some(out.inner)
+    let drawn = out.response.rect.width();
+    // A width other than the one given is a drag: it is the panel's own from now on.
+    if (drawn - given).abs() > 0.5 {
+        ctx.data_mut(|d| d.insert_temp(own_id, drawn));
+    }
+    Some(Placed { left: out.response.rect.left().max(area.left()), contents: out.inner })
 }
 
 /// The panel's id, egui's for its size.
@@ -664,29 +781,110 @@ fn panel_id() -> Id {
     Id::new("dbee-value-panel")
 }
 
-/// After the tab's body: the panel's contents in `rect`, for the value the session shows now.
+/// After the tab's body: the panel's contents in `rect`, for the value the session shows now;
+/// COPY as `value.copy` allows, running `clipboard.copyValue` when pressed.
 pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
+    let active = app.session.state().active;
+    if app.view.work.editor.as_ref().is_some_and(|e| Some(e.tab) == active) {
+        editing(app, ui, rect);
+        return;
+    }
     let view = app.session.value_view_shared();
+    let now = ui.ctx().input(|i| i.time);
+    let why = app.session.enabled("value.copy").err();
     let DbeeApp { view: v, tags, .. } = app;
+    let wrap = v.value_wrap;
+    let copied = match v.panel.copied_until {
+        Some(until) if now < until => {
+            ui.ctx().request_repaint_after(Duration::try_from_secs_f64(until - now).unwrap_or(Duration::ZERO));
+            true
+        }
+        _ => {
+            v.panel.copied_until = None;
+            false
+        }
+    };
+    let hover = match (&why, view.as_ref().is_some_and(|v| v.row.is_some())) {
+        (Some(why), _) => format!("Copy the value: not now, {why}"),
+        (None, true) => COPY_ROW_HOVER.to_owned(),
+        (None, false) => COPY_HOVER.to_owned(),
+    };
+    let copy = CopyButton { enabled: why.is_none(), copied, hover: &hover };
     // egui's resize handle of a panel is its id with `__resize`: while it is dragged the text
     // keeps its rows, and wraps again once it is let go.
     v.panel.hold_rows(ui.ctx().is_being_dragged(panel_id().with("__resize")));
     let mut child = ui.new_child(UiBuilder::new().id_salt("dbee-value-contents").max_rect(rect).layout(Layout::top_down(Align::Min)));
-    contents(&mut child, view.as_ref(), &mut v.panel, tags);
+    let pressed = show(&mut child, view.as_ref(), &mut v.panel, tags, copy, why.as_deref(), wrap);
+    if pressed.wrap
+        && let Err(e) = app.run("ui.toggleValueWrap", json!({}))
+    {
+        app.notice(Kind::Error, crate::app::notice_text(&e));
+    }
+    if pressed.copy {
+        match app.run("clipboard.copyValue", json!({})) {
+            Ok(_) => app.view.panel.copied_until = Some(now + COPIED_FOR),
+            Err(e) => app.notice(Kind::Error, crate::app::notice_text(&e)),
+        }
+    }
 }
 
-/// The toggle at the right end of the status bar; true when it was clicked.
-pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
-    let t = TOKENS;
-    let (rect, r) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
-    if r.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), t.hover);
+/// The facts of text being edited: its lines and bytes, counted as it is typed.
+fn live_facts(text: &str) -> Facts {
+    Facts { lines: text.bytes().filter(|&b| b == b'\n').count().saturating_add(1), bytes: text.len(), formatted: false, whole: None }
+}
+
+/// [`fill`] while a cell editor is open on the tab: the bar names the column, CANCEL and SAVE at
+/// its right; the editor's draft in the value's box, the same text its cell holds; the live facts
+/// at the foot. No COPY,
+/// WRAP or `value-text`; CANCEL and SAVE act once the frame has drawn, as the editor's keys do.
+fn editing(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
+    // The value view names the column and its type (the editor's cell is the selection's focus).
+    let view = app.session.value_view_shared();
+    let DbeeApp { view: v, tags, .. } = app;
+    let wrap = v.value_wrap;
+    let Some(ed) = v.work.editor.as_mut() else { return };
+    let mut child = ui.new_child(UiBuilder::new().id_salt("dbee-value-contents").max_rect(rect).layout(Layout::top_down(Align::Min)));
+    let full = child.max_rect();
+    let panel = child.interact(full, child.id().with("dbee-value-panel"), Sense::hover());
+    let before = live_facts(&ed.text);
+    let (title, ty) = view.as_ref().map(|v| (v.title(), v.type_label.clone())).unwrap_or_default();
+    let look = Panel { state: State::Editing, title: &title, ty: &ty, facts: Some(before), buttons: true, copy: CopyButton::ON, wrap, edge: false };
+    let shown = look.show(&mut child, full);
+    // A press on the panel, its resize edge included, leaves the editor open.
+    let grab = child.style().interaction.resize_grab_radius_side;
+    let whole = Rect::from_min_max(pos2(full.left() - grab, full.top()), full.max);
+    editors::show_in_panel(&mut child, ed, shown.text, whole, wrap, tags);
+    // The facts were drawn before this frame's typing went in: the next frame shows it.
+    let facts = live_facts(&ed.text);
+    if facts != before {
+        ui.ctx().request_repaint();
     }
-    let colour = if open { t.accent } else { t.text_muted };
-    icons::side_panel(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), colour, open);
-    let r = r.on_hover_text(if open { "Hide the value panel" } else { "Show the value panel" });
-    tags.tag_value(TOGGLE, &r, open);
-    r.clicked()
+    if let Some(r) = &shown.cancel {
+        tags.tag_value(CANCEL, r, "Cancel");
+        if r.clicked() {
+            ed.ask(EditorKey::Cancel);
+        }
+    }
+    if let Some(r) = &shown.save {
+        tags.tag_value(SAVE, r, "Save");
+        if r.clicked() {
+            ed.ask(EditorKey::Commit);
+        }
+    }
+    let head = json!({
+        "column": view.as_ref().map(|v| v.column.clone()),
+        "row": view.as_ref().and_then(|v| v.row),
+        "type": ty,
+        "label": view.as_ref().map(|v| v.kind_label.clone()).filter(|l| !l.is_empty()),
+        "null": view.as_ref().is_some_and(|v| v.is_null),
+        "bytes": view.as_ref().map_or(0, |v| v.byte_len),
+        "truncated": view.as_ref().is_some_and(|v| v.truncated),
+        "note": view.as_ref().and_then(|v| note(v)),
+        "facts": facts.words().join(" "),
+        "wrap": wrap,
+        "editing": true,
+    });
+    tags.tag_value(PANEL, &panel, head);
 }
 
 /// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
@@ -694,7 +892,8 @@ pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
 /// while the panel has the keyboard, so is Ctrl+A.
 pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
     // A hidden panel has no selection, and asks for no value view (one can be 10 MiB to build).
-    if !app.view.value_panel || app.session.state().screen != Screen::Workspace {
+    // Nor one out of sight behind a table tab's STRUCTURE.
+    if !app.view.value_panel || app.session.state().screen != Screen::Workspace || shortcuts::grid_unseen(app) {
         app.view.panel.clear_selection();
         return;
     }
@@ -725,115 +924,159 @@ pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
     }
 }
 
-/// The panel's contents for `view` (`None`: no cell is selected), in all of `ui`.
-pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut PanelState, tags: &mut Tags) {
-    let t = TOKENS;
+/// The panel's contents for `view` (`None`: no cell is selected), in all of `ui`, COPY on, the
+/// text wrapped when `wrap`.
+pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut PanelState, tags: &mut Tags, wrap: bool) {
+    show(ui, view, state, tags, CopyButton::ON, None, wrap);
+}
+
+/// What was pressed in the panel's bar.
+#[derive(Clone, Copy, Debug, Default)]
+struct Pressed {
+    copy: bool,
+    wrap: bool,
+}
+
+/// Tags COPY's response: its word, and why it is off.
+fn tag_copy(tags: &mut Tags, r: Option<&Response>, copied: bool, why: Option<&str>) {
+    if let Some(r) = r {
+        let mut value = json!({ "label": if copied { "Copied" } else { "Copy" } });
+        if let Some(why) = why {
+            value["why"] = json!(why);
+        }
+        tags.tag_value(COPY, r, value);
+    }
+}
+
+/// Tags WRAP's response: whether it is on; whether it was pressed.
+fn tag_wrap(tags: &mut Tags, r: Option<&Response>, on: bool) -> bool {
+    r.is_some_and(|r| {
+        tags.tag_value(WRAP, r, on);
+        r.clicked()
+    })
+}
+
+/// [`contents`] with COPY as `copy` says (`why`: the reason it is off, for its tag) and WRAP on
+/// when `wrap`; what was pressed.
+fn show(
+    ui: &mut egui::Ui,
+    view: Option<&Arc<ValueView>>,
+    state: &mut PanelState,
+    tags: &mut Tags,
+    copy: CopyButton<'_>,
+    why: Option<&str>,
+    wrap: bool,
+) -> Pressed {
     let full = ui.max_rect();
     let panel = ui.interact(full, ui.id().with("dbee-value-panel"), Sense::hover());
-    let mut ui = ui.new_child(UiBuilder::new().max_rect(full.shrink(MARGIN)).layout(Layout::top_down(Align::Min)));
+    // egui draws its left line.
+    let shell = |shows: State| Panel { state: shows, title: "", ty: "", facts: None, buttons: true, copy, wrap, edge: false };
     let Some(view) = view else {
         state.clear();
+        let shown = shell(State::NoCell).show(ui, full);
+        tag_copy(tags, shown.copy.as_ref(), false, Some(why.unwrap_or(dbee_engine::cmd::selection::NOTHING_SELECTED)));
+        let wrap = tag_wrap(tags, shown.wrap.as_ref(), wrap);
         tags.tag_value(PANEL, &panel, Json::Null);
-        ui.add_space(full.height() * 0.3);
-        ui.vertical_centered(|ui| {
-            ui.add(Label::new(RichText::new("No cell is selected").size(14.0).color(t.text_muted)));
-            ui.add_space(4.0);
-            ui.add(Label::new(RichText::new("Select a cell to see its whole value here.").size(12.0).color(t.text_muted)).wrap());
-        });
-        return;
+        return Pressed { copy: false, wrap };
     };
-    header(&mut ui, view);
+    let shows = if view.row.is_some() {
+        State::Row
+    } else if view.is_null {
+        State::Null
+    } else if view.text.is_empty() {
+        State::Empty
+    } else if coloured(view) {
+        State::Json
+    } else {
+        State::Text
+    };
+    // The rows before the panel is drawn, for the facts; the value's box is as wide as the panel.
+    let glyph = if matches!(shows, State::Json | State::Text | State::Row) {
+        Some(rows(ui, view, state, full.width(), wrap))
+    } else {
+        state.clear();
+        None
+    };
+    let facts = state.doc.as_ref().filter(|_| glyph.is_some()).map(|d| Facts {
+        lines: d.rows.lines(),
+        bytes: if view.truncated { view.text.len() } else { view.byte_len },
+        formatted: view.formatted,
+        whole: view.truncated.then_some(view.byte_len),
+    });
     let note = note(view);
-    if let Some(n) = &note {
-        ui.add_space(2.0);
-        ui.add(Label::new(RichText::new(n.as_str()).size(12.0).color(t.text_muted)).wrap());
+    let title = view.title();
+    let look = Panel { title: &title, ty: &view.type_label, facts, ..shell(shows) };
+    let shown = look.show(ui, full);
+    let pressed = Pressed { copy: shown.copy.as_ref().is_some_and(Response::clicked), wrap: tag_wrap(tags, shown.wrap.as_ref(), wrap) };
+    tag_copy(tags, shown.copy.as_ref(), copy.copied, why);
+    match glyph {
+        Some(glyph) => body(ui, &shown, view, state, tags, glyph),
+        None => {
+            // NULL or empty: the component's word where the text would be, nothing to select.
+            let r = ui.interact(reach(ui, shown.text), text_id(), Sense::hover());
+            tag_text(tags, &r, view, None, false, usize::from(!view.is_null), (0, 0));
+        }
     }
-    ui.add_space(6.0);
-    body(&mut ui, view, state, tags);
     let label = (!view.kind_label.is_empty()).then_some(view.kind_label.as_str());
     let head = json!({
         "column": view.column,
+        "row": view.row,
         "type": view.type_label,
         "label": label,
         "null": view.is_null,
         "bytes": view.byte_len,
         "truncated": view.truncated,
         "note": note,
+        "facts": facts.map(|f| f.words().join(" ")),
+        "wrap": wrap,
+        "editing": false,
     });
     tags.tag_value(PANEL, &panel, head);
+    pressed
 }
 
-/// The column's name and type, and the JSON label when one applies.
-fn header(ui: &mut egui::Ui, view: &ValueView) {
-    let t = TOKENS;
-    let width = ui.available_width();
-    let name = line_galley(ui, &view.column, FontId::proportional(14.0), t.text, width * 0.7);
-    let name_w = name.size().x;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
-    ui.painter().galley(pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, t.text);
-    let left = rect.left() + name_w + 8.0;
-    if rect.right() - left > 12.0 {
-        let ty = line_galley(ui, &view.type_label, FontId::proportional(12.0), t.text_muted, rect.right() - left);
-        ui.painter().galley(pos2(left, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
-    }
-    if !view.kind_label.is_empty() {
-        ui.add_space(2.0);
-        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
-        let (pill, _) = ui.allocate_exact_size(vec2(label.size().x + 12.0, 18.0), Sense::hover());
-        ui.painter().rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.selection);
-        ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.accent);
-    }
+/// The part of the text's box `area` the pointer reaches: all of it but the strip at the panel's
+/// left edge that egui's resize handle is grabbed by.
+fn reach(ui: &egui::Ui, area: Rect) -> Rect {
+    let grab = ui.style().interaction.resize_grab_radius_side;
+    Rect::from_min_max(pos2((area.left() + grab).min(area.right()), area.top()), area.max)
 }
 
-/// A dim, italic word in the text's box where there is no text (NULL, an empty value).
-fn placeholder(ui: &mut egui::Ui, area: Rect, word: &str) -> Response {
-    let t = TOKENS;
-    let format = TextFormat { font_id: FontId::monospace(FONT_SIZE), color: t.text_muted, italics: true, ..TextFormat::default() };
-    let galley = ui.painter().layout_job(LayoutJob::single_section(word.to_string(), format));
-    // Where the first row of text would be.
-    ui.painter().galley(pos2(area.left() + PAD, area.top() + (LINE_H - galley.size().y) / 2.0), galley, t.text_muted);
-    ui.interact(area, text_id(), Sense::hover())
+/// Tags the text's box: the start of `view`'s text, the selection, whether its colours show, its
+/// rows, and the first row and column in view.
+fn tag_text(
+    tags: &mut Tags,
+    r: &Response,
+    view: &ValueView,
+    selection: Option<Range<usize>>,
+    highlighted: bool,
+    rows: usize,
+    (first, column): (usize, usize),
+) {
+    let shown = cut(&view.text, TAG_BYTES);
+    let value = json!({
+        "text": shown,
+        "cut": shown.len() < view.text.len(),
+        "selection": selection.map(|s| [s.start, s.end]),
+        "highlighted": highlighted,
+        "rows": rows,
+        "firstRow": first,
+        "firstColumn": column,
+    });
+    tags.tag_value(TEXT, r, value);
 }
 
-/// One row as it is drawn.
-struct Drawn {
-    range: Range<usize>,
-    galley: Arc<Galley>,
-    /// The top of the row, in window points.
-    top: f32,
-}
-
-/// The text's box: the rows in view, the selection, and the pointer's part in it.
-fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: &mut Tags) {
-    let t = TOKENS;
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().rect(rect, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    let area = rect.shrink(1.0);
-    let mut tag = |resp: &Response, selection: Option<Range<usize>>, highlighted: bool, rows: usize, first: usize| {
-        let shown = cut(&view.text, TAG_BYTES);
-        let value = json!({
-            "text": shown,
-            "cut": shown.len() < view.text.len(),
-            "selection": selection.map(|s| [s.start, s.end]),
-            "highlighted": highlighted,
-            "rows": rows,
-            "firstRow": first,
-        });
-        tags.tag_value(TEXT, resp, value);
-    };
-    if view.is_null || view.text.is_empty() {
-        state.clear();
-        let r = placeholder(ui, area, if view.is_null { "NULL" } else { "empty" });
-        tag(&r, None, false, usize::from(!view.is_null), 0);
-        return;
-    }
-    let font = FontId::monospace(FONT_SIZE);
+/// Makes the state show `view`'s text in a box `width` wide, wrapped at its width when `wrap`,
+/// else only at line breaks: its characters measured in columns, its rows and colours ready.
+/// Returns a column's width (an `x`'s).
+fn rows(ui: &egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, width: f32, wrap: bool) -> f32 {
+    let font = Text::Code.font();
     let change = state.change(view);
     // An `x`'s width is a column; a new text's characters are measured in columns.
     let known = &mut state.columns;
     let glyph = ui.fonts_mut(|f| {
         let x = f.glyph_width(&font, 'x');
-        let x = if x.is_finite() && x > 0.0 { x } else { FONT_SIZE * 0.6 };
+        let x = if x.is_finite() && x > 0.0 { x } else { font.size * 0.6 };
         let columns = known.get_or_insert_with(|| {
             let tab = f.glyph_width(&font, '\t') / x;
             Columns::new(if tab > 0.0 { usize::from(whole_columns(tab)) } else { 4 })
@@ -847,8 +1090,23 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
         }
         x
     });
-    let width = ((area.width() - 2.0 * PAD - BAR_ROOM) / glyph).floor().max(1.0) as usize;
-    state.prepare(view, width, change);
+    let columns = ((width - 2.0 * PAD - BAR_ROOM) / glyph).floor().max(1.0) as usize;
+    state.prepare(view, if wrap { Wrap::At(columns) } else { Wrap::Lines }, change);
+    glyph
+}
+
+/// One row as it is drawn.
+struct Drawn {
+    range: Range<usize>,
+    galley: Arc<Galley>,
+    /// The top of the row, in window points.
+    top: f32,
+}
+
+/// The text's box ([`Shown::text`]): the rows in view, the selection, and the pointer's part in it.
+fn body(ui: &mut egui::Ui, shown: &Shown, view: &Arc<ValueView>, state: &mut PanelState, tags: &mut Tags, glyph: f32) {
+    let t = theme::tokens(ui.ctx());
+    let area = shown.text;
     let PanelState { doc, selection, columns, worker, .. } = state;
     let (Some(doc), Some(columns)) = (doc.as_mut(), columns.as_ref()) else { return };
     doc.colours.poll(worker.as_ref());
@@ -857,35 +1115,49 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
     }
     let text = doc.view.text.as_str();
     let total = doc.rows.count();
-    let palette = syntax(ui.visuals().dark_mode);
-    let mut scroll = ScrollArea::vertical()
+    let spans = match &doc.colours {
+        Colours::Ready(spans) => Some(spans.as_slice()),
+        _ => None,
+    };
+    // WRAP off: the text scrolls sideways too, as wide as its widest row (and room for the
+    // scroll bars at its right and bottom).
+    let sideways = doc.rows.wrap() == Wrap::Lines;
+    let (wide, tall) = if sideways {
+        (area.width().max(doc.rows.widest() as f32 * glyph + 2.0 * PAD + BAR_ROOM), total as f32 * LINE_H + BAR_ROOM)
+    } else {
+        (area.width(), total as f32 * LINE_H)
+    };
+    let mut scroll = (if sideways { ScrollArea::both() } else { ScrollArea::vertical().horizontal_scroll_offset(0.0) })
         .id_salt("dbee-value-scroll")
         .auto_shrink([false, false])
         .scroll_source(ScrollSource { drag: DragScroll::Never, ..ScrollSource::default() });
     if doc.fresh {
         doc.fresh = false;
-        scroll = scroll.vertical_scroll_offset(0.0);
+        scroll = scroll.vertical_scroll_offset(0.0).horizontal_scroll_offset(0.0);
     }
     let mut inner = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
     let out = scroll.show_viewport(&mut inner, |ui, viewport| {
-        ui.set_min_size(vec2(area.width(), total as f32 * LINE_H));
+        ui.set_min_size(vec2(wide, tall));
         // The rows in view, and where each is drawn (from the area's top, in f64: a row far down
         // is millions of points into the content).
         let first = ((viewport.min.y / LINE_H).floor().max(0.0) as usize).min(total.saturating_sub(1));
         let last = ((viewport.max.y / LINE_H).ceil().max(0.0) as usize).clamp(first.saturating_add(1), total);
         let top_of = |row: usize| area.top() + (row as f64 * f64::from(LINE_H) - f64::from(viewport.min.y)) as f32;
-        let left = area.left() + PAD;
+        // Scrolled sideways, the rows start left of the box.
+        let shift = if sideways { viewport.min.x.max(0.0) } else { 0.0 };
+        let column = if sideways && glyph > 0.0 { (shift / glyph).floor() as usize } else { 0 };
+        let left = area.left() + PAD - shift;
         let rows: Vec<Drawn> = doc
             .rows
             .ranges(text, first, last - first, columns)
             .into_iter()
             .enumerate()
             .map(|(i, range)| {
-                let galley = ui.painter().layout_job(row_job(text, range.clone(), &doc.colours, &font, t.text, palette));
+                let galley = ui.painter().layout_job(value::row_job(text, range.clone(), spans, t));
                 Drawn { range, galley, top: top_of(first + i) }
             })
             .collect();
-        let resp = ui.interact(area, text_id(), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Text);
+        let resp = ui.interact(reach(ui, area), text_id(), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Text);
         // The byte under `p`: the row it is over (the first or last in view past the ends), then
         // the character.
         let caret = |p: Pos2| -> usize {
@@ -910,10 +1182,17 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
                 if let Some((anchor, _)) = *selection {
                     *selection = Some((anchor, at));
                 }
-                // Past the top or the bottom: scroll on, and the selection with it.
+                // Past the top or the bottom (or, scrolling sideways, the left or the right):
+                // scroll on, and the selection with it.
                 let past = if p.y < area.top() { area.top() - p.y } else { (area.bottom() - p.y).min(0.0) };
-                if past != 0.0 {
-                    ui.scroll_with_delta_animation(vec2(0.0, past.clamp(-DRAG_SCROLL, DRAG_SCROLL)), egui::style::ScrollAnimation::none());
+                let past_x = match sideways {
+                    true if p.x < area.left() => area.left() - p.x,
+                    true => (area.right() - BAR_ROOM - p.x).min(0.0),
+                    false => 0.0,
+                };
+                if past != 0.0 || past_x != 0.0 {
+                    let delta = vec2(past_x.clamp(-DRAG_SCROLL, DRAG_SCROLL), past.clamp(-DRAG_SCROLL, DRAG_SCROLL));
+                    ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
                     ui.ctx().request_repaint();
                 }
             }
@@ -941,57 +1220,24 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
                     x1 += glyph * 0.6;
                 }
                 let r = Rect::from_min_max(pos2(x0, row.top), pos2(x1, row.top + LINE_H));
-                ui.painter().rect_filled(r, CornerRadius::ZERO, t.selection);
+                ui.painter().rect_filled(r, CornerRadius::ZERO, t.text_selection);
             }
         }
         for row in rows {
             let y = row.top + (LINE_H - row.galley.size().y) / 2.0;
             ui.painter().galley(pos2(left, y), row.galley, t.text);
         }
-        (resp, first)
+        (resp, (first, column))
     });
     let (resp, first) = out.inner;
     // A press anywhere but the text's box ends the selection and gives the keyboard back.
-    let elsewhere = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::PointerButton { pressed: true, pos, .. } if !rect.contains(*pos))));
+    let elsewhere = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::PointerButton { pressed: true, pos, .. } if !shown.body.contains(*pos))));
     if elsewhere {
         *selection = None;
         ui.memory_mut(|m| m.surrender_focus(text_id()));
     }
-    let shown = selection.map(|(a, b)| a.min(b)..a.max(b)).filter(|r| !r.is_empty());
-    tag(&resp, shown, matches!(doc.colours, Colours::Ready(_)), total, first);
-}
-
-/// The layout of row `range` of `text`: the JSON colours over it when it has them, else one
-/// colour; never wrapped (the row is as long as fits).
-fn row_job(text: &str, range: Range<usize>, colours: &Colours, font: &FontId, plain: Color32, palette: Syntax) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
-    let mut add = |from: usize, to: usize, color: Color32| {
-        if let Some(s) = text.get(from..to).filter(|s| !s.is_empty()) {
-            job.append(s, 0.0, TextFormat::simple(font.clone(), color));
-        }
-    };
-    let Colours::Ready(spans) = colours else {
-        add(range.start, range.end, plain);
-        return job;
-    };
-    let mut at = range.start;
-    let from = spans.partition_point(|s| s.end as usize <= range.start);
-    for s in spans.get(from..).unwrap_or_default().iter().take_while(|s| (s.start as usize) < range.end) {
-        let (a, b) = ((s.start as usize).max(range.start), (s.end as usize).min(range.end));
-        add(at, a, palette.punct);
-        let colour = match s.token {
-            JsonToken::Key => palette.key,
-            JsonToken::String => palette.string,
-            JsonToken::Number => palette.number,
-            JsonToken::Literal => palette.literal,
-            JsonToken::Punct => palette.punct,
-        };
-        add(a, b, colour);
-        at = b;
-    }
-    add(at, range.end, palette.punct);
-    job
+    let selected = selection.map(|(a, b)| a.min(b)..a.max(b)).filter(|r| !r.is_empty());
+    tag_text(tags, &resp, view, selected, matches!(doc.colours, Colours::Ready(_)), total, first);
 }
 
 #[cfg(test)]
@@ -1022,7 +1268,7 @@ mod tests {
     /// The rows of `text` at `width`, one column a character, as text.
     fn rows_of(text: &str, width: usize) -> Vec<String> {
         let cols = plain(text);
-        let rows = Rows::new(text, width, &cols);
+        let rows = Rows::new(text, Wrap::At(width), &cols);
         (0..rows.count()).map(|r| text[rows.range(text, r, &cols).unwrap()].to_string()).collect()
     }
 
@@ -1051,7 +1297,7 @@ mod tests {
         assert_eq!(rows_of("\n\n", 3), ["", "", ""]);
         assert_eq!(rows_of("äöüõx", 2), ["äö", "üõ", "x"], "characters, not bytes");
         assert_eq!(rows_of("ab", 0), ["a", "b"], "a width of 0 counts as 1");
-        let rows = Rows::new("abc", 3, &plain("abc"));
+        let rows = Rows::new("abc", Wrap::At(3), &plain("abc"));
         assert_eq!((rows.count(), rows.range("abc", 1, &plain("abc"))), (1, None));
     }
 
@@ -1071,7 +1317,7 @@ mod tests {
             assert_eq!(rows_of(&text, width), want, "width {width}");
             // From any row on, as many as asked for.
             let cols = plain(&text);
-            let rows = Rows::new(&text, width, &cols);
+            let rows = Rows::new(&text, Wrap::At(width), &cols);
             for from in [0, 1, 129, want.len() / 2, want.len() - 1] {
                 let got: Vec<&str> = rows.ranges(&text, from, 50, &cols).into_iter().map(|r| &text[r]).collect();
                 let end = (from + 50).min(want.len());
@@ -1117,7 +1363,7 @@ mod tests {
         let cols = test_columns(text);
         assert_eq!((cols.of('\t'), cols.of('a'), cols.of('🐙'), cols.of('中'), cols.of('õ')), (4, 1, 2, 2, 1));
         let rows = |width: usize| -> Vec<String> {
-            let r = Rows::new(text, width, &cols);
+            let r = Rows::new(text, Wrap::At(width), &cols);
             (0..r.count()).map(|i| text[r.range(text, i, &cols).unwrap()].to_string()).collect()
         };
         assert_eq!(rows(5), ["a\t", "b\t", "c", "🐙🐙", "🐙", "中文", "中", "ab", "\t", "\t", "\t", "\t", "õõõõõ", "õ"]);
@@ -1134,10 +1380,52 @@ mod tests {
         }
         let cols = test_columns(&long);
         for width in [1, 6, 33] {
-            let r = Rows::new(&long, width, &cols);
+            let r = Rows::new(&long, Wrap::At(width), &cols);
             let got: Vec<&str> = (0..r.count()).map(|i| &long[r.range(&long, i, &cols).unwrap()]).collect();
             assert_eq!(got, naive_columns(&long, width, |c| cols.of(c)), "width {width}");
         }
+    }
+
+    /// The rows of `text` unwrapped, as text.
+    fn unwrapped(text: &str, cols: &Columns) -> Vec<String> {
+        let r = Rows::new(text, Wrap::Lines, cols);
+        (0..r.count()).map(|i| text[r.range(text, i, cols).unwrap()].to_string()).collect()
+    }
+
+    #[test]
+    fn unwrapped_rows_end_only_at_line_breaks() {
+        // Lines shorter than the guard: rows are the lines, whatever their width.
+        let mut text = String::new();
+        for i in 0..400 {
+            text.push_str(&"\tx🐙中é".repeat(i % 97));
+            text.push('\n');
+        }
+        let cols = test_columns(&text);
+        assert_eq!(unwrapped(&text, &cols), naive_columns(&text, usize::MAX, |c| cols.of(c)));
+        assert_eq!(unwrapped(&text, &cols), naive(&text, usize::MAX), "a row a line");
+        // A line past the guard continues on the next row, every NOWRAP_MAX_COLUMNS columns.
+        let long = "a".repeat(2_500);
+        let lens: Vec<usize> = unwrapped(&long, &plain(&long)).iter().map(String::len).collect();
+        assert_eq!(lens, [1_000, 1_000, 500]);
+        // Tabs and CJK count their columns: 500 CJK characters are 1,000 columns.
+        let cjk = format!("{}\n{}", "中".repeat(600), "\t".repeat(300));
+        let cols = test_columns(&cjk);
+        let counts: Vec<usize> = unwrapped(&cjk, &cols).iter().map(|r| r.chars().count()).collect();
+        assert_eq!(counts, [500, 100, 250, 50]);
+        // `Wrap::At` is the wrapping it always was.
+        assert_eq!(Rows::new(&long, Wrap::At(7), &plain(&long)).count(), 2_500usize.div_ceil(7));
+    }
+
+    #[test]
+    fn widest_is_the_longest_rows_columns() {
+        let text = "ab\n\t中x\nabcdef\n";
+        let cols = test_columns(text);
+        assert_eq!(Rows::new(text, Wrap::Lines, &cols).widest(), 7, "a tab 4, 中 2, x 1");
+        assert_eq!(Rows::new(text, Wrap::At(3), &cols).widest(), 4, "a tab alone is wider than a row of 3");
+        assert_eq!(Rows::new("abcdefg", Wrap::At(3), &plain("abcdefg")).widest(), 3);
+        assert_eq!(Rows::new("", Wrap::Lines, &plain("")).widest(), 0);
+        let long = "a".repeat(2_500);
+        assert_eq!(Rows::new(&long, Wrap::Lines, &plain(&long)).widest(), NOWRAP_MAX_COLUMNS);
     }
 
     #[test]
@@ -1181,7 +1469,7 @@ mod tests {
         let text = "0123456789abcdef".repeat(VALUE_VIEW_MAX_BYTES / 16);
         let start = Instant::now();
         let cols = Columns::new(4);
-        let rows = Rows::new(&text, 40, &cols);
+        let rows = Rows::new(&text, Wrap::At(40), &cols);
         assert_eq!(rows.count(), text.len().div_ceil(40));
         let last = rows.count() - 1;
         for _ in 0..100 {
@@ -1202,14 +1490,6 @@ mod tests {
         let took = rows_of_a_long_line();
         println!("rows of a 10 MiB line: {took:?}");
         assert!(took < Duration::from_secs(2), "{took:?}");
-    }
-
-    #[test]
-    fn the_panel_starts_narrower_in_a_narrow_window() {
-        assert_eq!(start_width(1400.0), DEFAULT_WIDTH);
-        assert!((start_width(1100.0) - 297.0).abs() < 0.5, "the app's first window");
-        assert_eq!(start_width(640.0), MIN_WIDTH);
-        assert_eq!(start_width(f32::NAN), DEFAULT_WIDTH);
     }
 
     #[test]
@@ -1247,7 +1527,7 @@ mod tests {
     fn frame(ctx: &egui::Context, state: &mut PanelState, tags: &mut Tags, view: Option<&Arc<ValueView>>) {
         ctx.run_ui(egui::RawInput::default(), |ui| {
             tags.begin_frame();
-            contents(ui, view, state, tags);
+            contents(ui, view, state, tags, true);
         })
         .drop_without_applying_deltas();
     }
@@ -1255,6 +1535,7 @@ mod tests {
     #[test]
     fn a_selection_belongs_to_its_value_and_debug_leaves_the_value_out() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let a = Arc::new(ValueView::new(&col("t", "text"), Some("first secret value")));
         let b = Arc::new(ValueView::new(&col("t", "text"), Some("second")));
@@ -1278,6 +1559,7 @@ mod tests {
     #[test]
     fn small_json_is_coloured_at_once_and_large_json_off_the_frame() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let small = Arc::new(ValueView::new(&col("j", "jsonb"), Some(r#"{"a": [1, 2]}"#)));
         frame(&ctx, &mut state, &mut tags, Some(&small));
@@ -1304,13 +1586,14 @@ mod tests {
     /// `width` wide (two frames: the fonts load in the first), and the text box's rect.
     fn drawn_rows(view: &Arc<ValueView>, width: f32) -> (Vec<f32>, egui::Rect) {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 600.0))), ..Default::default() };
         let mut shapes = Vec::new();
         for _ in 0..2 {
             let mut out = ctx.run_ui(input.clone(), |ui| {
                 tags.begin_frame();
-                contents(ui, Some(view), &mut state, &mut tags);
+                contents(ui, Some(view), &mut state, &mut tags, true);
             });
             shapes = std::mem::take(&mut out.shapes);
             out.drop_without_applying_deltas();
@@ -1352,6 +1635,7 @@ mod tests {
     fn the_same_text_again_keeps_its_colours_and_selection() {
         // A staged edit elsewhere, an undo: the engine builds a new view of the same text.
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let raw = format!("[{}]", vec![r#"{"a": 1, "b": "text"}"#; 40_000].join(","));
         let a = Arc::new(ValueView::new(&col("j", "jsonb"), Some(&raw)));
@@ -1375,6 +1659,7 @@ mod tests {
     #[test]
     fn the_tag_carries_the_start_of_a_long_text() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let long = Arc::new(ValueView::new(&col("t", "text"), Some(&"é".repeat(TAG_BYTES))));
         frame(&ctx, &mut state, &mut tags, Some(&long));

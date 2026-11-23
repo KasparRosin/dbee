@@ -1,6 +1,6 @@
 # dbee-cli
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (the `mcp` command is removed until the server exists)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (checked against `apps/dbee-cli`: a non-UTF-8 argument, no argument, `-V`)
 
 The command-line tool for dbee: run commands, run queries without a window. Today only `version` and `help` exist; everything else is **(planned)** and documented first. M1 (the daily Postgres workflow) left the CLI's commands out on purpose. Until they land, agents and scripts drive dbee through the desktop app's control channel ([`control-protocol.md`](control-protocol.md)), which reaches every command.
 
@@ -12,8 +12,8 @@ cargo run -p dbee-cli -- <subcommand>
 
 | Subcommand | Status | Example |
 |---|---|---|
-| `version` | available | `dbee-cli version` prints `dbee-cli <version>`. |
-| `help` | available | `dbee-cli help` (also `--help`, `-h`) prints the reference and exits 0. |
+| `version` | available | `dbee-cli version` (also `--version`, `-V`) prints `dbee-cli <version>`. |
+| `help` | available | `dbee-cli help` (also `--help`, `-h`, or no argument) prints the usage and exits 0. |
 | `commands [--search X]` | planned | `dbee-cli commands --search export`: every command with id, label, menu path, shortcut, params doc and whether it is enabled. |
 | `describe <id>` | planned | `dbee-cli describe query.run`: one command in full. |
 | `exec <id> k=v…` | planned | `dbee-cli exec connection.open name=demo`: run one command. |
@@ -24,9 +24,9 @@ cargo run -p dbee-cli -- <subcommand>
 
 ## Output and exit codes
 
-- Output is JSON on stdout. Diagnostics go to stderr.
+- The planned subcommands print JSON on stdout (`version` and `help` print plain text). Diagnostics go to stderr.
 - Exit status: **0** ok, **1** the command failed, **2** usage error (unknown subcommand or option, missing argument).
-- Options may appear anywhere. A non-UTF-8 argument is a usage error, never a panic.
+- A non-UTF-8 argument never panics: its invalid bytes are read as U+FFFD, so today it is an unknown subcommand (exit 2).
 - If the reader of stdout closes the pipe early (`dbee-cli commands | head`), the CLI drops the rest of its output but still finishes the work, and the exit status still reports failures.
 - Programmatic calls never open dialogs: a command with empty params runs with defaults or returns an error.
 - Passwords are never printed or put in the journal.

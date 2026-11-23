@@ -26,6 +26,9 @@ getrandom = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
+# The engine logos' paths, filled as egui fills its glyphs; already in the tree through egui, at these versions.
+kurbo = "0.13.1"
+vello_cpu = { version = "0.1.0", default-features = false, features = ["std", "u8_pipeline"] }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
@@ -33,3 +36,6 @@ dbee-testkit = { workspace = true }
 dbee-ssh = { workspace = true }
 dbee-driver = { workspace = true }
 dbee-drivers = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }

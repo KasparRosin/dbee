@@ -125,6 +125,14 @@ pub struct KindInfo {
     pub connection_id_sql: &'static str,
     /// Counts dbee's statements running now whose text holds `marker`.
     running_with_sql: fn(&str) -> String,
+    /// Lists the ids of dbee's connections running a statement whose text holds the marker, one a
+    /// line: the ids `cancel_sql` takes.
+    running_ids_sql: fn(&str) -> String,
+    /// Cancels the statement running on the connection with that id, as another session can.
+    cancel_sql: fn(&str) -> String,
+    /// The server's code and the start of its message for a statement another session cancelled
+    /// ([`TestTarget::cancel_running`]).
+    pub cancel_error: (&'static str, &'static str),
     /// Takes the advisory lock named by the argument until the session's transaction ends (on
     /// MySQL, until the session does), as a [`hold`] runs it.
     take_lock_sql: fn(&str) -> String,
@@ -772,6 +780,20 @@ impl TestTarget {
     /// A query that counts dbee's statements running now whose text holds `marker`.
     pub fn running_with_sql(&self, marker: &str) -> String {
         (self.kind.info().running_with_sql)(marker)
+    }
+
+    /// Cancels, from a session of its own, each of dbee's statements running now whose text holds
+    /// `marker`, as another client can; how many it cancelled. Not on a file, which has no other
+    /// session.
+    pub fn cancel_running(&self, marker: &str) -> Result<usize, String> {
+        let server = self.server().ok_or_else(|| format!("{}: a file has no other session to cancel from", self.name()))?;
+        let info = self.kind.info();
+        let listed = crate::sql(server, &(info.running_ids_sql)(marker))?;
+        let ids: Vec<&str> = listed.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        for id in &ids {
+            crate::sql(server, &(info.cancel_sql)(id))?;
+        }
+        Ok(ids.len())
     }
 
     /// A session of its own ([`hold`]) that holds the advisory lock `key` until dropped, so a

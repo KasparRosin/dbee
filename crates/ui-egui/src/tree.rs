@@ -4,19 +4,41 @@
 //! - User schemas first: the catalog's default schema (Postgres `public`, the database a MySQL
 //!   connection names, SQLite `main`) first and open, or without one the first user schema open,
 //!   the others closed, in the catalog's order. Each lists its tables, views and materialized
-//!   views, each kind with its own icon ([`crate::icons`]). A table's chevron shows its visible
-//!   columns with their types, and a key icon on primary and foreign key columns.
+//!   views, each kind with its own icon. A table's chevron shows its visible columns with their
+//!   types, and a key icon on primary and foreign key columns. Each row is drawn by
+//!   [`TreeRow`].
 //! - The system schemas, those the catalog marks (Postgres's `pg_catalog` and
 //!   `information_schema`, MySQL's `mysql`, `sys`, …), sit in one group at the bottom, closed, and
 //!   each closed inside it.
 //! - The texts name schemas with the engine's word (`Dialect::schema_word`): on MySQL the group
 //!   reads "System databases".
 //! - The filter keeps the tables whose name or `schema.name` contains it, ignoring case; while it
-//!   is typed every schema with a match shows open, the system group too.
+//!   is typed every schema with a match shows open, the system group too. The count over the rows
+//!   says how many tables match (`3 OF 516 TABLES`); with no match it reads `0 TABLES` over an
+//!   empty tree. A catalog with nothing to show says so under the count.
+//! - A schema's, the system group's or a column's name or type cut with `…` reads whole on hover
+//!   (a foreign key's hover names its target after them); a table's hover names it whole already.
 //! - A click selects a table, a double-click opens it ([`TreeAct::Open`]); a click on a schema
 //!   selects it and opens or closes it; a click on the system group opens or closes it. A new
 //!   query tab opens on the selection's schema ([`Tree::selected_schema`]). A selection the
 //!   catalog no longer holds (after a refresh or a reconnect) is forgotten.
+//!
+//! **Right-click menu.** A secondary click on a table, view or materialized view row opens its
+//! menu (the `menu` component): Open (`Enter`, [`TreeAct::Open`]), New query (`Ctrl+T`,
+//! [`TreeAct::NewQuery`], on the row's schema), a separator, Copy name (`Ctrl+C`,
+//! [`TreeAct::CopyName`]). Each act carries the row's own [`TableRef`], never an index. An item
+//! the workspace says can't run ([`MenuState`]) is greyed, with `<Label>: not now, <why>` on
+//! hover, and a click on it runs nothing. The right-click changes neither the selection nor what
+//! is open; the row keeps the `hover` ground while its menu is open, and the menu closes when its
+//! row is no longer drawn. Schema rows, the system group and column rows have no menu.
+//!
+//! **Keys.** Enter on a table row that has the keyboard opens it, as a double-click does (and
+//! selects it); Space stays a click (select). Ctrl+C copies a table's name ([`take_keys`], before
+//! the shortcuts): the open menu's row while a menu is open, else the table row that has the
+//! keyboard. Anywhere else Ctrl+C is the shortcuts' (the grid's copy), and Ctrl+Shift+C always is.
+//! A click on a table, schema or system group row gives it the keyboard, and it shows the focus
+//! box Tab gives it (unlike a pointer's focus elsewhere) while it keeps the keyboard.
+//! No key opens a row's menu yet.
 //!
 //! **Speed.** A catalog can hold thousands of tables, and the tree must stay within a frame. The
 //! rows are built once per catalog, filter and open/closed state ([`Tree`] caches them, keyed by
@@ -28,34 +50,53 @@
 //! Automation ids: `tree-filter`, `tree-refresh`, `tree-system`, `tree-schema-<schema>`,
 //! `tree-table-<schema>.<table>` (value: its kind), `tree-expand-<schema>.<table>` (its chevron;
 //! out of view too, like the table rows) and `tree-column-<schema>.<table>.<column>` (value:
-//! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only).
+//! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only); while a row's menu is
+//! open, `tree-menu-open`, `tree-menu-new-query` and `tree-menu-copy-name` (value
+//! `{label, shortcut, why?}`); `tree-count` (the count's words as written: `516 tables`,
+//! `3 of 516 tables`, `0 tables`, `Loading`) and, when the catalog has nothing to show, `tree-empty` (its
+//! sentence).
+//!
+//! **A refresh** changes nothing before it has run 300 ms ([`crate::quiet`]; the workspace
+//! asks the clock). From then the count reads `LOADING`, whatever the filter holds, and the rows
+//! are drawn at [`theme::DIM`] (`tree-dimmed`, value `true`, the rows' area): a look only, they
+//! scroll, select, open and take a right-click as before. With no rows to show (nothing in the
+//! catalog, a filter with no match) eight rows of bars stand in their place
+//! ([`skeleton::TreeRows`], `tree-skeleton`, value the rows drawn) and the empty catalog's sentence
+//! waits. The refresh beside the filter keeps its plain icon.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_engine::Screen;
 use dbee_sql::Dialect;
-use egui::{Align, Color32, CornerRadius, FontId, Margin, Rect, ScrollArea, Sense, TextEdit, pos2, vec2};
+use egui::{Align, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
+use crate::DbeeApp;
 use crate::automation::Tags;
-use crate::connections::line_galley;
-use crate::icons;
-use crate::theme::{RADIUS, TOKENS};
-
-/// The height of a row.
-pub const ROW_H: f32 = 22.0;
-/// How far each level is indented.
-const INDENT: f32 = 14.0;
-/// The chevron's square, then the icon's, from a row's indented left edge.
-const CHEVRON: f32 = 16.0;
-const ICON: f32 = 16.0;
+use crate::components::empty::{Phrase, Place};
+use crate::components::grid_cell::Key;
+use crate::components::menu::{self, Item};
+use crate::components::rows::{TreeKind, TreeRow};
+use crate::components::sidebar::{self, Count};
+use crate::components::skeleton;
+use crate::components::tooltip::Hint;
+use crate::components::{Look, focus};
+use crate::shortcuts;
+use crate::theme;
+use crate::theme::size::TREE_ROW_H;
 
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeAct {
-    /// A table was double-clicked: open it in a tab.
+    /// A table was double-clicked, or Open chosen in its menu: open it in a tab.
     Open(TableRef),
+    /// New query chosen in a table's menu: a query tab on its schema.
+    NewQuery(TableRef),
+    /// Copy name chosen in a table's menu: its name on the clipboard.
+    CopyName(TableRef),
     /// The refresh button was clicked.
     Refresh,
 }
@@ -71,6 +112,15 @@ pub enum Refresh {
     Disabled(String),
 }
 
+/// Why each item of a table row's menu can't run now; `None` runs. Set by the workspace while a
+/// menu is open ([`Tree::menu_open`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MenuState {
+    pub open: Option<String>,
+    pub new_query: Option<String>,
+    pub copy_name: Option<String>,
+}
+
 /// The tree's state: the filter, what is open, the selection, and the rows built for them.
 #[derive(Default)]
 pub struct Tree {
@@ -78,6 +128,14 @@ pub struct Tree {
     pub filter: String,
     /// Set by the workspace before each frame.
     pub refresh: Refresh,
+    /// What the menu's items can do; set by the workspace while a menu is open.
+    pub menu: MenuState,
+    /// The table whose menu showed in the last frame.
+    menu_row: Option<TableRef>,
+    /// The table row that had the keyboard when the tree was last drawn, and its widget id.
+    focused: Option<(egui::Id, TableRef)>,
+    /// The row a click last gave the keyboard: it shows the focus box while it keeps it.
+    clicked: Option<egui::Id>,
     /// User schemas the user opened or closed, and how they are now ([`default_open`] for the
     /// others).
     user_open: HashMap<String, bool>,
@@ -200,17 +258,6 @@ pub fn kind_name(kind: RelKind) -> &'static str {
     }
 }
 
-/// The icon and its colour for a relation of `kind`.
-pub fn kind_icon(kind: RelKind) -> (fn(&egui::Painter, Rect, Color32), Color32) {
-    let t = TOKENS;
-    match kind {
-        RelKind::Table | RelKind::PartitionedTable => (icons::table, t.icon_table),
-        RelKind::ForeignTable => (icons::table, t.icon_column),
-        RelKind::View => (icons::view, t.icon_view),
-        RelKind::MaterializedView => (icons::materialized_view, t.icon_matview),
-    }
-}
-
 /// `1,234`.
 pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
@@ -225,6 +272,11 @@ pub fn thousands(n: u64) -> String {
 }
 
 impl Tree {
+    /// A table row's menu showed in the last frame.
+    pub fn menu_open(&self) -> bool {
+        self.menu_row.is_some()
+    }
+
     /// The schema of what is selected, while `catalog` holds it: the selected schema, or the
     /// selected table's.
     pub fn selected_schema(&self, catalog: &Catalog) -> Option<&str> {
@@ -397,89 +449,125 @@ enum Click {
 }
 
 /// Draws the tree for `catalog`, read in `dialect`, into `ui` (the filter, the refresh button,
-/// the count and the rows) and returns what the user asked for.
-pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &mut Tree, tags: &mut Tags) -> Vec<TreeAct> {
-    let t = TOKENS;
+/// the count and the rows) and returns what the user asked for. `loading`: how long a refresh has
+/// run, once it has run 300 ms.
+pub fn show(
+    ui: &mut egui::Ui,
+    catalog: &Arc<Catalog>,
+    dialect: Dialect,
+    tree: &mut Tree,
+    loading: Option<Duration>,
+    tags: &mut Tags,
+) -> Vec<TreeAct> {
     let mut acts = Vec::new();
     let many = dialect.schema_word().1.to_lowercase();
-    ui.horizontal(|ui| {
-        let width = (ui.available_width() - 34.0).max(60.0);
-        let r = ui.add(
-            TextEdit::singleline(&mut tree.filter)
-                .id(egui::Id::new("tree-filter"))
-                .hint_text("Filter tables")
-                .desired_width(width)
-                .margin(Margin::symmetric(6, 4)),
-        );
-        tags.tag_value("tree-filter", &r, tree.filter.as_str());
-        let enabled = tree.refresh == Refresh::Ready;
-        let (rect, r) = ui.allocate_exact_size(vec2(26.0, 26.0), if enabled { Sense::click() } else { Sense::hover() });
-        let fill = if enabled && r.hovered() { t.hover } else { Color32::TRANSPARENT };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), fill);
-        let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
-        match &tree.refresh {
-            Refresh::Running => {
-                egui::Spinner::new().size(14.0).color(t.text_muted).paint_at(ui, icon_rect);
-            }
-            Refresh::Ready => icons::refresh(ui.painter(), icon_rect, t.text_muted),
-            Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.border),
-        }
+    // The header (`sidebar/filter`, `sidebar/count`), the rows straight under it.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let refresh = match tree.refresh {
+        Refresh::Ready => sidebar::Refresh::Idle,
+        Refresh::Running => sidebar::Refresh::Running,
+        Refresh::Disabled(_) => sidebar::Refresh::Off,
+    };
+    let shown = sidebar::Filter::new(&mut tree.filter, "Filter tables").id(egui::Id::new("tree-filter")).refresh(refresh).show(ui);
+    tags.tag_value("tree-filter", &shown.field, tree.filter.as_str());
+    if let Some(r) = shown.refresh {
         let r = match &tree.refresh {
-            Refresh::Ready => r.on_hover_text(format!("Refresh the {many}")),
-            Refresh::Running => r.on_hover_text(format!("Refreshing the {many}…")),
-            Refresh::Disabled(why) => r.on_hover_text(format!("Cannot refresh: {why}")),
+            Refresh::Ready => r.hint(format!("Refresh the {many}")),
+            Refresh::Running => r.hint(format!("Refreshing the {many}…")),
+            Refresh::Disabled(why) => r.hint_disabled(format!("Cannot refresh: {why}")),
         };
-        tags.tag_value_as("tree-refresh", &r, "Refresh", enabled);
-        if enabled && r.clicked() {
-            acts.push(TreeAct::Refresh);
-        }
-    });
+        tags.tag_value_as("tree-refresh", &r, "Refresh", tree.refresh == Refresh::Ready);
+    }
+    if shown.asked {
+        acts.push(TreeAct::Refresh);
+    }
     let filtering = !tree.filter.trim().is_empty();
     let (matching, total) = {
         let rows = tree.rows(catalog);
-        (rows.matching, rows.total)
+        (rows.matching as u64, rows.total as u64)
     };
-    let count = if filtering {
-        format!("{} of {} tables", thousands(matching as u64), thousands(total as u64))
+    let word = ["table", "tables"];
+    // A filter with no match reads `0 TABLES` over an empty tree, not `0 OF 516 TABLES`.
+    let count = if loading.is_some() {
+        Count::Loading
+    } else if !filtering {
+        Count::All(total, word)
+    } else if matching == 0 {
+        Count::All(0, word)
     } else {
-        format!("{} tables", thousands(total as u64))
+        Count::Some(matching, total, word)
     };
-    ui.add_space(2.0);
-    ui.label(egui::RichText::new(count).size(11.5).color(t.text_muted));
-    ui.add_space(2.0);
+    let r = count.show(ui);
+    tags.tag_value("tree-count", &r, count.words());
     let mut click = Click::None;
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);
     let fresh = !tree.drawn;
+    let mut menu = Menu { state: tree.menu.clone(), last: tree.menu_row.take(), now: None, acts: Vec::new() };
+    tree.focused = None;
+    let mut focused = None;
+    let mut clicked = tree.clicked;
     let rows = tree.rows(catalog);
+    if rows.list.is_empty() && loading.is_some() {
+        let (rect, drawn) = skeleton::TreeRows.show(ui);
+        let r = ui.interact(rect, ui.id().with("dbee-tree-skeleton"), Sense::hover());
+        tags.tag_value("tree-skeleton", &r, drawn);
+        return acts;
+    }
     if rows.list.is_empty() {
-        let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
-        ui.label(egui::RichText::new(text).color(t.text_muted));
+        // A filter with no match: the count says it, no phrase. A catalog with nothing to
+        // show: its sentence 12 in and 12 under the count, as the table tab's empty words sit.
+        if !filtering {
+            let text = format!("This connection has no {many} dbee can show.");
+            let shown = Phrase::new(&text, Place::Top).show(ui, ui.available_rect_before_wrap());
+            tags.tag_value("tree-empty", &shown, text);
+        }
         return acts;
     }
     let system_label = format!("System {many}");
+    if loading.is_some() {
+        // Before the rows, so they stay on top for the pointer.
+        let r = ui.interact(ui.available_rect_before_wrap(), ui.id().with("dbee-tree-dimmed"), Sense::hover());
+        tags.tag_value("tree-dimmed", &r, true);
+    }
     let mut area = ScrollArea::vertical().id_salt("tree-rows").auto_shrink([false, false]);
     if fresh {
         area = area.vertical_scroll_offset(0.0);
     }
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
+        if loading.is_some() {
+            ui.multiply_opacity(theme::DIM);
+        }
         let frame = ui.max_rect();
-        let height = ROW_H * rows.list.len() as f32;
+        let height = TREE_ROW_H * rows.list.len() as f32;
         ui.set_min_height(height);
-        let first = (viewport.min.y / ROW_H).floor().max(0.0) as usize;
-        let last = ((viewport.max.y / ROW_H).ceil().max(0.0) as usize).saturating_add(1);
+        let first = (viewport.min.y / TREE_ROW_H).floor().max(0.0) as usize;
+        let last = ((viewport.max.y / TREE_ROW_H).ceil().max(0.0) as usize).saturating_add(1);
         for (i, ((row, id), expander)) in rows.list.iter().zip(&rows.ids).zip(&rows.expanders).enumerate() {
-            let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + ROW_H * i as f32), vec2(frame.width(), ROW_H));
+            let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + TREE_ROW_H * i as f32), vec2(frame.width(), TREE_ROW_H));
             if i >= first && i < last {
-                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), tags);
+                let c = draw_row(
+                    ui,
+                    rect,
+                    *row,
+                    id,
+                    expander,
+                    &rows.catalog,
+                    &system_label,
+                    selected.as_ref(),
+                    &mut menu,
+                    &mut focused,
+                    &mut clicked,
+                    tags,
+                );
                 if !matches!(c, Click::None) {
                     click = c;
                 }
             } else if !matches!(row, Row::Column { .. }) {
                 tags.tag_out_of_view(id, rect);
                 if !expander.is_empty() {
-                    tags.tag_out_of_view(expander, Geometry::of(rect, *row).chevron);
+                    tags.tag_out_of_view(expander, TreeRow::expander(rect, level(*row)));
                 }
                 let wanted = pending.as_deref();
                 if wanted == Some(id.as_str()) || (!expander.is_empty() && wanted == Some(expander.as_str())) {
@@ -489,6 +577,10 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         }
     });
     tree.drawn = true;
+    tree.menu_row = menu.now;
+    tree.focused = focused;
+    tree.clicked = clicked;
+    acts.extend(menu.acts);
     let table_ref = |s: usize, t: usize| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).map(|x| x.table.clone());
     match click {
         Click::None => {}
@@ -515,31 +607,60 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     acts
 }
 
-/// Where a row's parts go.
-struct Geometry {
-    chevron: Rect,
-    icon: Rect,
-    text_left: f32,
-}
-
-impl Geometry {
-    /// The parts of `row` drawn in `rect`: indented by its level.
-    fn of(rect: Rect, row: Row) -> Geometry {
-        let level = match row {
-            Row::System { .. } => 0.0,
-            Row::Schema { system, .. } => f32::from(u8::from(system)),
-            Row::Table { system, .. } => 1.0 + f32::from(u8::from(system)),
-            Row::Column { system, .. } => 2.0 + f32::from(u8::from(system)),
-        };
-        let left = rect.left() + 4.0 + INDENT * level;
-        let chevron = Rect::from_min_size(pos2(left, rect.top() + (ROW_H - CHEVRON) / 2.0), vec2(CHEVRON, CHEVRON));
-        let icon = Rect::from_min_size(pos2(left + CHEVRON + 2.0, rect.top() + (ROW_H - ICON) / 2.0), vec2(ICON, ICON));
-        Geometry { chevron, icon, text_left: icon.right() + 6.0 }
+/// How deep `row` sits: a system schema and what it holds one level deeper than a user one's.
+fn level(row: Row) -> usize {
+    match row {
+        Row::System { .. } => 0,
+        Row::Schema { system, .. } => usize::from(system),
+        Row::Table { system, .. } => 1 + usize::from(system),
+        Row::Column { system, .. } => 2 + usize::from(system),
     }
 }
 
-/// Draws one row in view and tags it (a table row's chevron as `expander`). The system group
-/// reads `system_label`.
+/// A table row's menu across a frame's rows: what its items can do, the table whose menu showed in
+/// the last frame and in this one, and what was chosen.
+struct Menu {
+    state: MenuState,
+    last: Option<TableRef>,
+    now: Option<TableRef>,
+    acts: Vec<TreeAct>,
+}
+
+impl Menu {
+    /// The menu of `table`'s row, attached to its response `r`, when it is open.
+    fn show(&mut self, r: &Response, table: &TableRef, tags: &mut Tags) {
+        let state = &self.state;
+        let mut chosen = None;
+        let shown = egui::Popup::context_menu(r).style(menu::style(&r.ctx)).show(|ui| {
+            let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: &str, why: Option<&String>, act: TreeAct| {
+                let mut r = ui.add_enabled(why.is_none(), Item::new(label).shortcut(keys));
+                let mut value = json!({ "label": label, "shortcut": keys });
+                if let Some(why) = why {
+                    r = r.hint_disabled(format!("{label}: not now, {why}"));
+                    value["why"] = json!(why);
+                }
+                // A menu's first frame reads every widget as disabled: tag what the code knows.
+                tags.tag_value_as(id, &r, value, why.is_none());
+                if r.clicked() {
+                    chosen = Some(act);
+                    ui.close();
+                }
+            };
+            item(ui, "tree-menu-open", "Open", "Enter", state.open.as_ref(), TreeAct::Open(table.clone()));
+            item(ui, "tree-menu-new-query", "New query", "Ctrl+T", state.new_query.as_ref(), TreeAct::NewQuery(table.clone()));
+            menu::separator(ui);
+            item(ui, "tree-menu-copy-name", "Copy name", "Ctrl+C", state.copy_name.as_ref(), TreeAct::CopyName(table.clone()));
+        });
+        if shown.is_some() && chosen.is_none() {
+            self.now = Some(table.clone());
+        }
+        self.acts.extend(chosen);
+    }
+}
+
+/// Draws one row in view and tags it (a table row's chevron as `expander`), with a table row's
+/// menu. The system group reads `system_label`. A table row with the keyboard is put in `focused`.
+/// A click on a row (not a column's) gives it the keyboard, and `clicked` names it.
 #[allow(clippy::too_many_arguments, reason = "one row's data, borrowed from the tree's cache and the frame")]
 fn draw_row(
     ui: &mut egui::Ui,
@@ -550,11 +671,18 @@ fn draw_row(
     catalog: &Catalog,
     system_label: &str,
     selected: Option<&Selected>,
+    menu: &mut Menu,
+    focused: &mut Option<(egui::Id, TableRef)>,
+    clicked: &mut Option<egui::Id>,
     tags: &mut Tags,
 ) -> Click {
-    let t = TOKENS;
-    let Geometry { chevron: chevron_rect, icon: icon_rect, text_left } = Geometry::of(rect, row);
+    let level = level(row);
     let r = ui.interact(rect, egui::Id::new(("dbee-tree", id)), Sense::click());
+    // The chevron is its own target, above the row.
+    let expand = match row {
+        Row::Table { .. } => Some(ui.interact(TreeRow::expander(rect, level), egui::Id::new(("dbee-tree-expand", id)), Sense::click())),
+        _ => None,
+    };
     let is_selected = match (row, selected) {
         (Row::Table { s, t, .. }, Some(Selected::Table(sel))) => {
             catalog.schemas.get(s).and_then(|x| x.tables.get(t)).is_some_and(|x| x.table == *sel)
@@ -562,45 +690,51 @@ fn draw_row(
         (Row::Schema { s, .. }, Some(Selected::Schema(sel))) => catalog.schemas.get(s).is_some_and(|x| x.name == *sel),
         _ => false,
     };
-    let fill = if is_selected {
-        t.selection
-    } else if r.hovered() {
-        t.hover
-    } else {
-        Color32::TRANSPARENT
+    let look = Look::of(ui, &r);
+    // A click gives the row the keyboard, and the row shows it as Tab's focus does (a pointer's
+    // focus shows nothing elsewhere), so Ctrl+C visibly copies the boxed row. A column row has no
+    // click.
+    if r.clicked() && !matches!(row, Row::Column { .. }) {
+        r.request_focus();
+        *clicked = Some(r.id);
+    }
+    let focus_shown = look.focused || (*clicked == Some(r.id) && r.has_focus());
+    // The row whose menu is open keeps the `hover` ground, the pointer in the menu or not.
+    let menu_row = match row {
+        Row::Table { s, t, .. } => {
+            menu.last.as_ref().is_some_and(|m| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).is_some_and(|x| x.table == *m))
+        }
+        _ => false,
     };
-    let p = ui.painter().clone();
-    p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(RADIUS), fill);
-    let text_w = |right: f32| (right - text_left).max(1.0);
-    let font = FontId::proportional(13.0);
-    let label = |text: &str, color: Color32, right: f32| {
-        let g = line_galley(ui, text, font.clone(), color, text_w(right));
-        p.galley(pos2(text_left, rect.center().y - g.size().y / 2.0), g, color);
-    };
-    let muted_right = |text: &str| -> f32 {
-        let g = line_galley(ui, text, FontId::proportional(11.5), t.text_muted, (rect.width() * 0.45).max(1.0));
-        let x = rect.right() - 8.0 - g.size().x;
-        let w = g.size().x;
-        p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
-        rect.right() - 14.0 - w
+    let hovered = look.hovered || menu_row || expand.as_ref().is_some_and(Response::hovered);
+    let chevron_focused = expand.as_ref().is_some_and(|e| focus::shown(ui, e));
+    let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
+        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: focus_shown, chevron_focused, hovered };
+        let cut = drawn.paint(ui, rect);
+        r.widget_info(|| drawn.widget_info());
+        if let Some(e) = &expand {
+            e.widget_info(|| drawn.chevron_info());
+        }
+        cut
     };
     match row {
-        Row::System { open, schemas } => {
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            icons::schema(&p, icon_rect, t.text_muted);
-            let right = muted_right(&schemas.to_string());
-            label(system_label, t.text_muted, right);
+        Row::System { open, .. } => {
+            let cut = draw(TreeKind::System, system_label, None, Some(open));
+            let r = match cut {
+                Some(whole) => r.hint(whole),
+                None => r,
+            };
             tags.tag_value(id, &r, json!({ "open": open }));
             if r.clicked() {
                 return Click::ToggleSystem;
             }
         }
         Row::Schema { s, open, tables, system } => {
-            let name = catalog.schemas.get(s).map_or("", |x| x.name.as_str());
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            icons::schema(&p, icon_rect, t.icon_schema);
-            let right = muted_right(&thousands(tables as u64));
-            label(name, t.text, right);
+            let cut = draw(TreeKind::Schema, catalog.schemas.get(s).map_or("", |x| x.name.as_str()), None, Some(open));
+            let r = match cut {
+                Some(whole) => r.hint(whole),
+                None => r,
+            };
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
             if r.clicked() {
                 return Click::ToggleSchema(s, system);
@@ -608,26 +742,37 @@ fn draw_row(
         }
         Row::Table { s, t: ti, open, .. } => {
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            let (icon, color) = kind_icon(info.kind);
-            icon(&p, icon_rect, color);
-            label(&info.table.name, t.text, rect.right() - 8.0);
+            draw(TreeKind::Relation(info.kind), &info.table.name, None, Some(open));
             let mut hover = format!("{} · {}", info.table.display(), kind_name(info.kind));
             if let Some(n) = row_estimate(info) {
                 hover.push_str(&format!(" · ~{} rows", thousands(n)));
             }
-            let r = r.on_hover_text(hover);
+            let r = r.hint(hover);
             tags.tag_value(id, &r, kind_name(info.kind));
-            // The chevron is its own target, above the row.
-            let expand = ui.interact(chevron_rect.expand(2.0), egui::Id::new(("dbee-tree-expand", id)), Sense::click());
-            tags.tag_value(expander, &expand, open);
-            if expand.clicked() {
-                return Click::ToggleTable(s, ti);
+            menu.show(&r, &info.table, tags);
+            // Egui's memory, not `Response::has_focus`, which is false while the window itself
+            // lacks the system's focus: `take_keys` asks the memory too.
+            if ui.memory(|m| m.has_focus(r.id)) {
+                *focused = Some((r.id, info.table.clone()));
+                // Enter opens it (egui's click from the same Enter is then not read); not while a
+                // menu is open, where Enter is the menu's.
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
+                if enter && menu.last.is_none() {
+                    return Click::Open(s, ti);
+                }
+            }
+            if let Some(expand) = expand {
+                tags.tag_value(expander, &expand, open);
+                if expand.clicked() {
+                    return Click::ToggleTable(s, ti);
+                }
             }
             if r.double_clicked() {
                 return Click::Open(s, ti);
             }
             if r.clicked() {
+                // The click gave the row the keyboard (above), so Ctrl+C copies its name from then on.
+                *focused = Some((r.id, info.table.clone()));
                 return Click::Select(s, ti);
             }
         }
@@ -635,27 +780,63 @@ fn draw_row(
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
             let Some(col) = info.visible_columns().nth(c) else { return Click::None };
             let key = if info.primary_key.contains(&col.name) {
-                Some("primary")
+                Some(Key::Primary)
             } else if info.fk_for(&col.name).is_some() {
-                Some("foreign")
+                Some(Key::Foreign)
             } else {
                 None
             };
-            match key {
-                Some("primary") => icons::key_primary(&p, icon_rect, t.key_primary),
-                Some(_) => icons::key_foreign(&p, icon_rect, t.key_foreign),
-                None => icons::column(&p, icon_rect, t.icon_column),
-            }
-            let right = muted_right(col.label());
-            label(&col.name, t.text, right);
-            let r = match info.fk_for(&col.name) {
-                Some(fk) => r.on_hover_text(format!("{} → {}", col.name, fk.target.display())),
-                None => r,
+            // Cut: the whole name and type; a foreign key names its target, after the name alone
+            // when nothing is cut.
+            // The type in its short spelling (`display::short_type`); the whole one on hover.
+            let short = dbee_core::display::short_type(col.label());
+            let shortened = short != col.label();
+            let cut = draw(TreeKind::Column(key), &col.name, Some(&short), None);
+            let cut = (cut.is_some() || shortened).then(|| format!("{} {}", col.name, col.label()));
+            let r = match (info.fk_for(&col.name), cut) {
+                (Some(fk), Some(whole)) => r.hint(format!("{whole} → {}", fk.target.display())),
+                (Some(fk), None) => r.hint(format!("{} → {}", col.name, fk.target.display())),
+                (None, Some(whole)) => r.hint(whole),
+                (None, None) => r,
             };
-            tags.tag_value(id, &r, json!({ "type": col.label(), "key": key }));
+            tags.tag_value(id, &r, json!({ "type": col.label(), "key": key.map(Key::id) }));
         }
     }
     Click::None
+}
+
+/// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
+/// keyboard: Ctrl+C (and the keyboard's copy) copies a table's name, the open menu's row's (the
+/// menu then closes), else the table row's that has the keyboard. Ctrl+Shift+C is left to the
+/// shortcuts.
+pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
+    if app.session.state().screen != Screen::Workspace {
+        return;
+    }
+    let tree = &app.view.work.tree;
+    let target = match (&tree.menu_row, &tree.focused) {
+        (Some(table), _) => Some((table.clone(), true)),
+        (None, Some((id, table))) if ctx.memory(|m| m.has_focus(*id)) => Some((table.clone(), false)),
+        _ => None,
+    };
+    let Some((table, in_menu)) = target else { return };
+    let copy = ctx.input_mut(|i| {
+        let held = i.modifiers;
+        let mut taken = false;
+        // One press can come as both a key and a copy event: take them all.
+        while shortcuts::take(&mut i.events, Modifiers::COMMAND, egui::Key::C, held) {
+            taken = true;
+        }
+        taken
+    });
+    if !copy {
+        return;
+    }
+    if in_menu {
+        egui::Popup::close_all(ctx);
+        app.view.work.tree.menu_row = None;
+    }
+    app.run_from_ui("clipboard.copyName", json!({ "schema": table.schema, "table": table.name }));
 }
 
 #[cfg(test)]

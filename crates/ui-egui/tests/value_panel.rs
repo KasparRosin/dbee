@@ -102,6 +102,13 @@ fn jsonb_cell_shows_pretty_json_with_label() {
     assert_eq!(ui.document()["value"]["text"], json!(text));
     let v = ui.value("value-text");
     assert_eq!((v["highlighted"].clone(), v["cut"].clone(), v["selection"].clone()), (json!(true), json!(false), Json::Null), "{v}");
+    // No kind chip: `jsonb` is drawn once, as the type; the facts say lines and bytes.
+    let panel = ui.rect("value-panel");
+    assert_eq!(drawn_in(&ui, panel, "jsonb"), 1, "the type alone, no chip");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(facts_read(&facts, false), "`12 lines 137 B`'s form: {facts:?}");
+    let lines = facts.split(' ').take(2).collect::<Vec<_>>().join(" ").to_uppercase();
+    assert!(ui.text_in(panel, &lines).is_some(), "{lines} drawn in capitals");
     // Another cell of the row: the panel follows.
     ui.click("grid-cell-0-3");
     assert_eq!(ui.value("value-panel")["column"], "status");
@@ -118,8 +125,13 @@ fn json_string_containing_json_is_labelled() {
     ui.click("grid-cell-0-6");
     let head = ui.value("value-panel");
     assert_eq!((head["type"].clone(), head["label"].clone()), (json!("json"), json!("JSON string containing JSON")), "{head}");
-    // The document inside the string, pretty-printed.
+    // The document inside the string, pretty-printed; no chip, the facts say why it differs.
     assert_eq!(ui.panel_text(), "{\n  \"a\": 1\n}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "JSON STRING CONTAINING JSON").is_none(), "no chip");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(facts.starts_with("Formatted as JSON 3 lines ") && facts_read(facts.trim_start_matches("Formatted as JSON "), false), "{facts:?}");
+    assert!(ui.text_in(panel, "FORMATTED AS JSON").is_some(), "drawn in capitals");
     // A text column holding JSON says so too.
     ui.click("grid-cell-0-8");
     let head = ui.value("value-panel");
@@ -136,8 +148,9 @@ fn panel_hides_and_comes_back() {
     let before = ui.rect("value-panel");
     // At the window's right edge (the harness keeps 8 points round the app).
     assert_eq!(before.right(), 1400.0 - 8.0, "on the right: {before:?}");
-    // Widen it by its left edge, so the width it comes back at is its own, not the default.
-    ui.drag(pos2(before.left(), before.center().y), pos2(before.left() - 80.0, before.center().y));
+    // Widen it by its left edge, so the width it comes back at is its own, not the default. The
+    // press goes just inside the edge: a grid column's own edge can lie on the panel's.
+    ui.drag(pos2(before.left() + 2.0, before.center().y), pos2(before.left() - 80.0, before.center().y));
     let wide = ui.rect("value-panel");
     assert!((wide.width() - before.width() - 80.0).abs() < 2.0, "dragged 80 points wider: {before:?} → {wide:?}");
     assert_eq!(ui.value("value-toggle"), true);
@@ -176,7 +189,7 @@ fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     assert_eq!(ui.copied.len(), copies + 1, "one copy: {:?}", ui.copied);
     assert_eq!(ui.copied().as_deref(), Some(first_two.as_str()), "the panel's selection, not the grid's");
     // The grid's selection is still the cell, whose copy is the raw jsonb on one line.
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5], "whole": false }));
     // A drag selects too: across the third line, from its start.
     let third = r.top() + LINE_H * 2.5;
     ui.drag(pos2(r.left() + 1.0, third), pos2(r.right() - PAD, third));
@@ -186,7 +199,7 @@ fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     // Ctrl+A in the panel selects all of its text, not the grid's cells.
     ui.ctrl("A");
     assert_eq!(ui.value("value-text")["selection"], json!([0, text.len()]));
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5] }), "the grid's selection stays");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5], "whole": false }), "the grid's selection stays");
     ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some(text.as_str()));
     assert!(ui.tag("notice").is_none(), "the panel's copy is a text field's: no notice");
@@ -229,14 +242,14 @@ fn the_panel_follows_staged_values_and_null() {
 }
 
 #[test]
-fn a_twenty_megabyte_cell_shows_a_truncation_note() {
+fn a_twenty_megabyte_cell_says_first_10_mib_in_its_facts() {
     let db = dbee_testkit::require_testdb!();
     twenty_megabyte_cell(db);
 }
 
 #[test]
 #[ignore = "timing; run with --ignored --nocapture"]
-fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
+fn a_twenty_megabyte_cell_says_first_10_mib_in_its_facts_without_a_slow_frame() {
     let db = dbee_testkit::require_testdb!();
     for (what, t) in twenty_megabyte_cell(db) {
         assert!(t < FRAME_BOUND, "{what} took a {t:?} frame");
@@ -255,7 +268,14 @@ fn twenty_megabyte_cell(db: &TestDb) -> [(&'static str, Duration); 4] {
     let head = ui.value("value-panel");
     assert_eq!((head["truncated"].clone(), head["bytes"].clone()), (json!(true), json!(20_000_000)), "{head}");
     let note = head["note"].as_str().unwrap_or_default().to_string();
-    assert!(note.contains("first 10.0 MiB of 19.1 MiB"), "{note}");
+    assert_eq!(note, "Showing the first 10.0 MiB of 19.1 MiB.", "the old sentence stays readable");
+    // A cut value: the facts say it; nothing is painted above the value.
+    assert_eq!(head["facts"], "1 line First 10 MiB of 19.1 MiB", "{head}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, &note).is_none(), "no note painted");
+    assert!(ui.text_in(panel, "FIRST 10 MIB OF 19.1 MIB").is_some(), "the facts in capitals");
+    let text = ui.rect("value-text");
+    assert!(near(text.top(), panel.top() + 36.0 + 12.0, 0.5), "the value 12 under the bar: {text:?} in {panel:?}");
     let v = ui.value("value-text");
     assert_eq!(v["cut"], true, "the tag carries the start of the text: {}", v["text"]);
     assert!(v["text"].as_str().unwrap().starts_with("0123456789abcdef"));
@@ -421,6 +441,8 @@ fn value_panel_frames_within_budget() {
         panel: PanelState,
         tags: Tags,
         width: f32,
+        wrap: bool,
+        ready: bool,
     }
     let column = |name: &str, base: &str| {
         let class = if base == "jsonb" { TypeClass::Json } else { TypeClass::LongText };
@@ -445,13 +467,19 @@ fn value_panel_frames_within_budget() {
         ("20 MB jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&jsonb)))),
         ("9 MiB pretty jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&under)))),
     ];
-    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), width: 360.0 };
+    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), width: 360.0, wrap: true, ready: false };
     let mut h = Harness::builder().with_size(vec2(400.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
+            // The first frame sets the fonts; the panel draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
             s.tags.begin_frame();
             let rect = Rect::from_min_size(ui.max_rect().min, vec2(s.width, ui.max_rect().height()));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags);
+            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags, s.wrap);
         },
         state,
     );
@@ -521,4 +549,503 @@ fn value_panel_frames_within_budget() {
         assert!(steady < Duration::from_millis(16) && scroll < Duration::from_millis(16), "{name}: {steady:?} {scroll:?}");
     }
     println!("value panel on {}:\n  {}", machine(), report.join("\n  "));
+}
+
+/// A selected row (#17) shows in the panel as JSON: the object Copy as JSON writes for it,
+/// pretty-printed and coloured, read-only, under the title `Row <n>` (the number its row shows,
+/// the page's offset counted in) with no type.
+#[test]
+fn the_panel_shows_a_selected_row_as_json() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
+    ui.execute("selection.set", json!({ "anchor": [0, 0], "focus": [0, 99] }));
+    let list = ui.execute("copy.selection", json!({ "format": "json" }))["text"].as_str().unwrap().to_string();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]")).unwrap();
+    let pretty = dbee_core::json::pretty(object).unwrap();
+    ui.click("grid-row-0");
+    let head = ui.value("value-panel");
+    assert_eq!(head["row"], 1, "{head}");
+    assert_eq!((head["column"].clone(), head["type"].clone(), head["label"].clone()), (json!(""), json!(""), Json::Null), "{head}");
+    assert_eq!((head["null"].clone(), head["truncated"].clone(), head["note"].clone()), (json!(false), json!(false), Json::Null), "{head}");
+    assert_eq!(head["bytes"], object.len(), "{head}");
+    assert!(pretty.starts_with("{\n  \"id\": 1,\n  \"customer_id\": 1,") && pretty.contains("\"billing\": {\n    \""), "{pretty}");
+    assert_eq!(ui.panel_text(), pretty);
+    assert_eq!(ui.document()["value"]["row"], 1);
+    let v = ui.value("value-text");
+    assert_eq!((v["highlighted"].clone(), v["cut"].clone(), v["selection"].clone()), (json!(true), json!(false), Json::Null), "{v}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "Row 1").is_some(), "the title");
+    assert!(ui.text_in(panel, "id").is_none() && ui.text_in(panel, "bigint").is_none(), "no column name or type in the bar");
+    // A cell again: its column.
+    ui.click("grid-cell-0-3");
+    let head = ui.value("value-panel");
+    assert_eq!((head["row"].clone(), head["column"].clone()), (Json::Null, json!("status")), "{head}");
+    // The second page's first row is the 101st.
+    ui.execute("table.page", json!({ "to": "next" }));
+    ui.click("grid-row-0");
+    assert_eq!(ui.value("value-panel")["row"], 101);
+    assert!(ui.panel_text().starts_with("{\n  \"id\": 101,"), "{}", ui.panel_text());
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "Row 101").is_some(), "the title counts the page");
+}
+
+// ---- the panel inside the tab ---------------------------------------------------------------------
+
+/// The panel's rect while it is drawn this frame (egui keeps its size after it goes).
+fn panel_rect(ui: &mut Ui) -> Option<Rect> {
+    ui.tag("value-panel")?;
+    egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-value-panel")).map(|p| p.outer_rect)
+}
+
+/// The panel shows, whatever it did before.
+fn panel_open(ui: &mut Ui) {
+    if ui.execute("ui.toggleValuePanel", json!({}))["visible"] == false {
+        ui.execute("ui.toggleValuePanel", json!({}));
+    }
+    ui.frame();
+}
+
+/// The `value-toggle` entries drawn in the last frame.
+fn toggles(ui: &mut Ui) -> Vec<Rect> {
+    let i = ui.inspect();
+    i["automation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["id"] == "value-toggle")
+        .map(|e| {
+            let f = |k: usize| e["rect"][k].as_f64().unwrap() as f32;
+            Rect::from_min_size(pos2(f(0), f(1)), vec2(f(2), f(3)))
+        })
+        .collect()
+}
+
+fn near(a: f32, b: f32, by: f32) -> bool {
+    (a - b).abs() <= by
+}
+
+/// One toggle at most, the active tab's, never in the status bar; the panel beside the results
+/// only: in a query tab beside the result bar and the grid (the editor and the run row keep the
+/// body's width), in a table tab between the table bar and the paging bar (both keep the body's
+/// width). The tab strip spans the work area. A query tab before its first result has neither.
+#[test]
+fn exactly_one_value_toggle_and_the_panel_beside_the_results() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    let right = egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-menubar")).unwrap().outer_rect.right();
+    let status = egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-status")).unwrap().outer_rect;
+    // A query tab with results.
+    ui.execute("tab.newQuery", json!({ "text": "select g as id, 'row ' || g as note from generate_series(1, 5) g" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the rows", |ui| ui.tag("grid-header-0").is_some());
+    ui.frame();
+    let toggle = toggles(&mut ui);
+    assert_eq!(toggle.len(), 1, "one toggle: {toggle:?}");
+    let toggle = toggle[0];
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    // The result bar is the results column's: its toggle ends where the panel starts.
+    assert!(near(toggle.right(), panel.left(), 1.0), "the toggle at the result bar's right end: {toggle:?}, the panel {panel:?}");
+    let (run, head) = (ui.rect("query-run"), ui.rect("grid-header-0"));
+    assert!(toggle.center().y > run.bottom() && toggle.center().y < head.top(), "in the result bar: {toggle:?}, {run:?}, {head:?}");
+    assert!(near(panel.top(), toggle.top(), 1.0), "the panel's top level with the result bar's: {panel:?}, {toggle:?}");
+    assert!(near(panel.right(), right, 0.5) && near(panel.bottom(), status.top(), 1.0), "down to the tab's bottom: {panel:?}");
+    let ink = painted_at(&ui, pos2(panel.left() - 2.0, head.bottom() - 0.5));
+    assert!(ink.is_some_and(|(c, r)| c == t.ink && near(r.right(), panel.left(), 1.0)), "the grid ends at the panel: {ink:?}, {panel:?}");
+    for id in ["query-editor", "query-split"] {
+        let r = ui.rect(id);
+        assert!(near(r.right(), right, 0.5), "`{id}` keeps the body's width: {r:?}");
+    }
+    let new = ui.rect("tab-new");
+    assert!(panel.top() > new.bottom(), "the panel stands under the strip: {panel:?}, {new:?}");
+    let strip = painted_at(&ui, pos2(right - 2.0, new.bottom() - 0.5));
+    assert!(strip.is_some_and(|(c, r)| c == t.line && near(r.right(), right, 0.5)), "the strip's line to the window's edge: {strip:?}");
+    assert!(!status.intersects(toggle), "no toggle in the status bar");
+    // Shut, the results take the body's width, the toggle at its right end.
+    ui.click("value-toggle");
+    assert!(ui.tag("value-panel").is_none(), "shut");
+    let toggle = toggles(&mut ui);
+    assert!(toggle.len() == 1 && near(toggle[0].right(), right, 0.5), "the toggle at the body's right end: {toggle:?}");
+    ui.click("value-toggle");
+    // A table tab: the toggle at the table bar's right end, the panel between the bars.
+    ui.execute("table.open", json!({ "schema": "shop", "table": "orders" }));
+    ui.until("the page", |ui| ui.table()["rows"] == 100);
+    ui.frame();
+    let toggle = toggles(&mut ui);
+    assert_eq!(toggle.len(), 1, "one toggle: {toggle:?}");
+    let toggle = toggle[0];
+    assert!(near(toggle.right(), right, 0.5), "the toggle at the table bar's right end: {toggle:?}");
+    let head = ui.rect("grid-header-0");
+    assert!(toggle.center().y < head.top() && toggle.center().y > ui.rect("filter-0-column").bottom(), "in the table bar: {toggle:?}");
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    let paging = status.top() - dbee_ui_egui::theme::size::BAR_H;
+    assert!(near(panel.top(), toggle.bottom() + 1.0, 1.0), "the panel's top the table bar's bottom: {panel:?}, {toggle:?}");
+    assert!(near(panel.bottom(), paging, 1.0), "its bottom the paging bar's top {paging}: {panel:?}");
+    let line = painted_at(&ui, pos2(right - 2.0, paging + 0.5));
+    assert!(line.is_some_and(|(c, r)| c == t.line && near(r.right(), right, 0.5)), "the paging bar to the body's right: {line:?}");
+    assert!(!status.intersects(toggle), "no toggle in the status bar");
+    // A new query tab: no result bar, no toggle, no panel.
+    ui.ctrl("T");
+    ui.frame();
+    assert!(toggles(&mut ui).is_empty(), "no toggle before the first result");
+    assert!(ui.tag("value-panel").is_none(), "no panel before the first result");
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": false }), "the View menu's command still flips it");
+}
+
+/// A fresh window's panel starts 340 wide.
+#[test]
+fn the_panel_starts_340_wide() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, vec2(1400.0, 900.0));
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    assert!(near(panel.width(), 340.0, 1.0), "340 wide: {panel:?}");
+}
+
+/// The cell clicked shows in the panel in the frame of the click, in a query tab and a table tab.
+#[test]
+fn a_click_on_a_cell_shows_its_value_in_the_same_frame() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    panel_open(&mut ui);
+    let click = |ui: &mut Ui, id: &str| {
+        let at = ui.centre(id);
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        ui.frame_with(vec![Event::PointerMoved(at)]);
+        ui.frame_with(vec![press(true)]);
+        ui.frame_with(vec![press(false)]);
+    };
+    ui.execute("tab.newQuery", json!({ "text": "select 1 as id, 'x' as note" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the rows", |ui| ui.tag("grid-cell-0-1").is_some());
+    click(&mut ui, "grid-cell-0-1");
+    assert_eq!(ui.value("value-panel")["column"], "note", "a query tab");
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    click(&mut ui, "grid-cell-0-3");
+    assert_eq!(ui.value("value-panel")["column"], "status", "a table tab");
+}
+
+// ---- COPY and the facts ---------------------------------------------------------------------------
+
+/// How often `text` is drawn inside `within`.
+fn drawn_in(ui: &Ui, within: Rect, text: &str) -> usize {
+    ui.texts().iter().filter(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).count()
+}
+
+/// `n lines m B` (or `1 line …`), with `cut`: `1 line First 10 MiB of …`.
+fn facts_read(facts: &str, cut: bool) -> bool {
+    let words: Vec<&str> = facts.split(' ').collect();
+    let number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == ',');
+    match words.as_slice() {
+        [n, unit, rest @ ..] if number(n) && (*unit == "lines" || (*unit == "line" && *n == "1")) => {
+            if cut {
+                rest.first() == Some(&"First")
+            } else {
+                matches!(rest, [b, "B"] if number(b)) || matches!(rest, [_, "KiB" | "MiB"])
+            }
+        }
+        _ => false,
+    }
+}
+
+/// COPY as `value-copy` says it: its word, and why it is off (`None` while on).
+fn copy_state(ui: &mut Ui) -> (String, Option<String>) {
+    let tag = ui.tag("value-copy").unwrap_or_else(|| panic!("no `value-copy`"));
+    let word = tag["value"]["label"].as_str().unwrap_or_default().to_string();
+    let off = tag["enabled"] == false;
+    let why = tag["value"]["why"].as_str().map(str::to_string);
+    assert_eq!(off, why.is_some(), "off exactly when it says why: {tag}");
+    (word, why)
+}
+
+/// COPY copies the whole value as the database stores it (staged over loaded), a row as Copy as
+/// JSON writes it; off with why for no cell, NULL and past 8 MiB; ✓ COPIED for 1.5 s, no notice.
+#[test]
+fn copy_copies_the_whole_value_as_stored() {
+    let db = dbee_testkit::require_testdb!();
+    let t = Scratch::new(db, "t_value_copy", |n| {
+        format!(
+            "CREATE TABLE scratch.{n} (id int PRIMARY KEY, note text);
+             INSERT INTO scratch.{n} VALUES (1, repeat('x', 5 * 1024 * 1024)), (2, repeat('y', 9 * 1024 * 1024)), (3, NULL), (4, ''), (5, 'plain');"
+        )
+    });
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    assert_eq!(copy_state(&mut ui), ("Copy".into(), Some("nothing is selected".into())), "no cell: off");
+
+    // A whole row: the object Copy as JSON writes for it.
+    ui.execute("selection.set", json!({ "anchor": [0, 0], "focus": [0, 99] }));
+    let list = ui.execute("copy.selection", json!({ "format": "json" }))["text"].as_str().unwrap().to_string();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]")).unwrap().to_string();
+    ui.click("grid-row-0");
+    ui.click("value-copy");
+    assert_eq!(ui.copied().as_deref(), Some(object.as_str()), "the row as JSON");
+
+    // A jsonb: the database's text, not the pretty form.
+    ui.click("grid-cell-0-5");
+    assert_eq!(copy_state(&mut ui), ("Copy".into(), None));
+    let stored = dbee_testkit::psql(pg14_server(db), "SELECT billing::text FROM shop.orders WHERE id = 1").unwrap();
+    let stored = stored.trim_end_matches('\n');
+    assert!(!stored.contains('\n') && ui.panel_text().contains('\n'), "the panel shows it pretty, the database keeps one line");
+    let copies = ui.copied.len();
+    ui.click("value-copy");
+    assert_eq!(ui.copied.len(), copies + 1, "one copy");
+    assert_eq!(ui.copied().as_deref(), Some(stored), "as stored");
+    assert_eq!(copy_state(&mut ui).0, "Copied");
+    assert!(ui.tag("notice").is_none(), "no notice: COPIED says it");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "COPIED").is_some(), "✓ COPIED drawn");
+    // 1.5 s of the harness clock (a frame is 0.25 s) and it reads COPY again.
+    for _ in 0..8 {
+        ui.frame();
+    }
+    assert_eq!(copy_state(&mut ui).0, "Copy", "back after 1.5 s");
+
+    // The scratch table: 5 MiB whole, 9 MiB off, NULL off, '' copied, a staged value.
+    ui.open_rows("scratch", &t.0, 5);
+    ui.click("grid-cell-0-1");
+    ui.click("value-copy");
+    let five = ui.copied().unwrap_or_default();
+    assert!(five.len() == 5 * 1024 * 1024 && five.bytes().all(|b| b == b'x'), "5 MiB whole: {} bytes", five.len());
+    assert_eq!(ui.execute("clipboard.copyValue", json!({})), json!({ "bytes": 5 * 1024 * 1024 }), "the command says how much");
+    ui.click("grid-cell-1-1");
+    let (_, why) = copy_state(&mut ui);
+    assert!(why.as_deref().is_some_and(|w| w.contains("9.0 MiB") && w.contains("8 MiB")), "9 MiB: off, {why:?}");
+    let r = ui.call("engine.execute", json!({ "command": "clipboard.copyValue", "params": {} }));
+    assert_eq!((r["code"].clone(), r["data"]["why"].as_str().is_some_and(|w| w.contains("8 MiB"))), (json!("disabled"), true), "{r}");
+    ui.click("grid-cell-2-1");
+    assert_eq!(copy_state(&mut ui).1.as_deref(), Some("the value is NULL"));
+    ui.click("grid-cell-3-1");
+    let copies = ui.copied.len();
+    ui.click("value-copy");
+    assert_eq!((ui.copied.len(), ui.copied().as_deref()), (copies + 1, Some("")), "the empty text");
+    ui.execute("cell.edit", json!({ "row": 4, "column": 1, "value": "staged text" }));
+    ui.click("grid-cell-4-1");
+    ui.click("value-copy");
+    assert_eq!(ui.copied().as_deref(), Some("staged text"), "the staged value");
+}
+
+/// A text column holding JSON: its facts start `Formatted as JSON`, no chip.
+#[test]
+fn a_text_column_holding_json_says_formatted_as_json() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.click("grid-cell-0-8");
+    let head = ui.value("value-panel");
+    assert_eq!(head["label"], "text containing JSON", "the label kept: {head}");
+    let facts = head["facts"].as_str().unwrap_or_default();
+    assert!(facts.starts_with("Formatted as JSON ") && facts_read(facts.trim_start_matches("Formatted as JSON "), false), "{head}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "TEXT CONTAINING JSON").is_none(), "no chip");
+    assert!(ui.text_in(panel, "FORMATTED AS JSON").is_some(), "the fact drawn");
+    let text = ui.rect("value-text");
+    assert!(near(text.top(), panel.top() + 36.0 + 12.0, 0.5), "the value 12 under the bar: {text:?}");
+    // A jsonb isn't formatted: it is JSON.
+    ui.click("grid-cell-0-5");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(!facts.starts_with("Formatted"), "{facts:?}");
+}
+
+/// `scratch.<u> (id int PK, note text, other text)`: row 1's `note` is one line of 300
+/// characters (`0123456789` thirty times), its `other` one of 300 `y`; row 2's `note` is `short`.
+fn one_long_line(db: &TestDb) -> Scratch {
+    Scratch::new(db, "t_value_wrap", |n| {
+        format!(
+            "CREATE TABLE scratch.{n} (id int PRIMARY KEY, note text, other text);
+             INSERT INTO scratch.{n} VALUES (1, repeat('0123456789', 30), repeat('y', 300)), (2, 'short', 'z');"
+        )
+    })
+}
+
+/// The width of a column of the panel's text: an `x` of the code font.
+fn column_w(ui: &Ui) -> f32 {
+    ui.harness.ctx.fonts_mut(|f| f.glyph_width(&dbee_ui_egui::theme::Text::Code.font(), 'x'))
+}
+
+/// WRAP as `value-wrap` says it, and as `value-panel` says it.
+fn wrap_state(ui: &mut Ui) -> bool {
+    let on = ui.value("value-wrap");
+    assert_eq!(ui.value("value-panel")["wrap"], on, "value-panel.wrap is WRAP");
+    on == true
+}
+
+/// The rects painted in the bottom strip of the text box's left half: a horizontal scroll bar.
+fn sideways_bar(ui: &mut Ui) -> usize {
+    let r = ui.rect("value-text");
+    let strip = Rect::from_min_max(pos2(r.left(), r.bottom() - 14.0), pos2(r.center().x, r.bottom()));
+    ui.shapes().iter().filter(|(_, s)| matches!(s, egui::Shape::Rect(rs) if strip.contains_rect(rs.rect) && rs.rect.width() > 10.0)).count()
+}
+
+/// WRAP starts on (a long line wraps); off, the line is one row and scrolls sideways; the
+/// setting is the window's, for every cell and tab, and `ui.toggleValueWrap` flips it.
+#[test]
+fn wrap_starts_on_and_turns_off() {
+    let db = dbee_testkit::require_testdb!();
+    let t = one_long_line(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("scratch", &t.0, 2);
+    ui.click("grid-cell-0-1");
+    assert!(wrap_state(&mut ui), "WRAP starts on");
+    let v = ui.value("value-text");
+    assert!(v["rows"].as_u64().unwrap() > 1 && v["firstColumn"] == 0, "300 characters wrap: {v}");
+    let r = ui.rect("value-text");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    assert_eq!(ui.value("value-text")["firstColumn"], 0, "wrapped text doesn't scroll sideways");
+    assert_eq!(sideways_bar(&mut ui), 0, "no sideways scroll bar while wrapped");
+
+    ui.click("value-wrap");
+    assert!(!wrap_state(&mut ui), "WRAP off");
+    assert_eq!(ui.value("value-text")["rows"], 1, "one line, one row");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    let first = ui.value("value-text")["firstColumn"].as_u64().unwrap();
+    assert_eq!(first, (400.0 / column_w(&ui)).floor() as u64, "scrolled 400 points sideways");
+    // egui's floating bars show while the pointer is over the text.
+    assert!(sideways_bar(&mut ui) > 0, "a sideways scroll bar");
+
+    // Another cell, another tab: still off; another text starts at its left.
+    ui.click("grid-cell-0-2");
+    let v = ui.value("value-text");
+    assert_eq!((v["rows"].as_u64(), v["firstColumn"].as_u64()), (Some(1), Some(0)), "{v}");
+    ui.open_rows("shop", "orders", 100);
+    ui.click("grid-cell-0-8");
+    assert!(!wrap_state(&mut ui), "the setting is the window's");
+    assert_eq!(ui.execute("ui.toggleValueWrap", json!({})), json!({ "wrap": true }));
+    ui.frame();
+    assert!(wrap_state(&mut ui));
+    ui.click("menu-View");
+    ui.click("menu-ui.toggleValueWrap");
+    assert!(!wrap_state(&mut ui), "the View menu's Wrap Values flips it");
+}
+
+/// With WRAP off and the text scrolled sideways, a drag selects the characters under the
+/// pointer, and Ctrl+C copies them.
+#[test]
+fn a_selection_works_scrolled_sideways() {
+    let db = dbee_testkit::require_testdb!();
+    let t = one_long_line(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("scratch", &t.0, 2);
+    ui.click("grid-cell-0-1");
+    if ui.value("value-wrap") == true {
+        ui.click("value-wrap");
+    }
+    let r = ui.rect("value-text");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    let line = "0123456789".repeat(30);
+    let first = ui.value("value-text")["firstColumn"].as_u64().unwrap() as usize;
+    assert!(first > 0, "scrolled sideways");
+    // The row as drawn: it starts left of the box, scrolled about 400 points.
+    let (row, _) = ui.texts().into_iter().find(|(_, g)| g.text() == line).expect("the row drawn");
+    assert!((row.left() - (r.left() + PAD - 400.0)).abs() < 8.0, "the row starts 400 points left: {row:?} in {r:?}");
+    let w = row.width() / 300.0;
+    // From a quarter into column `from` to a quarter into column `from + 10`.
+    let from = first + 3;
+    let x = |col: usize| row.left() + (col as f32 + 0.25) * w;
+    let y = r.top() + LINE_H * 0.5;
+    ui.drag(pos2(x(from), y), pos2(x(from + 10), y));
+    assert_eq!(ui.value("value-text")["selection"], json!([from, from + 10]));
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some(&line[from..from + 10]));
+}
+
+/// WRAP off stays fast (Review Focus 4): a 10 MiB value on one line and 10 MiB of short lines,
+/// scrolled to the end and sideways. Rows stop at 1,000 columns, so no frame lays out more than
+/// the rows in view; frames within `value_panel_frames_within_budget`'s budget.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn wrap_off_keeps_a_ten_mib_line_within_budget() {
+    use dbee_core::{Column, TypeClass};
+    use dbee_engine::ValueView;
+    use dbee_ui_egui::automation::Tags;
+    use dbee_ui_egui::value_panel::{NOWRAP_MAX_COLUMNS, PanelState, contents};
+
+    struct State {
+        view: Option<Arc<ValueView>>,
+        panel: PanelState,
+        tags: Tags,
+        ready: bool,
+    }
+    let column = Column { name: "t".into(), base_type: "text".into(), type_label: "text".into(), class: TypeClass::LongText };
+    const TEN_MIB: usize = 10 * 1024 * 1024;
+    let line = "0123456789abcdef".repeat(TEN_MIB / 16);
+    let short = "a short line of text\n".repeat(TEN_MIB / 21);
+    let views = [
+        ("10 MiB on one line", Arc::new(ValueView::new(&column, Some(&line))), TEN_MIB.div_ceil(NOWRAP_MAX_COLUMNS)),
+        ("10 MiB of short lines", Arc::new(ValueView::new(&column, Some(&short))), TEN_MIB / 21 + 1),
+    ];
+    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), ready: false };
+    let mut h = Harness::builder().with_size(vec2(400.0, 900.0)).build_ui_state(
+        |ui, s: &mut State| {
+            // The first frame sets the fonts; the panel draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
+            s.tags.begin_frame();
+            let rect = Rect::from_min_size(ui.max_rect().min, vec2(360.0, ui.max_rect().height()));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags, false);
+        },
+        state,
+    );
+    h.step();
+    let median = |mut v: Vec<Duration>| {
+        v.sort();
+        v[v.len() / 2]
+    };
+    let timed = |h: &mut Harness<'_, State>| {
+        let start = Instant::now();
+        h.step();
+        start.elapsed()
+    };
+    let wheel = |h: &mut Harness<'_, State>, at: Pos2, delta: egui::Vec2| {
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.input_mut().events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        timed(h)
+    };
+    let mut report = Vec::new();
+    for (name, view, rows) in views {
+        h.state_mut().view = Some(view);
+        let select = timed(&mut h);
+        let tag = h.state().tags.value("value-text").unwrap();
+        assert_eq!(tag["rows"].as_u64(), Some(rows as u64), "{name}: rows of at most {NOWRAP_MAX_COLUMNS} columns");
+        let steady = median((0..60).map(|_| timed(&mut h)).collect());
+        let at = h.state().tags.rect("value-text").unwrap().center();
+        // Down to the end, then sideways, then up again.
+        let mut scroll: Vec<Duration> = (0..30).map(|_| wheel(&mut h, at, vec2(0.0, -1.0e7))).collect();
+        scroll.extend((0..30).map(|_| wheel(&mut h, at, vec2(-400.0, 0.0))));
+        scroll.extend((0..30).map(|_| wheel(&mut h, at, vec2(0.0, 4_000.0))));
+        for _ in 0..12 {
+            h.step();
+        }
+        let tag = h.state().tags.value("value-text").unwrap();
+        let (first, column) = (tag["firstRow"].as_u64().unwrap(), tag["firstColumn"].as_u64().unwrap());
+        assert!(first > 0, "{name}: scrolled down");
+        let slowest = *scroll.iter().max().unwrap();
+        let scroll = median(scroll);
+        report.push(format!(
+            "{name}: select {select:?}, steady median {steady:?}, scrolling median {scroll:?} (max {slowest:?}), at row {first} column {column}"
+        ));
+        assert!(select < FRAME_BOUND, "{name}: selecting took {select:?}");
+        assert!(steady < Duration::from_millis(16) && scroll < Duration::from_millis(16), "{name}: {steady:?} {scroll:?}");
+        assert!(slowest < FRAME_BOUND, "{name}: a scrolling frame took {slowest:?}");
+    }
+    println!("value panel, WRAP off, on {}:\n  {}", machine(), report.join("\n  "));
 }
