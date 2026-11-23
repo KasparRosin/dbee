@@ -56,6 +56,18 @@ jobs:
           xvfb-run -a -s "-screen 0 1920x1080x24" \
             cargo test --workspace --test m1_day --test m2_day --test control_access -- --ignored --nocapture
 
+      - name: Keep the days' pictures when they fail
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: day-pictures
+          path: |
+            target/m1-day/
+            target/m2-day/
+            target/control-access/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Free disk space at the end (tells a full disk from other failures)
         if: always()
         run: |

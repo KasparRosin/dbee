@@ -195,7 +195,16 @@ impl App {
     }
 
     pub fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
+        if let Some(tag) = self.tag(id) {
+            return tag["value"].clone();
+        }
+        // What the window said instead, for a failure that shows only on a slower machine.
+        let notice = self.tag("notice").map(|t| t["value"].clone());
+        let table = self.table();
+        panic!(
+            "no widget `{id}` was drawn (notice: {notice:?}; table loading: {}, applying: {}, editable: {}, why not: {})",
+            table["loading"], table["applying"], table["editable"], table["noEditReason"]
+        )
     }
 
     /// Widget `inner` lies inside widget `outer` (to half a point).
