@@ -1,89 +1,34 @@
-<p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/dev.rosin.dbee.png" alt="dbee" width="128">
-</p>
+# dbee
 
-<h1 align="center">dbee</h1>
+dbee is a free, open-source desktop database client, written in Rust. It connects to PostgreSQL, MySQL, MariaDB and SQLite, directly or through an SSH tunnel: browse and filter tables, edit rows, run queries and copy results.
 
-<p align="center"><b>A fast, free database client for Linux, macOS and Windows.</b></p>
+![dbee showing a table of orders filtered by two conditions: the schema tree on the left, the grid under the filter bar in the middle, the selected row as JSON on the right](assets/readme/screenshot-filters.png)
 
-> [!NOTE]
-> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
-> The second, M2, brings the same workflow to MySQL, MariaDB and SQLite files, and it is built too. File export and import come next (M3).\
-> Linux x86_64 is tested; the other platforms are defined, untested yet.
+## Status
 
-<p align="center">
-  <img src="assets/readme/screenshot-filters.png" alt="dbee with a table of orders filtered by three conditions: the schema tree on the left, the grid under its filter bar in the middle, the value panel on the right">
-</p>
+dbee is **pre-alpha**. The daily workflow works on all four databases; importing and exporting files does not exist yet. Only Linux x86_64 is tested so far. [ROADMAP.md](ROADMAP.md) says where dbee stands, and [docs/gaps.md](docs/gaps.md) lists the known gaps.
 
-## What works today
+## Install
 
-- **Databases:** PostgreSQL (14 and newer), MySQL (5.7 and newer), MariaDB (10.11 and newer) and SQLite files.
-- **Connecting:** saved and recent connections; a card per database type, then its form with Fill from URL; TLS modes with a CA file; an SSH tunnel with a key (found on its own), the agent or a password, and host key checks; the server's databases listed under the Database field; read-only mode; passwords in the OS keyring; reconnecting after a lost connection. A SQLite file opens from the command line (`dbee shop.sqlite`), dropped on the window or from the file manager, and Save connection keeps it in the list.
-- **Browsing:** a schema tree with a filter (databases on MySQL and MariaDB); quick search (Ctrl+P), which also finds saved connections and switches to one; table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging, estimated and exact counts, and foreign keys followed into a filtered tab.
-- **Editing:** staged edits (one-line, multi-line and boolean editors, set NULL, add and delete rows), undo and redo, and Apply (Ctrl+S) in one transaction, all or nothing.
-- **Values:** a value panel with the whole value of a cell, JSON pretty-printed and coloured.
-- **Queries:** query tabs with syntax colours; run all, or the statement under the cursor; cancel; several results; error cards that jump to the error's position; on MySQL and MariaDB, the database a tab runs in.
-- **Copying:** values, with a header, or as CSV, JSON or Markdown.
-- **Agents:** a localhost control channel that runs every command and drives the window.
-
-Known gaps and limits are ranked in [docs/gaps.md](docs/gaps.md).
-
-## Why dbee
-
-- **Native and fast.** One Rust codebase, with no Electron and no browser engine.
-- **Open source.** Dual-licensed MIT or Apache-2.0, written clean-room from public specifications and black-box observation.
-- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool is planned.
-
-## Platforms
-
-dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms build in the release pipeline but nobody has installed and started them yet (Windows ARM64 excepted) ([docs/hardware-parity.md](docs/hardware-parity.md)).
-
-## Download
-
-v0.1.0 on the Releases page is an unsigned test pre-release of the release pipeline ([docs/releasing.md](docs/releasing.md)). Building dbee from source is still the main way to run it.
+Downloads for Linux, macOS, Windows and FreeBSD are on the [Releases page](https://github.com/KasparRosin/dbee/releases). [docs/installing.md](docs/installing.md) says how to install each one.
 
 ## Build from source
 
-You need:
-
-- Rust through [rustup](https://rustup.rs). `rust-toolchain.toml` picks the pinned toolchain.
-- A C compiler (Debian and Ubuntu: `build-essential`).
-- On Linux, no `-dev` packages: dbee loads the window and graphics libraries (Wayland or X11, xkbcommon, Vulkan or OpenGL) from the desktop at run time.
-- Optional: Docker, for the test servers that the Postgres, MySQL, MariaDB and SSH tests run against. Without them those tests print `SKIPPED`.
+You need Rust through [rustup](https://rustup.rs) (`rust-toolchain.toml` picks the toolchain) and a C compiler. On Linux, also the packages that [the CI workflow](.github/workflows/ci.yml) installs.
 
 ```sh
-cargo run -p dbee                       # the desktop app
-cargo run -p dbee-cli -- --version      # the command-line tool (version and help so far)
-cargo xtask testdb up                   # optional: start the Docker test servers
-cargo xtask ci                          # fmt, clippy, tests, assets, layering, provenance
+cargo run -p dbee    # the desktop app
+cargo xtask ci       # every check, before a pull request
 ```
 
-The app writes its log to `<settings dir>/logs/dbee.log`, where the settings dir is `~/.config/dbee` on Linux and BSD, `~/Library/Application Support/dbee` on macOS and `%APPDATA%\dbee` on Windows.
+## More
 
-## For agents
+- [docs/](docs/README.md): every doc, from the architecture to driving dbee from an agent.
+- [CONTRIBUTING.md](CONTRIBUTING.md): commit messages and checks. Agents start with [AGENTS.md](AGENTS.md).
+- [SECURITY.md](SECURITY.md): reporting a vulnerability, in private.
 
-`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The command-line tool's commands are planned and documented first ([docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
+## License
 
-## Documentation
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Copyright (c) 2026 Kaspar Rosin and the dbee contributors. Every asset's author, source and licence is in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-- [ROADMAP.md](ROADMAP.md): stage, headline numbers and progress log.
-- [docs/gaps.md](docs/gaps.md): known gaps and limits, ranked.
-- [docs/architecture.md](docs/architecture.md): an engine-first Cargo workspace whose layering is enforced, so the UI crate can be swapped.
-- [docs/testing.md](docs/testing.md): the tests and the Docker test servers.
-- [docs/agents.md](docs/agents.md): driving dbee from an agent, and developing it as one.
-- [docs/README.md](docs/README.md): every doc.
-
-## Security
-
-Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
-
-## License and credits
-
-dbee is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-Copyright (c) 2026 Kaspar Rosin and the dbee contributors.
-
-Every asset in the repository is listed with its author, source and licence in [ATTRIBUTION.md](ATTRIBUTION.md). The repository holds no font files; the app embeds egui's default fonts (see ATTRIBUTION.md).
-
-dbee is inspired by Beekeeper Studio.
-
-<sub>Beekeeper Studio is a trademark of its owner. dbee is an independent project and is not affiliated with or endorsed by it.</sub>
+dbee is inspired by Beekeeper Studio. It is an independent project, not affiliated with or endorsed by Beekeeper Studio, which is a trademark of its owner.

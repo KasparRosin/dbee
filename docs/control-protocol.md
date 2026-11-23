@@ -6,7 +6,7 @@ The desktop app takes a control port, so agents and tests can drive the real win
 
 ```sh
 dbee --control 7979            # or DBEE_CONTROL_PORT=7979
-cargo xtask run-isolated       # the same on a throwaway home (docs/agents.md §4)
+cargo xtask run-isolated       # the same on a throwaway home (docs/agents.md, "Verifying UI work")
 ```
 
 The app listens on `127.0.0.1` only, before the window opens: a port in use stops the start, so an agent never drives another dbee by mistake. A client proves itself with a token only this user can read, and the app proves itself back (see [Connecting](#connecting)). It is meant for agents and tests. HTTP requests are refused (an `httpRefused` reply, then the connection closes, with nothing run), so web pages cannot use the channel through the browser. After the token, send newline-delimited JSON; every request line gets one reply line, in order:
@@ -29,7 +29,7 @@ Once it holds the port, each start of the app writes a token file with two rando
 | Started by | The token file |
 |---|---|
 | `cargo xtask run-isolated --port <port>` | `target/isolated/<port>/control-token` |
-| `dbee --control <port>` | `control-<port>.token` in the settings folder (on Linux, `~/.config/dbee/`; for the other systems see [README.md](../README.md#L61)), or wherever `DBEE_CONTROL_TOKEN_FILE` says |
+| `dbee --control <port>` | `control-<port>.token` in the settings folder (`~/.config/dbee/` on Linux and FreeBSD, or `$XDG_CONFIG_HOME/dbee/` when that is set; `~/Library/Application Support/dbee/` on macOS; `%APPDATA%\dbee\` on Windows), or wherever `DBEE_CONTROL_TOKEN_FILE` says |
 
 The settings folder is used also with `DBEE_NO_PREFS`: the token has to live somewhere, so that run writes the token file there and leaves it (the folder stays) after it ends, though it keeps no connections file, no settings file and no log file. A file named by `DBEE_CONTROL_TOKEN_FILE` wants a folder of its own: that folder becomes `0700`, so a folder others can write in is no place for it, and a start that cannot make the file stops and says so. Give each run its own file: two starts that name one file replace each other's lines, and only the later one can be reached by a new client.
 
