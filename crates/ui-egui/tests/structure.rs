@@ -406,9 +406,11 @@ fn grid_keys_do_nothing_in_structure() {
     ui.ctrl("C");
     ui.ctrl_shift("C");
     ui.ctrl("A");
+    ui.key("Enter");
     for _ in 0..3 {
         ui.frame();
     }
+    assert_eq!(ui.inspect()["editor"], Json::Null, "Enter opened no editor");
     assert_eq!(ui.copied.len(), copies, "nothing copied: {:?}", ui.copied.last());
     let t = ui.table();
     assert_eq!(t["edits"], before["edits"], "nothing staged: {t}");

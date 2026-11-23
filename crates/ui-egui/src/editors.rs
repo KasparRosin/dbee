@@ -637,10 +637,16 @@ pub fn take_large_pastes(events: &mut Vec<Event>, length: usize, selected: usize
 }
 
 /// Opens an editor on the selection's focus cell when Enter is pressed over a table tab with a
-/// selection and no widget has the keyboard.
+/// selection and no widget has the keyboard. While the tab shows STRUCTURE the grid is out of
+/// sight and Enter opens nothing.
 fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     let st = app.session.state();
-    if st.screen != Screen::Workspace || app.view.dialog.is_some() || app.view.quick.open || ctx.memory(|m| m.focused()).is_some() {
+    if st.screen != Screen::Workspace
+        || app.view.dialog.is_some()
+        || app.view.quick.open
+        || ctx.memory(|m| m.focused()).is_some()
+        || shortcuts::grid_unseen(app)
+    {
         return;
     }
     let Some(Tab::Table(t)) = st.active_tab() else { return };
