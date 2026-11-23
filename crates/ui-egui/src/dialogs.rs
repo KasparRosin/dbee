@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn a_click_on_the_scrim_does_nothing() {
-        // The design: a click on the scrim leaves the dialog open and answers nothing; Escape and
+        // A click on the scrim leaves the dialog open and answers nothing; Escape and
         // Cancel still close it.
         for (name, dialog) in every() {
             let mut h = open(Theme::Light, dialog);
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn fill_from_url_has_no_intro_line() {
-        // The design's dialog is its title, the field and the error line: the field 20 under the
+        // The dialog is its title, the field and the error line: the field 20 under the
         // title, no words between them and no `dialog-text` (the error names the schemes when a
         // paste is wrong).
         let h = open(Theme::Light, Dialog::fill_from_url(vec![DbKind::Postgres, DbKind::MySql]));
@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn close_anyway_apply_again_and_delete_are_danger_buttons() {
-        // The design: Close anyway, Apply again, Quit anyway and Delete are `danger` with `on_danger` words;
+        // Close anyway, Apply again, Quit anyway and Delete are `danger` with `on_danger` words;
         // Fill, Trust and connect, Connect and Close are the `ink` main button; Cancel an outline.
         for (theme, t) in both() {
             for (name, dialog) in every() {
@@ -1264,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transaction_prompt_matches_the_page() {
+    fn the_transaction_prompt_has_cancel_rollback_and_commit() {
         // The dialog with three buttons, in light and dark: the title, the
         // text in `body` with the names in `data` as written, then CANCEL, ROLLBACK and COMMIT
         // from the left, 8 apart, COMMIT the main button in `ink` and the others outlined. A
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn a_close_that_ends_a_transaction_says_how_it_went() {
-        // The design's toasts: `Committed on <connection>` or `Rolled back on <connection>`, the
+        // The toasts: `Committed on <connection>` or `Rolled back on <connection>`, the
         // name in `data`; an error toast with the reason when the end failed; none when no
         // transaction was open any more, or the connection went meanwhile.
         let home = temp_home(None, None);
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[test]
     fn the_quit_words_say_what_still_runs_first() {
-        // The design's words for quitting: what still runs and quitting stops comes first, the
+        // The words for quitting: what still runs and quitting stops comes first, the
         // names in `data`, then the sentence of what is lost. In the transaction prompt the
         // transaction's own sentence comes first, and a run in it says that quitting stops it.
         let said = |s: Stops| s.said_after(Words::default());

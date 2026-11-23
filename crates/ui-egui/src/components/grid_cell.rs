@@ -3,7 +3,7 @@
 //! plain data that draws into the rect the grid gives it; the grid ([`crate::grid`]) keeps its
 //! layout, scrolling and input, and a cell's follow link is the one part that answers a click.
 //!
-//! One ground at a time (foundations): a marked cell (staged, new, deleted, failed, saved) keeps
+//! One ground at a time: a marked cell (staged, new, deleted, failed, saved) keeps
 //! its mark when selected or hovered, with nothing under it, and when selected takes an outline,
 //! `staged_strong` on a staged cell and `ink` on the others. A selected cell doesn't change on
 //! hover; the others light up with their whole row. The saved mark fades out: its ground thins
@@ -29,7 +29,7 @@ use crate::tree::thousands;
 /// The mark `display::grid_text` puts for a line break, drawn as `icon/line-break`.
 pub const BREAK: char = '↵';
 
-/// What a character of `data` takes (foundations: 7.2 at 12 px), for widths worked out before
+/// What a character of `data` takes (7.2 at 12 px), for widths worked out before
 /// anything is laid out.
 pub const DATA_CHAR_W: f32 = 7.2;
 
@@ -147,7 +147,7 @@ impl Header<'_> {
     /// The sort mark always has its room: where a click sorts (or the column is sorted), the name
     /// and type are cut to leave room for both hover arrows after them, hovered or not, so
     /// nothing moves or is cut anew on hover and the mark is never covered or pushed out of the
-    /// cell. As on the page, a left header's mark may run into the cell's right padding, up to
+    /// cell. A left header's mark may run into the cell's right padding, up to
     /// [`GRID_SORT_EDGE`] from its edge.
     pub fn paint(&self, ui: &Ui, rect: Rect) -> bool {
         let t = tokens(ui.ctx());
@@ -159,7 +159,7 @@ impl Header<'_> {
         let hint = self.sortable && self.hovered && self.sort.is_none();
         let to_right = self.align == Align::Right && self.key.is_none();
         let hint_w = 2.0 * arrow + GRID_SORT_HINT_GAP;
-        // As on the page: a number's hint takes its room in the run, moving the name; elsewhere it
+        // A number's hint takes its room in the run, moving the name; elsewhere it
         // follows the type, and the name and type stay put.
         let sort_w = match (self.sort, hint) {
             (Some(_), _) => gap + arrow,
@@ -489,7 +489,7 @@ mod tests {
         (a - b).abs() <= 0.5
     }
 
-    /// A plain cell of the page's (`grid/cell`: 150 by 26).
+    /// A plain cell (`grid/cell`: 150 by 26).
     fn plain(text: CellText<'_>) -> Cell<'_> {
         Cell {
             text,
@@ -549,7 +549,7 @@ mod tests {
         (shapes, at, link)
     }
 
-    /// The right and bottom 1 px edges of `r`, as the page's inside strokes.
+    /// The right and bottom 1 px edges of `r`: strokes inside the cell.
     fn lines(r: Rect) -> [Rect; 2] {
         [Rect::from_min_max(pos2(r.right() - 1.0, r.top()), r.max), Rect::from_min_max(pos2(r.left(), r.bottom() - 1.0), r.max)]
     }
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn each_cell_state_matches_the_page() {
+    fn each_cell_state_has_its_look() {
         // 26 tall, its value in `data`, 8 in from its sides and centred. Plain on
         // `card`, hovered (its row) `hover`, selected `selection`, each with a 1 px `line` at its
         // right and bottom; the focus cell `selection` with a 2 px `ink` outline inside and no
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn a_marked_cell_keeps_its_ground_when_selected_or_hovered() {
-        // Foundations' one ground at a time: a marked cell keeps its own ground, nothing under or
+        // One ground at a time: a marked cell keeps its own ground, nothing under or
         // over it, when selected, focused, hovered or both; selected it takes its outline. A row
         // to delete keeps its line across. An unmarked selected cell stays `selection` on hover.
         let looks = [(false, false, true), (true, false, false), (true, true, false), (true, false, true), (true, true, true)];
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_cell_matches_the_page() {
+    fn the_header_cell_has_its_look() {
         // 30 tall on `card`, a 1 px `line` at its right and a 1 px `ink` line along
         // its bottom; 8 in from its sides, its parts 6 apart: `icon/key` (`key` on a primary key,
         // `text_muted` on a foreign one), the name in `header` `text`, the type in `data`
@@ -752,7 +752,7 @@ mod tests {
                 ("text", head("customer", "text"), 140.0),
                 ("as written", head("Mood", "enum('small','Large')"), 240.0),
                 ("primary", Header { key: Some(Key::Primary), ..head("id", "int8") }, 140.0),
-                // The page's own: at 150 its hint runs into the padding.
+                // At 150 its hint runs into the padding.
                 ("foreign", Header { key: Some(Key::Foreign), ..head("customer_id", "int4") }, 150.0),
             ] {
                 let at_ = format!("{theme:?} {state}");
@@ -899,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn the_row_number_matches_the_page() {
+    fn the_row_number_has_its_look() {
         // 26 tall, at least 36 wide, on `card` with a 1 px `line` at its right and
         // bottom; the number in `data` `text_muted`, 8 from the right. Hovered `hover`; selected
         // `selection`; the whole row selected `selection` with the number in `text`; a new row

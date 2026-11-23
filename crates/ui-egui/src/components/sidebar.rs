@@ -25,7 +25,7 @@ use crate::tree::thousands;
 pub enum Refresh {
     /// A click asks for a refresh.
     Idle,
-    /// A refresh runs: the plain icon, and a click does nothing (LC4; the count says `LOADING`).
+    /// A refresh runs: the plain icon, and a click does nothing (the count says `LOADING`).
     Running,
     /// It can't run now: the icon in `text_faint`, and a click does nothing.
     Off,
@@ -186,7 +186,7 @@ mod tests {
     use crate::theme::Text;
     use crate::theme::size::BAR_H;
 
-    /// The page's header is this wide (`sidebar/filter`, `sidebar/count`).
+    /// The header is drawn this wide (`sidebar/filter`, `sidebar/count`).
     const W: f32 = 259.0;
 
     fn close(a: f32, b: f32) -> bool {
@@ -224,13 +224,13 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_filter_matches_the_page() {
+    fn the_sidebar_filter_has_its_look() {
         // A row 36 tall with a 1 px `line` along its bottom and no ground. The field
         // fills it up to the refresh, 35 tall above the line, its words 12 in and centred, in
         // `body`: the placeholder `text_muted`, what is typed `text`. Keyboard focus is a 2 px
         // `ink` box 2 inside the field, corners 2. The refresh is a plain icon button, a 28
         // square 4 from the row's end, centred on the field, its icon `text`, also while a
-        // refresh runs (LC4); off, the icon `text_faint`.
+        // refresh runs; off, the icon `text_faint`.
         let focused = Look { focused: true, ..Look::default() };
         for (theme, t) in both() {
             for state in ["placeholder", "filled", "focus", "running", "off"] {
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn a_running_refresh_shows_no_spinner() {
-        // LC4: while a refresh runs the refresh keeps its plain icon, and a click asks nothing.
+        // While a refresh runs the refresh keeps its plain icon, and a click asks nothing.
         for (theme, t) in both() {
             let Drawn { shapes, refresh, .. } = filter(theme, "", Some(Refresh::Running), None);
             let square = refresh.expect("the refresh is drawn");
@@ -299,7 +299,7 @@ mod tests {
     const TABLES: [&str; 2] = ["table", "tables"];
 
     #[test]
-    fn the_count_matches_the_page() {
+    fn the_count_has_its_look() {
         // A row 28 tall, its words 12 in and centred, in `label` capitals,
         // `text_muted`; read out as written.
         let counts = [
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn the_sidebar_filter_by_keyboard_and_pointer() {
-        // Foundations' Focus rule: Tab to the field and its ring shows, a click gives it focus
+        // The focus rule: Tab to the field and its ring shows, a click gives it focus
         // without the ring, and nothing moves between the two. What is typed is kept and drawn as
         // typed. The refresh asks for a refresh only when idle.
         for (theme, t) in both() {

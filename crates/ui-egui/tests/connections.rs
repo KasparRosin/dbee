@@ -176,7 +176,7 @@ fn new_connection_starts_with_the_engine_cards() {
     assert!(kind[0] + kind[2] <= change[0], "{kind:?} {change:?}");
 }
 
-/// The engine cards are K2: one box of cells 104 tall, side by side and joined, each with its
+/// The engine cards: one box of cells 104 tall, side by side and joined, each with its
 /// engine's logo 16 in and 16 down, 28 square.
 #[test]
 fn the_engine_cards_are_k2() {
@@ -1060,7 +1060,7 @@ fn single_click_loads_and_double_click_connects() {
     assert!(!ids(&i).iter().any(|id| id.starts_with("conn-recent-")), "{}", ids(&i).join(" "));
 }
 
-/// The design: a click on the scrim does nothing for a dialog. It stays open, and what is under the
+/// A click on the scrim does nothing for a dialog. It stays open, and what is under the
 /// scrim gets no click: a saved card there is neither chosen nor, on a double click, opened.
 /// Escape still cancels.
 #[test]
@@ -1306,7 +1306,7 @@ fn recent_connections_stay_in_the_one_list() {
     assert!(!words.iter().any(|w| w.contains(" ago") || w.contains("just now")), "no time words: {words:?}");
 }
 
-/// E2: on first start the list is empty, with no phrase, beside the cards.
+/// On first start the list is empty, with no phrase, beside the cards.
 #[test]
 fn first_start_shows_an_empty_list_and_the_cards() {
     let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
@@ -1872,7 +1872,7 @@ fn edges_on(ui: &Ui, at: egui::Rect) -> Vec<(f32, egui::Color32)> {
 }
 
 /// The form's fields and the URL dialog's, moved to `components::input`, say in `ui.inspect` what
-/// they said before (ids, values, secrets, enabled flags), are the page's 28 tall, keep what is
+/// they said before (ids, values, secrets, enabled flags), are 28 tall, keep what is
 /// typed as typed, and have their label drawn in capitals over them.
 #[test]
 fn moved_inputs_keep_their_ids_values_and_secrets() {
@@ -1901,7 +1901,7 @@ fn moved_inputs_keep_their_ids_values_and_secrets() {
         assert_eq!(e["value"], typed, "`{id}`'s value");
         assert!(e.get("enabled").is_none() && e.get("masked").is_none(), "`{id}`: {e}");
         let at = rect_of(&e);
-        assert_eq!(at.height(), 28.0, "`{id}` is the page's 28 tall: {at:?}");
+        assert_eq!(at.height(), 28.0, "`{id}` is 28 tall: {at:?}");
         assert!(ui.text_in(at, typed).is_some(), "`{id}` draws `{typed}` as typed");
         assert!(typed == typed.to_uppercase() || ui.text_in(at, &typed.to_uppercase()).is_none(), "`{id}`: never in capitals");
         let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
@@ -1913,7 +1913,7 @@ fn moved_inputs_keep_their_ids_values_and_secrets() {
     assert!(password.get("value").is_none(), "conn-password has no value in ui.inspect");
     assert!(!i.to_string().contains(SECRET), "the typed password is not in ui.inspect");
     let at = rect_of(&password);
-    assert_eq!(at.height(), 28.0, "conn-password is the page's 28 tall: {at:?}");
+    assert_eq!(at.height(), 28.0, "conn-password is 28 tall: {at:?}");
     assert!(ui.text_in(at, &"•".repeat(SECRET.len())).is_some(), "conn-password draws a dot for each letter");
     let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
     assert!(ui.text_in(above, "PASSWORD").is_some(), "conn-password: its label 4 above it");
@@ -1938,7 +1938,7 @@ fn moved_inputs_keep_their_ids_values_and_secrets() {
     assert_eq!((url["masked"].clone(), url["set"].clone()), (json!(true), json!(false)), "{url}");
     assert!(url.get("enabled").is_none(), "{url}");
     let at = rect_of(&url);
-    assert_eq!(at.height(), 28.0, "dialog-url is the page's 28 tall: {at:?}");
+    assert_eq!(at.height(), 28.0, "dialog-url is 28 tall: {at:?}");
     assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
     ui.text("oracle://Nope.Example");
     ui.click("dialog-ok");
@@ -1978,7 +1978,7 @@ fn the_moved_secret_field_stays_a_secret() {
     assert_eq!((secret["masked"].clone(), secret["set"].clone()), (json!(true), json!(false)), "{secret}");
     assert!(secret.get("enabled").is_none(), "{secret}");
     let at = rect_of(&secret);
-    assert_eq!(at.height(), 28.0, "dialog-secret is the page's 28 tall: {at:?}");
+    assert_eq!(at.height(), 28.0, "dialog-secret is 28 tall: {at:?}");
     assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
     ui.text(SECRET);
     let i = ui.inspect();
@@ -2005,7 +2005,7 @@ fn fills_on(ui: &Ui, at: egui::Rect) -> Vec<egui::Color32> {
 }
 
 /// The checkbox `id` (moved to `components::checkbox`) says `value` and `enabled` in `i` as before,
-/// is the page's 18 tall, with its 14 box at its left, `ink` when ticked (`text_faint` when off),
+/// is 18 tall, with its 14 box at its left, `ink` when ticked (`text_faint` when off),
 /// and its label drawn as written 8 after the box.
 fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, label: &str) {
     let t = dbee_ui_egui::theme::LIGHT;
@@ -2013,7 +2013,7 @@ fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, labe
     assert_eq!(e["value"], value, "`{id}`'s value: {e}");
     assert_eq!(e.get("enabled") != Some(&json!(false)), enabled, "`{id}` enabled: {e}");
     let at = rect_of(&e);
-    assert_eq!(at.height(), 18.0, "`{id}` is the page's 18 tall: {at:?}");
+    assert_eq!(at.height(), 18.0, "`{id}` is 18 tall: {at:?}");
     let boxed = egui::Rect::from_min_size(at.min + egui::vec2(0.0, 2.0), egui::Vec2::splat(14.0));
     let ground = match (value, enabled) {
         (true, true) => t.ink,
@@ -2026,8 +2026,7 @@ fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, labe
 }
 
 /// The form's checkboxes, SSL mode, SSH login and colours, moved to `components`, say in
-/// `ui.inspect` what they said before (ids, values, enabled flags) and change as before; they are
-/// drawn as the page draws them.
+/// `ui.inspect` what they said before (ids, values, enabled flags) and change as before.
 #[test]
 fn moved_choices_keep_their_ids_and_values() {
     let t = dbee_ui_egui::theme::LIGHT;
@@ -2042,7 +2041,7 @@ fn moved_choices_keep_their_ids_and_values() {
     let ssl = tag_in(&i, "conn-ssl").expect("SSL mode is drawn");
     assert_eq!(ssl["value"], "prefer", "{ssl}");
     let row = rect_of(&ssl);
-    assert_eq!(row.height(), 28.0, "the SSL box is the page's 28 tall: {row:?}");
+    assert_eq!(row.height(), 28.0, "the SSL box is 28 tall: {row:?}");
     assert_eq!((edges_on(&ui, row), fills_on(&ui, row)), (vec![(1.0, t.line_strong)], vec![t.card]), "the SSL box");
     let modes = ["disable", "prefer", "require", "verify-ca", "verify-full"];
     for mode in modes {
@@ -2149,7 +2148,7 @@ fn a_swatch_is_chosen_with_the_keyboard() {
 }
 
 /// The password dialog's "Save in keyring", moved to `components::checkbox`: its id, value and
-/// enabled flag as before, drawn as the page's checkbox.
+/// enabled flag as before, drawn as the shared checkbox.
 #[test]
 fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
     let db = dbee_testkit::require_testdb!();
@@ -2180,7 +2179,7 @@ fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
 }
 
 /// The open database list moves its own highlight with Down and Up (its names take no keyboard
-/// focus), drawn as the menu item's hover: `raised_hover` over the page's 28 tall item.
+/// focus), drawn as the menu item's hover: `raised_hover` over the 28 tall item.
 #[test]
 fn the_database_list_still_moves_with_the_arrows() {
     let db = dbee_testkit::require_testdb!();
@@ -2198,7 +2197,7 @@ fn the_database_list_still_moves_with_the_arrows() {
         for (n, (id, name)) in listed(&i).into_iter().enumerate().take(4) {
             let r = rect(&tag_in(&i, &id).unwrap());
             let at = egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32));
-            assert_eq!(at.height(), 28.0, "{id}: the page's 28 tall item");
+            assert_eq!(at.height(), 28.0, "{id}: the 28 tall item");
             let grounds: Vec<egui::Color32> = ui
                 .shapes()
                 .into_iter()
@@ -2270,7 +2269,7 @@ fn drawn_as(ui: &Ui, within: egui::Rect, words: &str) -> Option<(egui::Color32, 
     })
 }
 
-/// The status bar's address (as the design draws it): after the name block, in `data`
+/// The status bar's address: after the name block, in `data`
 /// grey, the connection as typed in its form. Postgres and MySQL, through the SSH tunnel (the
 /// database's address as typed, then ` via ` and the SSH host, never the tunnel's local port),
 /// and a SQLite file with the home folder as `~`. `status-address` holds it.

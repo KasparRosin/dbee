@@ -15,13 +15,13 @@ use egui::{Color32, CornerRadius, Shadow, Stroke};
 use size::{CARET_W, RADIUS_CONTROL, RADIUS_FLOAT};
 
 /// The one strength of the dim: what waits on a job is drawn at this opacity, the connection
-/// form's fields while a test or connect runs (LC3, "dims the form to 50 %") and the old rows of a
-/// reload (LC2, "the old rows at 50 % opacity").
+/// form's fields while a test or connect runs and the old rows of a
+/// reload.
 pub const DIM: f32 = 0.5;
 
-/// The design's one shadow, under every popup and dialog.
+/// The one shadow, under every popup and dialog.
 pub fn float_shadow(t: &Tokens) -> Shadow {
-    // The design's blur 18 is a radius: its fade reaches 18 past the edge. egui's blur is the
+    // The shadow's blur 18 is a radius: its fade reaches 18 past the edge. egui's blur is the
     // fade's whole width, centred on the edge, so it takes twice that.
     Shadow { offset: [0, 6], blur: 36, spread: 0, color: t.shadow }
 }
@@ -85,7 +85,7 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     style.spacing.scroll.dormant_background_opacity = 0.0;
     style.spacing.scroll.active_background_opacity = 0.0;
     style.spacing.scroll.interact_background_opacity = 0.0;
-    // egui fades the ends of a scroll area that has more to scroll to; the design is flat.
+    // egui fades the ends of a scroll area that has more to scroll to; dbee's are flat.
     style.spacing.scroll.fade.strength = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);

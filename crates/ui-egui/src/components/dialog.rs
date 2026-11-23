@@ -221,7 +221,7 @@ mod tests {
     use crate::theme::Text;
 
     const WINDOW: Vec2 = vec2(900.0, 600.0);
-    /// Where the page puts a 440 dialog in this window: centred, 18 % of the height down (at most
+    /// Where a 440 dialog goes in this window: centred, 18 % of the height down (at most
     /// 140), as today's dialogs sit.
     const AT: Pos2 = pos2(230.0, 108.0);
     const CLOSE: &str = "Close Query 1? Its query text will be lost.";
@@ -240,7 +240,7 @@ mod tests {
     const LONG_ERROR: &str = "invalid connection URL: expected a postgres://, postgresql://, mysql:// or mariadb:// URL, but this one \
                               starts with shop@pg14. Paste the whole URL your provider gave you, its scheme and two slashes first.";
 
-    /// The page's five contents, a confirm with a long message and a field with a
+    /// The five contents, a confirm with a long message and a field with a
     /// long error.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Content {
@@ -353,9 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn each_dialog_matches_the_page() {
+    fn each_dialog_has_its_look() {
         // 440 wide, `raised`, a 1 px `line` edge, corners 4, the shadow (0 6, the
-        // page's blur 18, egui's 36); 20 inside the edge; the title (`title`) and 6 under it the
+        // blur's radius 18 is egui's 36); 20 inside the edge; the title (`title`) and 6 under it the
         // text (`body`), both `text`; 20 to the body (a field, 12 to a checkbox; a field's error
         // line under it), 20 to the buttons: 28 tall, at least 80 wide, 8 apart, the first on the
         // right. Over a `scrim` covering the window, the dialog centred near the top.
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_long_field_error_wraps_and_the_dialog_grows() {
-        // The design: a long error wraps under the field, at the field's width, and the dialog
+        // A long error wraps under the field, at the field's width, and the dialog
         // grows by its lines; it is never cut, since the reason is what the user needs.
         for (theme, t) in both() {
             let one = open(theme, Content::FieldWithError);

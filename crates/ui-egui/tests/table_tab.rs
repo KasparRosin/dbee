@@ -840,7 +840,7 @@ fn the_operator_choice_shows_each_label_whole() {
         ui.click("filter-0-op");
         // The closed choice shows the chosen operator's label whole where the row has room for
         // it (the wide window), cut with … inside its box where it hasn't (the app's window with
-        // the value panel open: the row at the page's sizes is narrower than every control at its
+        // the value panel open: the row at its controls' sizes is narrower than every control at its
         // least with the longest label), and the row still fits: left of the value panel, nothing
         // over anything.
         for (id, label) in OPS {
@@ -1187,7 +1187,7 @@ fn the_operator_reads_whole_when_open_in_a_narrow_window() {
 }
 
 /// The filter row's tags keep their ids, values and enabled flags as the row moves to the
-/// shared controls (each now the page's 28 tall): the rows, the open lists, the raw field.
+/// shared controls (each now 28 tall): the rows, the open lists, the raw field.
 #[test]
 fn filter_tags_keep_their_ids_and_values() {
     let db = dbee_testkit::require_testdb!();
@@ -1215,7 +1215,7 @@ fn filter_tags_keep_their_ids_and_values() {
         let e = tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` drawn: {:?}", ids(&i)));
         assert_eq!(e.get("value"), value.as_ref(), "`{id}`'s value: {e}");
         assert_eq!(e.get("enabled"), None, "`{id}` enabled: {e}");
-        assert_eq!(ui.rect(id).map(|r| r.height()), Some(28.0), "`{id}` is the page's 28 tall");
+        assert_eq!(ui.rect(id).map(|r| r.height()), Some(28.0), "`{id}` is 28 tall");
     }
     let filter_ids: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("filter-")).collect();
     assert_eq!(filter_ids, want.iter().map(|(id, _)| (*id).to_string()).collect::<Vec<_>>(), "no other filter tags, in this order");
@@ -1254,7 +1254,7 @@ fn assert_starts_at_the_body(ui: &mut Ui, at: &str) {
 
 /// The grid sits edge to edge in the tab's body, no margin: its row numbers
 /// start at the body's left edge, in the table tab and in a query's results. The table tab's bars
-/// run the body's full width too, the filter bar's first control 12 in (TA); so does the query
+/// run the body's full width too, the filter bar's first control 12 in; so does the query
 /// tab's run row.
 #[test]
 fn the_grid_runs_edge_to_edge() {
@@ -1739,7 +1739,7 @@ fn enabled(ui: &mut Ui, id: &str) -> bool {
     e.get("enabled") != Some(&json!(false))
 }
 
-/// The value panel closed, so the table bar has the room of TA's picture at 1100 wide (with the
+/// The value panel closed, so the table bar has room for all its parts at 1100 wide (with the
 /// panel open its count's range gives way first).
 fn without_the_panel(ui: &mut Ui) {
     panel(ui, false);
@@ -1752,7 +1752,7 @@ fn hover_says(ui: &mut Ui, id: &str, words: &str) -> bool {
     ui.texts().iter().any(|(_, g)| g.text() == words)
 }
 
-/// The tab's body from top to bottom in TA's order: the filter bar, the table bar, the grid, the
+/// The tab's body from top to bottom: the filter bar, the table bar, the grid, the
 /// bottom bar; the bars' grounds run the body's full width; the table bar starts with REFRESH at
 /// the body's left, and the bottom bar's view switch starts 12 in.
 #[test]
@@ -1853,7 +1853,7 @@ fn the_view_switch_stands_in_the_same_place_in_both_views() {
     assert!(still.is_empty(), "Shift+Tab from DATA leaves the bottom bar, for what is above it: {still:?}");
 }
 
-/// The table bar as TA draws it: DATA chosen, STRUCTURE on, IMPORT and EXPORT off, REFRESH and
+/// The table bar: DATA chosen, STRUCTURE on, IMPORT and EXPORT off, REFRESH and
 /// "+ Row" on, the facts with the estimate and COUNT; a click on COUNT counts, and the facts then
 /// read the exact count with no button.
 #[test]
@@ -2218,11 +2218,11 @@ fn one_change_staged(ui: &mut Ui) {
     ui.frame();
 }
 
-/// The paging bar as `bars.png` draws it: from 8 in, FIRST, PREVIOUS, the page's words, NEXT and
+/// The paging bar: from 8 in, FIRST, PREVIOUS, the page's words, NEXT and
 /// LAST, the arrows 28 square; with a change staged, at the right end `1 change`, RESET and
 /// APPLY, APPLY ending 12 from the body's right.
 #[test]
-fn the_paging_bar_matches_the_page() {
+fn the_paging_bar_has_its_look() {
     let db = dbee_testkit::require_testdb!();
     let table = null_and_empty(db);
     let mut ui = Ui::connected_in(db, APP_SIZE);

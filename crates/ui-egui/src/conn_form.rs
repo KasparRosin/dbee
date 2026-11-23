@@ -69,7 +69,7 @@ pub(crate) struct Form {
     /// NEW FILE chose `file`: every test and connect asks for it to be made, until a connect
     /// succeeds.
     pub create_file: bool,
-    /// Opened from the saved list or Recent: its database type is fixed text (design E2).
+    /// Opened from the saved list or Recent: its database type is fixed text.
     pub engine_fixed: bool,
     pub color: ConnectionColor,
     pub host: String,

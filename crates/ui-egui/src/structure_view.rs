@@ -37,8 +37,8 @@
 //! open). While the connection is lost they are off and say why.
 //!
 //! While a read runs (once it has run 300 ms, [`crate::quiet`]): a first read draws COLUMNS'
-//! heading and header over ten rows of bars ([`crate::components::skeleton`], LC1), a reload the
-//! page from before at [`theme::DIM`] (LC2). A first read cancelled leaves `The structure is not
+//! heading and header over ten rows of bars ([`crate::components::skeleton`]), a reload the
+//! page from before at [`theme::DIM`]. A first read cancelled leaves `The structure is not
 //! loaded.` where the page would be.
 //!
 //! It reads the tab's [`TabStructure`](dbee_engine::TabStructure) each frame and starts nothing

@@ -1,4 +1,4 @@
-//! The skeleton (LC1, LC4): grey bars where content is on its way and nothing is there yet to
+//! The skeleton: grey bars where content is on its way and nothing is there yet to
 //! show. A bar is `fill`, [`SKELETON_BAR_H`] tall with corners of [`SKELETON_RADIUS`] ([`bar`]);
 //! its width comes from a fixed pattern ([`width`]), the same on every frame and every run, so the
 //! rows don't flicker. [`GridRows`] draws the rows of a grid's first load under the header: the
@@ -83,7 +83,7 @@ impl GridRows<'_> {
     }
 }
 
-/// The rows of a tree whose tables are on their way and that has none to show (LC4):
+/// The rows of a tree whose tables are on their way and that has none to show:
 /// [`TREE_SKELETON_ROWS`] rows [`TREE_ROW_H`] tall, no lines. Each holds a bar
 /// [`TREE_SKELETON_ICON_W`] wide centred in a row's icon slot, and a name bar from where a name
 /// starts, as wide as [`TREE_SKELETON_W`] gives its row, never past the tree's right less

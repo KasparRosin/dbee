@@ -125,7 +125,7 @@ fn ctrl_shift_enter_runs_current_statement() {
 }
 
 #[test]
-fn error_card_and_cursor_jump() {
+fn the_error_band_and_its_cursor_jump() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select nope");
@@ -136,7 +136,7 @@ fn error_card_and_cursor_jump() {
     assert!(card["message"].as_str().is_some_and(|m| m.contains("nope")), "{card}");
     assert_eq!((card["position"].clone(), card["line"].clone(), card["column"].clone()), (json!(7), json!(1), json!(8)), "{card}");
     assert!(ui.tag("notice").is_none(), "the card says it, not a notice too");
-    // The band, as the page draws it: its heading, where the error is at the right of it, and
+    // The band: its heading, where the error is at the right of it, and
     // that line's number in `danger` in the gutter, though the cursor is on it too.
     assert_eq!(card["heading"], "Query failed", "{card}");
     let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
@@ -1530,7 +1530,7 @@ fn the_split_is_the_run_rows_top_line() {
 /// Idle: RUN 12 in, RUN CURRENT 4 after it, no CANCEL, no sentence on how to run, and nothing
 /// tagged under the row.
 #[test]
-fn the_run_row_matches_the_page() {
+fn the_run_row_has_its_look() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected_in(db, APP_SIZE);
     ui.ctrl("T");

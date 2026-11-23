@@ -185,7 +185,7 @@ impl ConnectionRow<'_> {
         }
         let logo = Rect::from_min_size(pos2(rect.left() + CONNECTION_PAD_X, rect.center().y - CONNECTION_LOGO / 2.0), Vec2::splat(CONNECTION_LOGO));
         Logo::of(self.engine).paint(&p, logo, t.text_muted);
-        // As on the page: the name's line over a `data` line, the pair centred in the row.
+        // The name's line over a `data` line, the pair centred in the row.
         let (name_h, line_h) = (Text::Body.line(), Text::Data.line());
         let left = logo.right() + CONNECTION_LOGO_GAP;
         let width = (rect.right() - CONNECTION_PAD_X - left).max(0.0);
@@ -248,7 +248,7 @@ mod tests {
     use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness_in, icon_in, images, painted, sections, texts};
     use crate::tree::{MenuState, Tree, TreeAct};
 
-    /// The page's rows are this wide (`tree/row`, `sidebar/connection`).
+    /// The rows are drawn this wide (`tree/row`, `sidebar/connection`).
     const TREE_W: f32 = 259.0;
     const CONNECTION_W: f32 = 279.0;
 
@@ -282,7 +282,7 @@ mod tests {
         TreeRow { level, kind, name, right, open, selected: false, focused: false, chevron_focused: false, hovered: false }
     }
 
-    /// `row` drawn 259 by 26 is the page's `tree/row`: on `ground`, the focus box when `focus`, the
+    /// `row` drawn 259 by 26 is `tree/row`: on `ground`, the focus box when `focus`, the
     /// chevron and `icon` in their squares, the name and the type.
     fn check_tree_row(theme: Theme, t: &Tokens, state: &str, row: TreeRow<'_>, ground: Color32, focus: bool, icon: Option<(Icon, Color32)>) {
         let at_ = format!("{theme:?} {state}");
@@ -321,14 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn each_tree_row_matches_the_page() {
+    fn each_tree_row_has_its_look() {
         // 26 tall on `bg`, square. From 12 in, 16 more per level: the chevron's 12
         // square (`icon/chevron-right`, down when open, `text_muted`; empty on a column), 6, the
         // icon's 14 square (`text_muted`; `icon/key-primary` in `key`, `icon/key-foreign`, nothing on
         // a plain column), 6, the name in `body` `text`; a column's type in `data` `text_muted` ends
         // 12 from the right. Hovered `hover`; selected `selection`, also when hovered; keyboard focus
-        // a 2 px `ink` box along the row's edges, square, as large as the hover ground (the page
-        // drew it 2 inside with corners 2: smaller than the ground beside it).
+        // a 2 px `ink` box along the row's edges, square, as large as the hover ground (not 2
+        // inside with corners 2, which is smaller than the ground beside it).
         let rel = TreeKind::Relation;
         for (theme, t) in both() {
             let muted = |icon| Some((icon, t.text_muted));
@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn each_connection_row_matches_the_page() {
+    fn each_connection_row_has_its_look() {
         // `sidebar/connection` in its default, hover, selected and focus states:
         // 40 tall on `bg`, `hover` or `selection` (also when hovered), square, a 1 px
         // `line` along the bottom; the connection's colour 3 wide down the whole left edge, none
@@ -484,11 +484,11 @@ mod tests {
                 focused: false,
                 hovered: false,
             };
-            // Room enough: whole, as the page draws `~/data/notes.sqlite`.
+            // Room enough: whole, as with `~/data/notes.sqlite`.
             let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File("~/data/notes.sqlite".into())), CONNECTION_W);
             assert_eq!((text.as_str(), elided, cut), ("~/data/notes.sqlite", false, false), "{theme:?}: whole");
             assert!(close(at.left(), r.left() + 34.0), "{theme:?}: 34 in: {at:?}");
-            // The page's row, and narrower.
+            // The row at its width, and narrower.
             for width in [CONNECTION_W, 220.0] {
                 let at_ = format!("{theme:?} {width}");
                 let (text, at, elided, parts, cut, r) = line_of(theme, &row(Address::File(LONG.into())), width);
@@ -504,10 +504,10 @@ mod tests {
                 assert!(at.right() <= r.right() - 12.0 + 0.5 && room - at.width() < 7.2 + 0.5, "{at_}: {at:?} in {room}");
                 assert_eq!(parts, [(path.to_owned(), Text::Data.font(), t.text_muted)], "{at_}: the path in `data` `text_muted`");
             }
-            // A file's name longer than the row (as the design draws it): the folders go,
+            // A file's name longer than the row (a long example): the folders go,
             // and the name is cut in its own middle, with one `…`.
-            let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
-            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(design.into())), CONNECTION_W);
+            let long = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
+            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(long.into())), CONNECTION_W);
             assert_eq!((text.as_str(), elided, cut), ("Orders-and-Invoi…s-Backup.sqlite", false, true), "{theme:?}: the name in its middle");
             assert!(at.right() <= r.right() - 12.0 + 0.5, "{theme:?}: inside the row's right 12: {at:?}");
             // Too narrow to keep 6 letters at either end (the status bar then drops the path): cut
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn a_filter_with_no_match_reads_0_tables() {
-        // E3: a filter with no match reads `0 TABLES` over an empty tree, no phrase under it.
+        // A filter with no match reads `0 TABLES` over an empty tree, no phrase under it.
         let mut h = tree_harness(vec2(260.0, 400.0), five_tables());
         h.run();
         assert_eq!(h.state().tags.value("tree-count"), Some(&json!("5 tables")), "unfiltered");

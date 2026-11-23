@@ -777,7 +777,7 @@ pub fn ids(inspect: &Json) -> Vec<String> {
 pub type Moved<'a> = (&'a str, Option<Json>, bool, &'a str);
 
 /// Each of `want` is in the last frame's `ui.inspect` with its value and its enabled flag as
-/// before the move, the page's 28 tall, its words drawn in capitals inside it.
+/// before the move, 28 tall, its words drawn in capitals inside it.
 pub fn assert_moved(ui: &mut Ui, want: &[Moved<'_>], at: &str) {
     let i = ui.inspect();
     for (id, value, enabled, words) in want {

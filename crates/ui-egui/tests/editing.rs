@@ -1279,7 +1279,7 @@ fn rect_of(ui: &mut Ui, id: &str) -> egui::Rect {
 }
 
 /// The paging bar's arrows, and refresh and + Row in the table bar, say in `ui.inspect` what
-/// they said before: ids, values, enabled flags; the arrows are the page's plain icon buttons,
+/// they said before: ids, values, enabled flags; the arrows are plain icon buttons,
 /// refresh and + Row the table bar's cells.
 #[test]
 fn moved_icon_buttons_keep_their_ids_values_and_flags() {
@@ -1296,7 +1296,7 @@ fn moved_icon_buttons_keep_their_ids_values_and_flags() {
             assert_eq!(e.get("enabled") != Some(&json!(false)), *enabled, "{at}: `{id}` enabled: {e}");
             let size = rect_of(ui, id).size();
             let page = if ["row-add", "table-refresh"].contains(id) { size.y == 35.0 } else { size == egui::vec2(28.0, 28.0) };
-            assert!(page, "{at}: `{id}` is the page's size: {size:?}");
+            assert!(page, "{at}: `{id}` has its size: {size:?}");
         }
     };
     // One page of three rows: the arrows are off, refresh and + Row on.

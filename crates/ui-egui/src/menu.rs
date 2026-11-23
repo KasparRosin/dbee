@@ -1,7 +1,7 @@
 //! The menu bar, built from the commands' `menu` paths ([`DbeeApp::commands`]: the engine's and
 //! the UI-only ones): File, Edit, View and Query in that order, then any other top menu a command
 //! names, each listing its commands in registry order, a deeper path as a submenu. Edit lists its
-//! commands in the Screens page's groups, a line between each: Undo, Redo | Copy, Select All |
+//! commands in groups, a line between each: Undo, Redo | Copy, Select All |
 //! Apply, Reset.
 //!
 //! An entry shows its label and its shortcut's keys, and is enabled as the command is now;
@@ -190,7 +190,7 @@ mod tests {
     /// Edit, in light and dark: Undo, Redo | Copy, Select All |
     /// Apply, Reset.
     #[test]
-    fn the_edit_menu_has_the_pages_groups() {
+    fn the_edit_menu_has_its_groups() {
         let home = dbee_testkit::temp_home(None, None);
         let options = dbee_engine::SessionOptions { config_dir: Some(home.home.join("config")), ..dbee_engine::SessionOptions::default() };
         let app = DbeeApp::new(dbee_engine::Session::new(options).unwrap(), None);

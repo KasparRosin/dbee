@@ -5,7 +5,7 @@
 //!
 //! Each is a view: it takes what to show and says what was clicked; the screen tags what it drew
 //! and acts. A result's name is data, drawn as written. The counts and how long a run took are
-//! facts in `label` capitals, as the page writes them (a number has no case to keep); a running
+//! facts in `label` capitals (a number has no case to keep); a running
 //! timer is in `data`. All of them are read out as written.
 
 use std::sync::Arc;
@@ -198,7 +198,7 @@ impl<'a> ResultTab<'a> {
     }
 
     /// The title, cut with "…" at [`RESULT_TAB_TITLE_MAX`], and the tab's width: 12, the title's
-    /// box (whole points, as the page's), 12, the line.
+    /// box (whole points), 12, the line.
     fn parts(&self, ui: &Ui) -> (Arc<Galley>, f32) {
         let mut job = Text::Button.job_as_written(self.title, Color32::PLACEHOLDER);
         job.wrap = TextWrapping::truncate_at_width(RESULT_TAB_TITLE_MAX);
@@ -668,7 +668,7 @@ mod tests {
     use crate::theme::Text;
     use crate::theme::size::{BAR_H, SPINNER};
 
-    /// The page's bars are 840 wide; the harness holds this much, and [`harness`] this.
+    /// The showcase's bars are 840 wide; the harness holds this much, and [`harness`] this.
     const W: f32 = 760.0;
     const NARROW: f32 = 560.0;
 
@@ -713,12 +713,12 @@ mod tests {
     }
 
     #[test]
-    fn the_run_row_matches_the_page() {
+    fn the_run_row_has_its_look() {
         // 36 tall on `card` with a 1 px `line` along its bottom; its buttons 28 tall,
         // 12 in from its left, 4 apart, centred in the 35 above the line. Idle: RUN, the main
         // button, with its shortcut. Running: RUN off, then CANCEL, the main button. RUN CURRENT,
         // an outline button with its shortcut, after them when shown, off while running. The
-        // page's widths: RUN 122, CANCEL 67, RUN CURRENT 223.
+        // widths: RUN 122, CANCEL 67, RUN CURRENT 223.
         for (theme, t) in both() {
             for (running, run_current) in [(false, false), (true, false), (false, true), (true, true)] {
                 let at_ = format!("{theme:?} running {running} run current {run_current}");
@@ -731,7 +731,7 @@ mod tests {
                 let (run, cancel, current) = rects;
                 assert!(close(run.left(), at.left() + 12.0) && close(run.top(), at.top() + 3.5), "{at_}: RUN 12 in, centred: {run:?} in {at:?}");
                 assert_eq!(run.height(), 28.0, "{at_}: 28 tall");
-                assert!((run.width() - 122.0).abs() <= 1.0, "{at_}: RUN as wide as the page's: {run:?}");
+                assert!((run.width() - 122.0).abs() <= 1.0, "{at_}: RUN at its width: {run:?}");
                 let (ground, words, keys) =
                     if running { (t.fill, t.text_faint, t.text_faint) } else { (t.ink, t.on_ink, t.on_ink.gamma_multiply(0.7)) };
                 assert_eq!(fills_in(&shapes, run), [(run, ground)], "{at_}: RUN's ground");
@@ -746,7 +746,7 @@ mod tests {
                             close(cancel.left(), next) && cancel.top() == run.top() && cancel.height() == 28.0,
                             "{at_}: CANCEL 4 after RUN: {cancel:?}"
                         );
-                        assert!((cancel.width() - 67.0).abs() <= 1.0, "{at_}: CANCEL as wide as the page's: {cancel:?}");
+                        assert!((cancel.width() - 67.0).abs() <= 1.0, "{at_}: CANCEL at its width: {cancel:?}");
                         assert_eq!(fills_in(&shapes, cancel), [(cancel, t.ink)], "{at_}: CANCEL the main button");
                         assert_eq!(word(&shapes, "CANCEL").1, t.on_ink, "{at_}: CANCEL's words");
                         next = cancel.right() + 4.0;
@@ -760,7 +760,7 @@ mod tests {
                     Some(current) => {
                         assert!(run_current, "{at_}: RUN CURRENT only when shown");
                         assert!(close(current.left(), next) && current.top() == run.top(), "{at_}: RUN CURRENT 4 after: {current:?}");
-                        assert!((current.width() - 223.0).abs() <= 1.0, "{at_}: RUN CURRENT as wide as the page's: {current:?}");
+                        assert!((current.width() - 223.0).abs() <= 1.0, "{at_}: RUN CURRENT at its width: {current:?}");
                         let edge = Edge { outer: current, width: 1.0, colour: t.line_strong, radius: CornerRadius::same(2) };
                         assert_eq!(edges_in(&shapes, current, 0.0), [edge], "{at_}: RUN CURRENT's outline");
                         let words = if running { t.text_faint } else { t.text };
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn each_result_tab_state_matches_the_page() {
+    fn each_result_tab_state_has_its_look() {
         // 35 tall (the bar's line under it), its title in `button` as written 12 in
         // from either end, then a 1 px `line` at its right end; 119 wide for `select ... series`.
         // Inactive on `bg`, its title `text_muted`; hover on `hover`; active on `card`, the title
@@ -839,7 +839,7 @@ mod tests {
                     at = ui.add(tab).rect;
                 });
                 assert_eq!(at.height(), 35.0, "{at_}: 35 tall");
-                assert!((at.width() - 119.0).abs() <= 1.5, "{at_}: as wide as the page's: {at:?}");
+                assert!((at.width() - 119.0).abs() <= 1.5, "{at_}: at its width: {at:?}");
                 let (title, colour) = word(&shapes, "select ... series");
                 assert_eq!(colour, if state == "active" { t.text } else { t.text_muted }, "{at_}: the title's colour");
                 assert!(close(title.left(), at.left() + 12.0) && close(title.center().y, at.top() + 17.5), "{at_}: the title {title:?} in {at:?}");
@@ -861,15 +861,15 @@ mod tests {
         }
     }
 
-    /// A result bar of `state` with the page's two tabs (`select ... orders` shown), or none.
+    /// A result bar of `state` with two tabs (`select ... orders` shown), or none.
     fn bar(tabs: bool, state: RunState, first_of: Option<(u64, u64)>, export: bool, value_on: bool) -> ResultBar<'static> {
         let tabs = if tabs { vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")] } else { Vec::new() };
         ResultBar { tabs, state, first_of, export, value: Some(value_on), time_hover: None, value_off: false }
     }
 
     #[test]
-    fn each_result_bar_state_matches_the_page() {
-        // The result bar and the page's rows of it: 36 tall on `card` with a 1 px `line` along its
+    fn each_result_bar_state_has_its_look() {
+        // The result bar and its rows: 36 tall on `card` with a 1 px `line` along its
         // bottom. From the left the result tabs, side by side; at the right end the value panel's
         // toggle (a bar button, 36 wide), EXPORT before it (off), each with its divider and 35
         // tall; before them, 12 in, the facts 12 apart, centred above the line: what the result
@@ -924,7 +924,7 @@ mod tests {
                     Some(e) => {
                         assert!(export, "{at_}: EXPORT when asked");
                         assert!(e.right() == value.left() && e.top() == cell.top() && e.height() == 35.0, "{at_}: EXPORT before the toggle: {e:?}");
-                        assert!((e.width() - 83.0).abs() <= 1.0, "{at_}: EXPORT as wide as the page's: {e:?}");
+                        assert!((e.width() - 83.0).abs() <= 1.0, "{at_}: EXPORT at its width: {e:?}");
                         assert_eq!(word(&shapes, "EXPORT").1, t.text_faint, "{at_}: EXPORT off");
                         assert!(fills_in(&shapes, e).contains(&(Rect::from_min_size(e.min, vec2(1.0, 35.0)), t.line)), "{at_}: EXPORT's divider");
                         e.left()
@@ -935,7 +935,7 @@ mod tests {
                         value.left()
                     }
                 };
-                // The facts: the words in `label` capitals, numbers and all, as the page writes them.
+                // The facts: the words in `label` capitals, numbers and all.
                 let (words, _) = word(&shapes, want);
                 assert_eq!(sections(&shapes, want), [(want.to_owned(), Label.font(), colour)], "{at_}: the words in label");
                 let mid = cell.center().y;
@@ -1016,11 +1016,11 @@ mod tests {
     }
 
     #[test]
-    fn each_row_count_matches_the_page() {
+    fn each_row_count_has_its_look() {
         // 28 tall; the rows shown and how many there are in `label` capitals,
         // `text_muted`, numbers and all; an estimate with COUNT and no count with
         // COUNT ROWS (`button/text`), 8 after the words; counting: 12, COUNTING in `label`, 12,
-        // the timer in `data`. The page's COUNT is 56 wide, COUNT ROWS 92.
+        // the timer in `data`. COUNT is 56 wide, COUNT ROWS 92.
         use Text::{Data, Label};
         let s = Duration::from_millis;
         for (theme, t) in both() {
@@ -1054,7 +1054,7 @@ mod tests {
                     Some((label, width)) => {
                         let b = count_r.unwrap_or_else(|| panic!("{at_}: {label}"));
                         assert!(close(b.left() - end, 8.0) && b.height() == 28.0 && b.top() == at.top(), "{at_}: {label} 8 after the words: {b:?}");
-                        assert!((b.width() - width).abs() <= 1.0, "{at_}: {label} as wide as the page's: {b:?}");
+                        assert!((b.width() - width).abs() <= 1.0, "{at_}: {label} at its width: {b:?}");
                         let (w, c) = word(&shapes, label);
                         assert!(c == t.text && close(w.left(), b.left() + 10.0), "{at_}: {label}'s words: {w:?} {c:?}");
                         end = b.right();
@@ -1077,7 +1077,7 @@ mod tests {
     #[test]
     fn numbers_and_names_keep_their_case() {
         // A result's name is drawn and read out as written. The facts are drawn in `label`
-        // capitals as the page writes them (a number has no case to keep) and read out as written.
+        // capitals (a number has no case to keep) and read out as written.
         let mut h = harness(Theme::Light, (), |ui, _| {
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
@@ -1355,7 +1355,7 @@ mod tests {
         }
     }
 
-    /// The page's many results, the first one shown.
+    /// Many results, the first one shown.
     const MANY: [&str; 6] =
         ["select ... orders", "select ... series", "select ... customers", "update ... dealers", "select ... line_items", "select ... totals"];
     const PAGE_W: f32 = 840.0;
@@ -1371,7 +1371,7 @@ mod tests {
         asked: Vec<ResultAsked>,
     }
 
-    /// A result bar `width` wide with the first `n` of the page's results, done; room under it for
+    /// A result bar `width` wide with the first `n` of those results, done; room under it for
     /// its list. The caller shows the result it is asked to.
     fn many(theme: Theme, width: f32, n: usize) -> egui_kittest::Harness<'static, Many> {
         let state = Many { shown: 0, bar: Rect::NOTHING, tabs: Vec::new(), list: None, export: Rect::NOTHING, items: Vec::new(), asked: Vec::new() };

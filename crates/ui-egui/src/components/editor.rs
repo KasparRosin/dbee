@@ -1,7 +1,7 @@
-//! The SQL editor's parts from the page: a line's number in the gutter (`editor/line number`) and
+//! The SQL editor's parts: a line's number in the gutter (`editor/line number`) and
 //! the mark under the token an error points at (`editor/error token`).
 //!
-//! A line number is `code`, flush with the right of its box (on the page [`LINE_NUMBER_W`] wide) and
+//! A line number is `code`, flush with the right of its box ([`LINE_NUMBER_W`] wide in the showcase) and
 //! centred down it: `text_muted`, the cursor's line in `text`, the error's line in `danger` (the
 //! error wins). An error token is its text in `code` with a 1.5 px `danger` line 17 down its
 //! 20 tall row, as wide as the token.
@@ -51,7 +51,7 @@ impl LineNumber {
     }
 }
 
-/// The token an error points at, as the page draws it: its text, underlined.
+/// The token an error points at: its text, underlined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorToken<'a> {
     pub token: &'a str,
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn line_numbers_match_the_page() {
+    fn line_numbers_have_their_look() {
         // Default, current, error, each 36 by 20, the number flush right; and line 12
         // with the cursor and the error on it.
         let numbers = [
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn the_error_token_matches_the_page() {
+    fn the_error_token_has_its_look() {
         // `o.totl` in `code` `text`, a 1.5 `danger` line 17 down its 20 tall row,
         // as wide as the token.
         for (theme, t) in both() {

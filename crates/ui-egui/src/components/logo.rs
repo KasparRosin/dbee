@@ -22,7 +22,7 @@ const VIEW_BOX: f64 = 24.0;
 /// The most pixels a logo's side is drawn at.
 const MOST_PX: f32 = 1024.0;
 
-/// An engine's logo, named as on the page.
+/// An engine's logo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Logo {
     Postgresql,
@@ -44,7 +44,7 @@ impl Logo {
         }
     }
 
-    /// The page's name for it, after `logo/`, and its file's name in `assets/logos/`.
+    /// Its name, after `logo/`, and its file's name in `assets/logos/`.
     pub fn name(self) -> &'static str {
         match self {
             Logo::Postgresql => "postgresql",

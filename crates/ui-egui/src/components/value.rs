@@ -1,5 +1,5 @@
 //! The value panel (`value panel`): a bar with the column's name and type, the value under it, and
-//! its facts along the bottom, in each of the page's states ([`State`]). A view: it draws into the
+//! its facts along the bottom, in each of its states ([`State`]). A view: it draws into the
 //! rect it is given and says where the value goes ([`Shown::text`]). The panel's screen
 //! ([`crate::value_panel`]) keeps the value's rows, their colours, the selection and the
 //! scrolling, and lays out each row it shows with [`row_job`]: `code`, JSON coloured from the
@@ -40,7 +40,7 @@ pub const LINE_H: f32 = Text::Code.line();
 /// The value's text is this far in from the sides of its box.
 pub const PAD: f32 = VALUE_INSET;
 
-/// The page's states.
+/// The panel's states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     /// JSON, pretty-printed and coloured.
@@ -74,9 +74,9 @@ pub struct Facts {
     pub lines: usize,
     /// The value's size; for a cut value, the size of the part shown.
     pub bytes: usize,
-    /// The text was pretty-printed from text the database doesn't call JSON (K2).
+    /// The text was pretty-printed from text the database doesn't call JSON.
     pub formatted: bool,
-    /// A cut value's whole length (N2).
+    /// A cut value's whole length.
     pub whole: Option<usize>,
 }
 
@@ -488,7 +488,7 @@ mod tests {
         (a - b).abs() <= 0.5
     }
 
-    /// Where a sample is drawn: the page's 340 by 372.
+    /// Where a sample is drawn: 340 by 372.
     const AT: Rect = Rect { min: pos2(10.0, 10.0), max: pos2(350.0, 382.0) };
 
     /// The drawn text whose words are `words`: where, its colour and its first section's font.
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn each_value_panel_state_matches_the_page() {
+    fn each_value_panel_state_has_its_look() {
         // 340 by 372 on `card`, a 1 px `line` down the left; the bar 36 tall with its
         // line along the bottom, the name 12 in (`header` `text`), the type 6 after (`data`
         // `text_muted`); COPY 82 wide, 6 before WRAP at the right end; the value 12 in and 12
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn null_and_empty_sit_where_a_value_starts() {
-        // As the design draws it: NULL and `empty` at the top left in `code` `text_muted`;
+        // NULL and `empty` at the top left in `code` `text_muted`;
         // only "No cell selected" is centred.
         for (theme, t) in both() {
             let h = app(theme, vec2(360.0, 500.0), Some(view("note", "text", Some("plain"))));
@@ -750,7 +750,7 @@ mod tests {
             }
             assert_eq!(drawn(shapes, "Meta").map(|d| (d.1, d.2)), Some((t.text, Text::Header.font())), "{theme:?}: the column as written");
             assert_eq!(drawn(shapes, "jsonb").map(|d| d.1), Some(t.text_muted), "{theme:?}: the type as written");
-            // No kind chip (K2): the type once, never `JSONB`.
+            // No kind chip: the type once, never `JSONB`.
             assert!(
                 all.iter().filter(|w| *w == "jsonb").count() == 1 && !all.iter().any(|w| w == "JSONB"),
                 "{theme:?}: the type alone, as written: {all:?}"
@@ -879,7 +879,7 @@ mod tests {
         assert_eq!((head["truncated"].clone(), head["note"].clone()), (json!(true), json!("Showing the first 10.0 MiB of 19.1 MiB.")));
         assert_eq!(head["facts"], "1 line First 10 MiB of 19.1 MiB");
         assert_eq!(h.state().tags.value("value-text").unwrap()["cut"], true);
-        assert!(drawn(&h.output().shapes, "Showing the first 10.0 MiB of 19.1 MiB.").is_none(), "the note no longer drawn (N2)");
+        assert!(drawn(&h.output().shapes, "Showing the first 10.0 MiB of 19.1 MiB.").is_none(), "the note no longer drawn");
         // NULL: no facts.
         let h = app(Theme::Light, size, Some(view("note", "text", None)));
         assert_eq!(h.state().tags.value("value-panel").unwrap()["facts"], Json::Null);

@@ -1,4 +1,4 @@
-//! The shared controls of the design's Components page, one file per control, built only from
+//! The shared controls, one file per control, built only from
 //! [`crate::theme`]: each is an [`egui::Widget`] that works out its own look ([`Look`]) from its
 //! response, so a screen never sets a control's colour, size, padding or edge.
 
@@ -445,8 +445,8 @@ mod tests {
     }
 
     #[test]
-    fn keycap_and_chip_match_the_page() {
-        // The keycap and the chip of the Components page.
+    fn keycap_and_chip_have_their_look() {
+        // The keycap and the chip.
         for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
             let mut at = [Rect::NOTHING; 4];
             let shapes = painted(theme, |ui| {

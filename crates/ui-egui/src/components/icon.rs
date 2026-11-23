@@ -1,15 +1,15 @@
-//! The icons of the design's Components page (`icon/*`), drawn in code from the page's own
-//! vectors: the same lines, curves and fills at the same coordinates and stroke widths, round
-//! ends where the page has them. Each takes the colour its use gives it.
+//! The icons (`icon/*`), drawn in code as vectors: lines, curves and fills at fixed
+//! coordinates and stroke widths in each icon's box, with round ends where an icon has them.
+//! Each takes the colour its use gives it.
 //!
-//! A stroke is centred on its line, as on the page, so a line along an icon's box reaches half
+//! A stroke is centred on its line, so a line along an icon's box reaches half
 //! its width past it. Corners are joined the way egui joins a path (mitred, a sharp one cut);
-//! the page's round joins sit inside that by under a third of a pixel.
+//! a round join would sit inside that by under a third of a pixel.
 
 use egui::epaint::RectShape;
 use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
 
-/// One of the page's 36 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
+/// One of the 36 icons, by name (`icon/none` is [`Icon::NoColour`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     ChevronDown,
@@ -50,7 +50,7 @@ pub enum Icon {
     LineBreak,
 }
 
-/// The table's header band: the page's 45 % of the icon's colour.
+/// The table's header band: 45 % of the icon's colour.
 const TABLE_BAND: f32 = 0.45;
 /// Straight pieces a curve is drawn with.
 const CURVE_STEPS: usize = 12;
@@ -95,7 +95,7 @@ impl Icon {
         Icon::LineBreak,
     ];
 
-    /// The page's name for it, after `icon/`.
+    /// Its name, after `icon/`.
     pub fn name(self) -> &'static str {
         match self {
             Icon::ChevronDown => "chevron-down",
@@ -137,7 +137,7 @@ impl Icon {
         }
     }
 
-    /// The page node's box.
+    /// The icon's box.
     pub fn size(self) -> Vec2 {
         match self {
             Icon::ChevronDown => vec2(8.0, 4.0),
@@ -173,7 +173,7 @@ impl Icon {
         }
     }
 
-    /// The page's stroke width for it.
+    /// Its stroke width.
     fn weight(self) -> f32 {
         match self {
             Icon::ChevronDown | Icon::ChevronRight | Icon::SortAscending | Icon::SortDescending | Icon::KeyPrimary | Icon::KeyForeign => 1.3,
@@ -384,7 +384,7 @@ struct Pen<'a> {
 }
 
 impl Pen<'_> {
-    /// The same pen, `(x, y)` further into the box: a part the page draws in a frame of its own.
+    /// The same pen, `(x, y)` further into the box: a part drawn in a box of its own.
     fn moved(&self, x: f32, y: f32) -> Self {
         Pen { origin: self.origin + vec2(x, y), ..*self }
     }
@@ -419,7 +419,7 @@ impl Pen<'_> {
         self.painter.circle_filled(center + self.origin, radius, self.stroke.color);
     }
 
-    /// `rect` filled, where the page has it: not moved to whole pixels.
+    /// `rect` filled where it is given: not moved to whole pixels.
     fn fill(&self, rect: Rect, radius: u8, colour: Color32) {
         let rect = rect.translate(self.origin);
         self.painter.add(RectShape::filled(rect, CornerRadius::same(radius), colour).with_round_to_pixels(false));
@@ -471,7 +471,7 @@ mod tests {
 
     use super::*;
 
-    /// The page's icons: name and box.
+    /// The icons: name and box.
     const PAGE: [(&str, f32, f32); 36] = [
         ("icon/chevron-down", 8.0, 4.0),
         ("icon/chevron-right", 4.0, 8.0),
@@ -551,18 +551,18 @@ mod tests {
     }
 
     #[test]
-    fn there_are_the_pages_36_icons() {
+    fn there_are_36_icons_each_with_its_box() {
         let names: Vec<String> = Icon::ALL.iter().map(|i| format!("icon/{}", i.name())).collect();
         assert_eq!(names.iter().collect::<HashSet<_>>().len(), 36, "36 distinct names: {names:?}");
         for (icon, name) in Icon::ALL.into_iter().zip(&names) {
             let page = PAGE.iter().find(|(n, _, _)| n == name);
-            let Some((_, w, h)) = page else { panic!("{icon:?}: {name} isn't on the page") };
-            assert_eq!(icon.size(), vec2(*w, *h), "{icon:?}: the page node's box");
+            let Some((_, w, h)) = page else { panic!("{icon:?}: {name} isn't in the list") };
+            assert_eq!(icon.size(), vec2(*w, *h), "{icon:?}: the icon's box");
         }
     }
 
     #[test]
-    fn success_and_error_are_the_pages_drawings() {
+    fn success_and_error_are_a_ring_round_a_check_or_a_bar() {
         // Success and error: a 1.2 ring of radius 6.4 round the box's centre (7, 7); in it
         // the check (4.2, 7.1) (6.2, 9.1) (9.9, 5.2), or the bar (7, 3.9) to (7, 8) over a dot of
         // radius 0.7 at (7, 10).
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_and_line_break_are_the_pages_drawings() {
+    fn follow_and_line_break_are_drawn_at_their_coordinates() {
         // `icon/follow`, 14 square: a ring inside the ellipse at (1.4, 1.4) of 11.2,
         // its 1.1 stroke inside, so centred on radius 5.05 round (7, 7); the glyph's frame at
         // (3.9, 4.6) holds the line (0, 2.4) to (5.9, 2.4) and the head (3.4, 0) (5.9, 2.4)
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn each_icon_stays_in_its_box() {
-        // A stroke is centred on its line, as on the page, so a line along the box's edge reaches
+        // A stroke is centred on its line, so a line along the box's edge reaches
         // half its width past it; half a pixel more is the room for keeping lines crisp.
         for ppp in [1.0, 1.5, 2.0] {
             for center in [pos2(40.0, 30.0), pos2(40.5, 30.5), pos2(40.3, 30.8)] {
@@ -668,7 +668,7 @@ mod tests {
                 assert!(!shapes.is_empty(), "{icon:?} draws");
                 for s in &shapes {
                     for c in colours(s) {
-                        // The table's header band is the page's 45 % of the same colour.
+                        // The table's header band is 45 % of the same colour.
                         let band = icon == Icon::Table && c == colour.gamma_multiply(TABLE_BAND);
                         assert!(c == colour || band, "{icon:?}: {c:?} isn't {colour:?}");
                     }

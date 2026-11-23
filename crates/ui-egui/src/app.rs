@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn numbers_and_paths_in_toasts_are_mono() {
-        // The design: the names, paths and numbers dbee puts in a toast's words are drawn in
+        // The names, paths and numbers dbee puts in a toast's words are drawn in
         // `data` as written, the rest in `body`; the `notice` tag still says it all as plain words.
         use crate::theme::Text::{Body, Data};
         let (_, _, home) = window();

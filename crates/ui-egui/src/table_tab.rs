@@ -1,4 +1,4 @@
-//! The table tab's body ([`show`]), from top to bottom, each area the body's full width (TA):
+//! The table tab's body ([`show`]), from top to bottom, each area the body's full width:
 //!
 //! - when the rows cannot be edited, a note in an area of its own saying why (`table-note`: a
 //!   view, no row key, a read-only connection, or the table's own reason as the driver writes it),
@@ -17,9 +17,9 @@
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
 //!   click, with foreign key links on the selected row, and the cell editor over it while one is
 //!   open ([`crate::editors`]; a double-click opens one). While a page loads over the rows (once
-//!   it has run 300 ms) they are drawn at half, the header at full (LC2). Before a first page,
+//!   it has run 300 ms) they are drawn at half, the header at full. Before a first page,
 //!   once its load has run 300 ms, the header from the catalog over ten rows of bars
-//!   ([`crate::grid::skeleton`], LC1; nothing before, and nothing for a table the catalog no
+//!   ([`crate::grid::skeleton`]; nothing before, and nothing for a table the catalog no
 //!   longer has), or `No rows are loaded.` after a first load that failed or was cancelled;
 //! - the bottom bar ([`PagingBar`], its words and rules [`crate::paging`]): at its left end DATA /
 //!   STRUCTURE (`table.view`; STRUCTURE shows the table's structure instead,

@@ -290,7 +290,7 @@ pub const CONN_BESIDE_GAP: f32 = SPACE_8;
 /// The form's bar while a test or connect has run 300 ms: the facts' word and the timer this far
 /// apart, and the timer this far before the first button.
 pub const CONN_RUNNING_GAP: f32 = SPACE_12;
-/// The engine cards (K2): `Choose a database` this far under the title row, the cards this far
+/// The engine cards: `Choose a database` this far under the title row, the cards this far
 /// under it; a card this tall, at least this wide, its logo this big, this far in from the card's
 /// left and top, the name this far under the logo; the UPCOMING chip this far in from the corner.
 pub const ENGINE_HEADING_TOP: f32 = SPACE_16;
@@ -366,7 +366,7 @@ pub const ERROR_BAND_GAP: f32 = 4.0;
 pub const ERROR_BAND_FIELD_GAP: f32 = 8.0;
 pub const ERROR_BAND_NAME_GAP: f32 = 2.0;
 pub const ERROR_BAND_HEAD_GAP: f32 = 12.0;
-/// The band's actions row (R2): this far under its last text, its buttons this far apart; the
+/// The band's actions row: this far under its last text, its buttons this far apart; the
 /// position is drawn only while the heading keeps at least this much room (gap 68).
 pub const ERROR_BAND_ACTIONS_GAP: f32 = 12.0;
 pub const ERROR_BAND_ACTION_GAP: f32 = 8.0;
@@ -377,7 +377,7 @@ pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 pub const STRIP_EDGE: f32 = 2.0;
 pub const STRIP_PAD_Y: f32 = SPACE_8;
 pub const STRIP_MAX_LINES: usize = 3;
-/// The quick search (QC with R4's rows): a box this wide (less where the window is narrower,
+/// The quick search: a box this wide (less where the window is narrower,
 /// keeping this margin from its sides and its bottom), this far below the window's top, its
 /// content this far inside; a field this tall, then this gap before the list, whose headings and
 /// rows are all this tall. In a row and in the field, an icon's or a mark's centre sits this far
@@ -420,7 +420,7 @@ pub const CHIP_PAD_X: f32 = 6.0;
 pub const CHIP_MARK: f32 = 6.0;
 pub const CHIP_GAP: f32 = 6.0;
 
-/// Keyboard focus (foundations' Focus rule): a 2 px `ink` edge or box, or a 1 px `on_ink` line.
+/// Keyboard focus (the focus rule): a 2 px `ink` edge or box, or a 1 px `on_ink` line.
 pub const FOCUS_W: f32 = 2.0;
 pub const FOCUS_LINE_W: f32 = 1.0;
 /// How far the box around a control with no edge reaches out from it.
@@ -430,7 +430,7 @@ pub const FOCUS_INSET: f32 = 2.0;
 pub const RADIUS_FOCUS_AROUND: u8 = 4;
 pub const RADIUS_FOCUS_LINE: u8 = 1;
 
-/// The skeleton (`components::skeleton`, LC1): a bar is this tall with this corner radius, at
+/// The skeleton (`components::skeleton`): a bar is this tall with this corner radius, at
 /// least this wide and at most this wide; a grid's first load shows this many rows of them, each
 /// bar its cell's room times the fraction its row and column pick from these.
 pub const SKELETON_BAR_H: f32 = 8.0;
@@ -439,7 +439,7 @@ pub const SKELETON_MIN_W: f32 = 12.0;
 pub const SKELETON_MAX_W: f32 = 96.0;
 pub const SKELETON_ROWS: usize = 10;
 pub const SKELETON_FRACTIONS: [f32; 10] = [0.6, 0.85, 0.45, 0.75, 0.55, 0.9, 0.5, 0.7, 0.65, 0.8];
-/// A tree's skeleton (LC4): this many rows, each a bar this wide in the icon's slot and a name bar
+/// A tree's skeleton: this many rows, each a bar this wide in the icon's slot and a name bar
 /// as wide as its row picks from these.
 pub const TREE_SKELETON_ROWS: usize = 8;
 pub const TREE_SKELETON_ICON_W: f32 = 12.0;

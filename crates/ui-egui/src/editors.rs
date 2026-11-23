@@ -115,7 +115,7 @@ pub const TAG_CHARS: usize = 200;
 /// The value panel's view of the editor: its automation id.
 pub const PANEL_EDITOR: &str = "value-editor";
 
-/// The editor's edge, `ink` on `card` as the page's `editing` cell (the grid's outline), and the
+/// The editor's edge, `ink` on `card` as an `editing` cell's (the grid's outline), and the
 /// text's inset as in the grid.
 const BORDER: f32 = crate::theme::size::GRID_OUTLINE_W;
 const PAD: f32 = crate::theme::size::GRID_CELL_PAD_X;
@@ -991,8 +991,8 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_takes_the_pages_editing_look() {
-        // The page's `grid/cell` in its `editing` and `editing selected` states: over its
+    fn the_editor_takes_the_cells_editing_look() {
+        // `grid/cell` in its `editing` and `editing selected` states: over its
         // cell, on `card`, square, a 2 px `ink` edge inside it (the grid's outline); the value in
         // `data` `text` 8 in, as the grid draws it, 5 down in the 26 tall row; the caret 1 px
         // `ink` down the value's 16 tall line, after it (egui draws it 1.5 longer at either end,

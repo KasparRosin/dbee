@@ -72,7 +72,7 @@ fn place(p: &Painter, g: Arc<Galley>, x: f32, y: f32, colour: Color32) -> Rect {
     at
 }
 
-/// What a cell of the table shows, by the page's kinds.
+/// What a cell of the table shows, by kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cell<'a> {
     /// A name, in `text`.
@@ -220,7 +220,7 @@ pub struct Table<'a> {
     /// The cells that are links, by row then column: they take the keyboard also while scrolled
     /// out of view, and the view scrolls to one that gets it.
     pub link_cells: &'a [(usize, usize)],
-    /// The least width it runs: the page's widest table, so that every line runs as far.
+    /// The least width it runs: the widest table, so that every line runs as far.
     pub width: f32,
     /// Whether the right edge of each titled column is a resize handle.
     pub resize: bool,
@@ -445,7 +445,7 @@ mod tests {
         Rect::from_min_max(pos2(r.left(), r.bottom() - 1.0), r.max)
     }
 
-    /// `cell` drawn `w` by 26 is the page's cell: no ground, a 1 px `line` along its bottom, no
+    /// `cell` drawn `w` by 26 is a cell of the table: no ground, a 1 px `line` along its bottom, no
     /// edge; `icon` (with its centre's distance from the left) and `words` (each with its left's
     /// distance from the cell's left and its colour), centred down the cell, in `data`.
     fn check_cell(theme: Theme, t: &Tokens, cell: Cell<'_>, w: f32, icon: Option<(Icon, f32, Color32)>, words: &[(&str, f32, Color32)]) {
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn structure_cells_match_the_page() {
+    fn structure_cells_have_their_look() {
         // The heading, the header cell and the cell (text, muted, position,
         // nullable, primary key, foreign key), in both modes. None has a ground of its own: the
         // view's table is on `card`.

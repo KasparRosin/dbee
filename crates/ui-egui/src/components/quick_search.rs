@@ -1,4 +1,4 @@
-//! The quick search's parts (QC with R4's rows): the box ([`frame`]), its field ([`Field`]), and
+//! The quick search's parts: the box ([`frame`]), its field ([`Field`]), and
 //! what its list holds: a heading over a connection's group ([`Heading`]), a hit ([`Row`]) and a
 //! note in place of the list ([`Note`]). Each part is drawn from plain data into the rect the
 //! window gives it; the window ([`crate::quick_search`]) keeps the state, the keys, the scrolling
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn the_box_has_no_edge_and_the_shadow() {
-        // QC: `raised`, no edge (foundations: "none on quick search"), the one shadow, 12 inside.
+        // The box: `raised`, no edge, the one shadow, 12 inside.
         for (theme, t) in both() {
             let mut child = Rect::NOTHING;
             let shapes = painted(theme, |ui| {

@@ -11,7 +11,7 @@
 //!   right-click offers Connect · Edit · Duplicate · Delete (Delete asks first: it deletes the
 //!   saved passwords too).
 //! - Right, the pane, full bleed: the title row (the title, FILL FROM URL; the connection's colour
-//!   as a 2 px edge along its top). A new connection starts with the engine cards (K2), one cell
+//!   as a 2 px edge along its top). A new connection starts with the engine cards, one cell
 //!   per database type ([`DbKind::ALL`]) with its logo; a type this build has no driver for (not
 //!   in the session's `kinds`) is greyed with UPCOMING and cannot be chosen. A card, or a URL (its
 //!   scheme names the type), opens the form under the engine row: the type's logo and name, and
@@ -1013,7 +1013,7 @@ fn main(
     });
 }
 
-/// The engine cards (K2) under `Choose a database`: one per database type, as many in a row as
+/// The engine cards under `Choose a database`: one per database type, as many in a row as
 /// fit at [`ENGINE_CARD_MIN_W`] each, each row one box; scrolling when the window is short. Those
 /// of `kinds` can be chosen.
 fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
@@ -1092,7 +1092,7 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, cell: Rect, cor
 }
 
 /// A row's second line (its logo names the type): a server's `user@host:port/database` (no `/`
-/// without a database), `  SSH` after it through a tunnel, as the page writes it; or a file's
+/// without a database), `  SSH` after it through a tunnel; or a file's
 /// path, with the home folder as `~`.
 fn card_address(c: &ConnectionConfig) -> Address {
     match c.kind.info().settings {
@@ -1552,7 +1552,7 @@ mod tests {
         assert_eq!(card_address(&shop), Address::Server("root@127.0.0.1:32821/shop".into()));
         let file = ConnectionConfig { kind: DbKind::Sqlite, file: Some(PathBuf::from("/data/shop.sqlite")), ..ConnectionConfig::default() };
         assert_eq!(card_address(&file), Address::File("/data/shop.sqlite".into()));
-        // Through a tunnel, as the page writes it.
+        // Through a tunnel.
         let tunnel = ConnectionConfig { ssh: Some(Default::default()), ..shop };
         assert_eq!(card_address(&tunnel), Address::Server("root@127.0.0.1:32821/shop  SSH".into()));
         // A file in the home folder, with `~`.

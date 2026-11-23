@@ -1522,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gutter_draws_the_pages_line_numbers() {
+    fn the_gutter_draws_the_shared_line_numbers() {
         // `components::editor::LineNumber` in the gutter: the cursor's line (1) in `text`, the
         // error's line (2) in `danger`, the rest `text_muted`, in `code`, flush right in a box as
         // wide as two `code` digits, 12 in from the editor's left; no line after the gutter.

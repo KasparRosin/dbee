@@ -18,7 +18,7 @@ pub fn apply(style: &mut Style, t: &Tokens) {
     v.window_stroke = Stroke::new(f32::from(EDGE), t.raised_line);
     v.menu_corner_radius = CornerRadius::same(RADIUS_FLOAT);
     v.popup_shadow = float_shadow(t);
-    // egui puts the edge outside the margin; the page measures its padding from the outside.
+    // egui puts the edge outside the margin; the padding here is measured from the outside.
     style.spacing.menu_margin = Margin::symmetric(TOOLTIP_PAD_X - EDGE, TOOLTIP_PAD_Y - EDGE);
     style.spacing.tooltip_width = TOOLTIP_W - 2.0 * f32::from(TOOLTIP_PAD_X);
 }
@@ -44,7 +44,7 @@ impl Hint for Response {
 }
 
 /// `tooltip`, if it is to show, at the pointer, saying `words`. egui's own at-pointer tooltip sits
-/// 12 off the pointer; the page's sits 4 below it.
+/// 12 off the pointer; this one sits 4 below it.
 fn show(tooltip: Tooltip<'_>, words: impl Into<String>) {
     tooltip.at_pointer().gap(TOOLTIP_GAP).show(|ui| {
         // As egui's hover text: the area's size doesn't shrink a tooltip whose words change.
@@ -153,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn a_tooltip_matches_the_page() {
+    fn a_tooltip_has_its_look() {
         // `raised`, a 1 px `raised_line` edge inside, corners 4, the shadow (0 6,
-        // the page's blur 18, egui's 36); the words 8 in from the outside edge and 4 down, in
+        // the blur's radius 18 is egui's 36); the words 8 in from the outside edge and 4 down, in
         // `text`; one line hugs its words, a long text wraps to keep the tooltip at most 320 wide.
         for (theme, t) in both() {
             for words in [ONE, WRAPPED] {

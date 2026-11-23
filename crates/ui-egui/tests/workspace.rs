@@ -282,11 +282,11 @@ fn rows_and_tables(i: &Json) -> (usize, usize) {
     (rows, tables)
 }
 
-/// QC with R4's rows at 1100 × 720: the box 640 wide at 56 over the scrim, on `raised` with the
+/// The quick search at 1100 × 720: the box 640 wide at 56 over the scrim, on `raised` with the
 /// shadow and no edge; the field 40 tall; the open connection's heading over its tables, then
 /// OTHER CONNECTIONS over the saved one, every item 32 tall, one after the other.
 #[test]
-fn the_quick_search_is_drawn_as_qc() {
+fn the_quick_search_is_a_raised_box_of_headed_rows() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = with_replica(db);
     let open = ui.document()["connection"]["name"].as_str().unwrap().to_string();
@@ -950,7 +950,7 @@ fn ring_in(ui: &Ui, field: egui::Rect) -> bool {
 
 /// The tree's header is the sidebar's filter and count (`components::sidebar`). `tree-filter`
 /// keeps its id and its value as typed, `tree-refresh` its value, enabled flag and hover. The
-/// field is the page's 35 above the row's line with the refresh's 28 square beside it; what is
+/// field is 35 tall above the row's line with the refresh's 28 square beside it; what is
 /// typed is drawn as typed; the count under the row says dbee's word in capitals. A click gives
 /// the field focus without the ring, Shift+Tab back to it shows the ring; a refresh keeps the
 /// filter.
@@ -1435,7 +1435,7 @@ fn tabs_open_close_and_mark_filters_and_text() {
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
 }
 
-/// The tabs strip as the last frame drew it (the page's `tab strip`): a band on
+/// The tabs strip as the last frame drew it: a band on
 /// `card` that the tabs fill top to bottom, side by side, each with a 1 px `line` at its right
 /// end; the `line` along the band's bottom under everything but the active tab (`active`), which
 /// has the 2 px `ink` line along its top; no other tab has that line.
@@ -1557,7 +1557,7 @@ fn the_tabs_sit_on_their_own_band() {
 }
 
 /// The smallest window: more tabs than fit scroll sideways, the tab made active is scrolled into
-/// view, and the strip keeps the page's look (Review Focus 2 and 5).
+/// view, and the strip keeps its look.
 #[test]
 fn many_tabs_scroll_and_the_active_one_shows() {
     let db = dbee_testkit::require_testdb!();
@@ -2033,7 +2033,7 @@ fn the_status_bar_keeps_every_fact() {
     ui.frame();
     assert_eq!(ui.value("status-lost"), "Connection lost");
     let lost = rect_of(&ui.tag("status-lost").unwrap());
-    assert!(ui.text_in(lost, "DISCONNECTED").is_some(), "the page's word");
+    assert!(ui.text_in(lost, "DISCONNECTED").is_some(), "the bar's word");
     assert_eq!(colour_of(&ui, lost, "DISCONNECTED"), Some(t.danger));
     let reconnect = ui.tag("status-reconnect").expect("RECONNECT");
     assert_eq!((reconnect["value"].clone(), reconnect.get("enabled").cloned()), (json!("Reconnect"), None), "{reconnect}");
@@ -2203,7 +2203,7 @@ fn the_value_toggle_shows_keyboard_focus() {
     assert!(!ring(&ui), "a click shows no focus look");
 }
 
-/// The menu bar is the page's: 30 tall on `bg` with a `line` along its bottom, its titles 24 tall
+/// The menu bar: 30 tall on `bg` with a `line` along its bottom, its titles 24 tall
 /// side by side from 4 in, centred above the line; what is under it starts at 30. Its tags stay.
 #[test]
 fn the_menu_bar_is_30_tall_and_keeps_its_tags() {
@@ -2274,7 +2274,7 @@ fn lines(ui: &Ui, line: egui::Color32) -> Vec<egui::Rect> {
 /// filter row is 36 tall, so the row's line and the tab strip's meet; the first tab starts at the
 /// sidebar's line.
 #[test]
-fn the_shell_frame_matches_the_page() {
+fn the_shell_frame_has_its_look() {
     let db = dbee_testkit::require_testdb!();
     for dark in [false, true] {
         let mode = if dark { "dark" } else { "light" };
@@ -2782,12 +2782,12 @@ fn rect_of(e: &Json) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)))
 }
 
-/// Entry `id` of `i` has `value`, is enabled or not, and is the page's 28 tall menu item.
+/// Entry `id` of `i` has `value`, is enabled or not, and is a 28 tall menu item.
 fn assert_item(i: &Json, id: &str, value: &Json, enabled: bool, at: &str) {
     let e = tag_in(i, id).unwrap_or_else(|| panic!("{at}: `{id}` is listed: {:?}", ids(i)));
     assert_eq!(&e["value"], value, "{at}: `{id}`'s value");
     assert_eq!(e.get("enabled") != Some(&json!(false)), enabled, "{at}: `{id}` enabled: {e}");
-    assert_eq!(rect_of(&e).height(), 28.0, "{at}: `{id}` is the page's 28 tall item: {e}");
+    assert_eq!(rect_of(&e).height(), 28.0, "{at}: `{id}` is a 28 tall item: {e}");
 }
 
 /// The colour `words` are drawn in within `within` in the last frame.
@@ -2807,7 +2807,7 @@ fn colour_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<egui::Color32> 
 
 /// Review Focus 1 and 4 of group 1: every menu and popup list keeps its automation ids, values
 /// and enabled flags, as `menu.rs`, `grid.rs`, `connections.rs`, `conn_form.rs` and
-/// `query_tab.rs` tag them, now on the page's 28 tall items.
+/// `query_tab.rs` tag them, now on the 28 tall items.
 #[test]
 fn menu_items_keep_their_ids_and_values() {
     let db = dbee_testkit::require_testdb!();
@@ -3055,7 +3055,7 @@ fn words_at(ui: &Ui, words: &str) -> (egui::Rect, egui::Color32) {
 /// words on the left and the keycaps on the right of a 220 wide block. The strip shows only +.
 /// Open or shut, the value panel has no place with no tab: the block is centred in the whole area.
 #[test]
-fn no_tab_open_matches_the_page() {
+fn no_tab_open_has_its_look() {
     let db = dbee_testkit::require_testdb!();
     for (dark, shut) in [(false, false), (false, true), (true, false), (true, true)] {
         let mode = format!("{}, the value panel {}", if dark { "dark" } else { "light" }, if shut { "shut" } else { "open" });

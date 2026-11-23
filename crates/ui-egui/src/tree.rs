@@ -56,7 +56,7 @@
 //! `3 of 516 tables`, `0 tables`, `Loading`) and, when the catalog has nothing to show, `tree-empty` (its
 //! sentence).
 //!
-//! **A refresh** (LC4) changes nothing before it has run 300 ms ([`crate::quiet`]; the workspace
+//! **A refresh** changes nothing before it has run 300 ms ([`crate::quiet`]; the workspace
 //! asks the clock). From then the count reads `LOADING`, whatever the filter holds, and the rows
 //! are drawn at [`theme::DIM`] (`tree-dimmed`, value `true`, the rows' area): a look only, they
 //! scroll, select, open and take a right-click as before. With no rows to show (nothing in the
@@ -487,7 +487,7 @@ pub fn show(
         (rows.matching as u64, rows.total as u64)
     };
     let word = ["table", "tables"];
-    // A filter with no match reads `0 TABLES` over an empty tree (E3), not `0 OF 516 TABLES`.
+    // A filter with no match reads `0 TABLES` over an empty tree, not `0 OF 516 TABLES`.
     let count = if loading.is_some() {
         Count::Loading
     } else if !filtering {
@@ -515,7 +515,7 @@ pub fn show(
         return acts;
     }
     if rows.list.is_empty() {
-        // A filter with no match: the count says it, no phrase (E3). A catalog with nothing to
+        // A filter with no match: the count says it, no phrase. A catalog with nothing to
         // show: its sentence 12 in and 12 under the count, as the table tab's empty words sit.
         if !filtering {
             let text = format!("This connection has no {many} dbee can show.");

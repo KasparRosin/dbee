@@ -142,7 +142,7 @@ enum Facts {
 }
 
 impl TableBar {
-    /// The structure's facts, as the page writes them: `8 columns  ~25,000 rows`.
+    /// The structure's facts: `8 columns  ~25,000 rows`.
     pub fn structure_words(&self) -> String {
         let columns = if self.columns == 1 { "1 column".to_string() } else { format!("{} columns", self.columns) };
         match self.count.words(None) {
@@ -641,7 +641,7 @@ mod tests {
     use crate::filter_bar::{self, Bar};
     use crate::theme::{Text, Tokens};
 
-    /// The page's bars are 840 wide.
+    /// The bars are drawn 840 wide.
     const W: f32 = 840.0;
 
     fn close(a: f32, b: f32) -> bool {
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn the_table_bar_matches_the_page() {
+    fn the_table_bar_has_its_look() {
         // The table bar, without the view switch and the divider after it (they stand in the bottom
         // bar): 36 tall on `card`, a 1 px `line` along its bottom; from its left end REFRESH, with
         // no divider before it and its icon 12 in, then + ROW with its divider; at the right end
@@ -699,7 +699,7 @@ mod tests {
             let bar = |view, loading| TableBar {
                 view,
                 loading,
-                // The page's structure bar shows the estimate.
+                // The structure bar shows the estimate.
                 count: if view == View::Structure { RowCount::Estimate(25_000) } else { RowCount::Exact(25_000) },
                 shown: Some((1, 100)),
                 columns: 8,
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn the_paging_bar_matches_the_page() {
+    fn the_paging_bar_has_its_look() {
         // The paging bar with the view switch in it: 36 tall on `card`, a 1 px `line` along its top.
         // At the left end, 12 in and centred under the line, the switch (caps segments in a 28
         // box, 139 wide). In the bar's middle the plain arrows (28) and `PAGE 1 OF 250` in
@@ -1434,8 +1434,8 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_row_matches_the_page() {
-        // A filter row in the page's filter bar: on `card`, its rows 4 from its top and
+    fn the_filter_row_has_its_look() {
+        // A filter row in the filter bar: on `card`, its rows 4 from its top and
         // bottom and 12 from its left, a 1 px `line` under it. A row is 36 tall, its controls 28
         // tall, 4 from its top, 8 apart: the raw SQL toggle (`button/icon` boxed, code), the column
         // and the operator (`dropdown`), the value (`input` data), remove, add (boxed, minus and

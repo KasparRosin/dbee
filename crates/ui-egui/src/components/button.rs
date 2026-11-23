@@ -1,4 +1,4 @@
-//! The buttons of the page: `button/box` (styles primary, outline and danger), `button/text`,
+//! The buttons: `button/box` (styles primary, outline and danger), `button/text`,
 //! `button/icon` (boxed and plain) and `button/bar` (an icon with words, or an icon alone). Their
 //! words are drawn in capitals and reported to accessibility as written; an icon alone is named
 //! by its icon.
@@ -16,7 +16,7 @@ use crate::theme::size::{
 };
 use crate::theme::{Text, tokens};
 
-/// A shortcut on a filled button is its words' colour at this opacity, as the page draws it.
+/// A shortcut on a filled button is its words' colour at this opacity.
 const SHORTCUT_ON_FILL: f32 = 0.7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +224,7 @@ impl IconButton {
     }
 
     /// A toggle, on or off (the raw SQL toggle). On, a boxed one has a `fill` ground inside its
-    /// edge, hovered or not; the page draws no on look for a plain one.
+    /// edge, hovered or not; a plain one has no on look.
     pub fn on(mut self, on: bool) -> IconButton {
         self.on = Some(on);
         self
@@ -374,7 +374,7 @@ impl<'a> BarButton<'a> {
             return (None, BAR_BUTTON_H);
         };
         let words = ui.painter().layout_job(Text::Label.job(label, Color32::PLACEHOLDER));
-        // egui puts the letter spacing after the last letter too; the page's measure has none there.
+        // egui puts the letter spacing after the last letter too; the button's width counts none there.
         let words_w = words.size().x - Text::Label.spacing();
         let icon_w = self.icon.map_or(0.0, |i| i.size().x + BAR_BUTTON_GAP);
         let width = (2.0 * BAR_BUTTON_PAD_X + icon_w + words_w).ceil();
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn each_box_button_state_matches_the_page() {
+    fn each_box_button_state_has_its_look() {
         // 28 tall, corners 2, the words 12 inside the box (and inside the outline's
         // 1 px edge), a shortcut 8 after them.
         for (theme, t) in both() {
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn each_icon_button_state_matches_the_page() {
+    fn each_icon_button_state_has_its_look() {
         // 28 square, corners 2, the icon centred in `text`. Boxed: a 1 px line_strong
         // edge and no ground; plain: no edge, so its focus is a box around it.
         let hovered = Look { hovered: true, ..Look::default() };
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn each_bar_button_state_matches_the_page() {
+    fn each_bar_button_state_has_its_look() {
         // 36 tall; the label kind 12, its icon, 8, its words in `label` caps, 12; the
         // icon kind 36 square, its icon centred. Hover `hover`, on `fill` over the whole cell (and
         // hovering it changes nothing), the divider a 1 px `line` at its left end over the ground,
@@ -781,7 +781,7 @@ mod tests {
                                 assert_eq!(*c, colour, "{at_}: the words' colour");
                                 assert!(close(w.left(), at.left() + 12.0 + icon.x + 8.0), "{at_}: {w:?} after the icon in {at:?}");
                                 assert!(close(w.center().y, at.center().y), "{at_}: the words centred");
-                                // The page's measure: egui puts the letter spacing after the last
+                                // The words' width: egui puts the letter spacing after the last
                                 // letter too, which takes no room.
                                 let page = (12.0 + icon.x + 8.0 + w.width() - Text::Label.spacing() + 12.0).ceil();
                                 assert_eq!(at.width(), page, "{at_}: 12, icon, 8, words, 12");
@@ -804,9 +804,9 @@ mod tests {
     }
 
     #[test]
-    fn bar_buttons_are_as_wide_as_the_pages() {
-        // The page's bar row of buttons and the icon kind, to a point: egui
-        // measures these words a little narrower than the page's font does.
+    fn bar_buttons_have_their_measured_widths() {
+        // A bar row of buttons and the icon kind at their measured widths, to a point: egui
+        // measures these words a little narrower than the font's own widths add up to.
         let mut widths = Vec::new();
         painted(Theme::Light, |ui| {
             widths = [
@@ -824,12 +824,12 @@ mod tests {
         let page = [90.0, 63.0, 83.0, 69.0, 69.0, 36.0];
         assert_eq!(widths.len(), page.len());
         for (ours, page) in widths.iter().zip(page) {
-            assert!((ours - page).abs() <= 1.0, "{widths:?} against the page's {page}");
+            assert!((ours - page).abs() <= 1.0, "{widths:?} against the measured {page}");
         }
     }
 
     #[test]
-    fn a_boxed_icon_button_that_is_on_matches_the_page() {
+    fn a_boxed_icon_button_that_is_on_has_its_look() {
         // Boxed and on: a `fill` ground inside its 1 px `line_strong`
         // edge, the icon in `text` as in default; hovering changes nothing. Read out as on.
         use egui::accesskit::Toggled;

@@ -161,7 +161,7 @@ fn popups_mark_hovered_and_chosen_items_and_draw_lines_on_raised_in_dark() {
     ui.key("Escape");
     ui.frame();
 
-    // A list: the chosen column, marked in the left column (the design's menu with choices).
+    // A list: the chosen column, marked in the left column.
     ui.open("shop", "orders");
     ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
     let chosen = ui.value("filter-0-column");
@@ -331,7 +331,7 @@ fn wheel(ui: &mut Ui, over: &str, delta: egui::Vec2) {
     }
 }
 
-/// Foundations: flat. egui fades the ends of a scroll area that has more to scroll to; the
+/// Flat: egui fades the ends of a scroll area that has more to scroll to; the
 /// connection form scrolled part way paints none.
 #[test]
 fn the_connection_form_paints_no_fade() {
@@ -670,8 +670,8 @@ fn the_menu_marks_the_chosen_entry() {
     assert_eq!(state(&mut ui)["choice"], "light");
 }
 
-/// View > Theme draws its choices with the chosen mark in a left column (the design's menu with
-/// choices), not a `✔` on the right; the entries' `checked` value is as before.
+/// View > Theme draws its choices with the chosen mark in a left column and
+/// not a `✔` on the right; the entries' `checked` value is as before.
 #[test]
 fn the_theme_menu_marks_the_choice_on_the_left() {
     let db = dbee_testkit::require_testdb!();

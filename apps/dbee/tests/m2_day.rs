@@ -717,7 +717,7 @@ fn m2_day_end_to_end() {
         let card = app.value(&format!("conn-kind-{kind}"));
         assert_eq!(card["upcoming"], false, "{kind}: {card}");
     }
-    //    The cards are K2: 104 tall, side by side.
+    //    The engine cards: 104 tall, side by side.
     let cells = ["postgres", "mysql", "mariadb", "sqlite"].map(|kind| app.rect(&format!("conn-kind-{kind}")));
     for (n, c) in cells.iter().enumerate() {
         assert!((c[3] - 104.0).abs() <= 0.5 && (c[1] - cells[0][1]).abs() <= 0.5, "card {n}: {cells:?}");

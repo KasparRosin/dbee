@@ -1,6 +1,6 @@
-//! Every control of the design's Components page in every state, with no database, for looking
-//! at them against the page's light and dark frames (`examples/components.rs`): one section per
-//! page component, in the page's order, each headed with the page's caption.
+//! The components showcase: every shared control in every state, with no database, for looking
+//! at them in light and dark (`examples/components.rs`): one section per control, each headed
+//! with a caption.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -47,16 +47,16 @@ use crate::theme::size::{
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
-/// The page's frames: 20 between sections.
+/// 20 between sections.
 const BETWEEN: f32 = 20.0;
 /// Between the controls of a row of buttons.
 const ROW_GAP: f32 = 20.0;
-/// The Field and input frame's inputs and fields, and the Dropdown frame's dropdowns.
+/// The Field and input section's inputs and fields, and the Dropdown section's dropdowns.
 const INPUT_W: f32 = 160.0;
-/// The Segmented frame's small boxes, and the width of a small segment shown alone.
+/// The Segmented section's small boxes, and the width of a small segment shown alone.
 const SEGMENTED_W: f32 = 386.0;
 const SMALL_SEGMENT_W: f32 = 77.0;
-/// The Icons frame: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
+/// The Icons section: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
 /// between rows. In a cell the icon's box ends 18 down, centred, and its name starts 24 down.
 const ICONS_UNDER_CAPTION: f32 = 20.0;
 const ICON_CELL: Vec2 = vec2(120.0, 40.0);
@@ -66,7 +66,7 @@ const ICON_BOTTOM: f32 = 18.0;
 const ICON_NAME_TOP: f32 = 24.0;
 /// The check box's mark is shown on an `ink` tile, as in a checkbox.
 const ICON_TILE: f32 = 14.0;
-/// The Menus frame: the items' widths of its menus (Edit, View, Theme), its scene with the menu
+/// The Menus section: the items' widths of its menus (Edit, View, Theme), its scene with the menu
 /// bar, and the Theme submenu's overlap of the View menu.
 const MENU_W: f32 = 230.0;
 const VIEW_MENU_W: f32 = 190.0;
@@ -74,23 +74,23 @@ const THEME_MENU_W: f32 = 130.0;
 const SCENE: Vec2 = vec2(560.0, 190.0);
 const MENU_BAR_W: f32 = 240.0;
 const SUBMENU_OVERLAP: f32 = 4.0;
-/// The Tabs and bars frame's tab strip and menu bars; its scene of tabs that don't fit, this tall,
+/// The Tabs and bars section's tab strip and menu bars; its scene of tabs that don't fit, this tall,
 /// and the list's items this wide.
 const STRIP_W: f32 = 840.0;
 const TAB_LIST_SCENE_H: f32 = 250.0;
 const TAB_LIST_W: f32 = 130.0;
-/// The filter bar frame's column, operator and value, as wide as the page draws them.
+/// The widths of the filter bar section's column, operator and value.
 const FILTER_COLUMN_W: f32 = 140.0;
 const FILTER_OP_W: f32 = 160.0;
 const FILTER_VALUE_W: f32 = 140.0;
-/// The sidebar header frame's filters and counts, and the Tree and sidebar frame's tree rows, as
-/// wide as the page draws them; its connection rows.
+/// The width of the sidebar header section's filters and counts and of the tree rows; that of
+/// the connection rows.
 const SIDEBAR_W: f32 = 259.0;
 const CONNECTION_LIST_W: f32 = 279.0;
-/// The status bar frames: bars this wide, this far apart.
+/// The status bar sections: bars this wide, this far apart.
 const STATUS_W: f32 = 1100.0;
 const STATUS_APART: f32 = 10.0;
-/// The status bars' addresses, as the page writes them, and a long path.
+/// The status bars' addresses, and a long path.
 static PG14: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@pg14:5432/dbee".into()));
 static TUNNEL: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@db.internal:5432/dbee via bastion.example.com".into()));
 static SHOP_FILE: LazyLock<status::Address> = LazyLock::new(|| status::Address::File("~/data/shop.sqlite".into()));
@@ -98,14 +98,14 @@ static LONG_PATH: LazyLock<status::Address> =
     LazyLock::new(|| status::Address::File("~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite".into()));
 /// A bar too narrow for the long path.
 const LONG_PATH_W: f32 = 560.0;
-/// The Dialogs frame's scrim scene: a window of this size, its query text this far in, the dialog
+/// The Dialogs section's scrim scene: a window of this size, its query text this far in, the dialog
 /// this far in.
 const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
 const BEHIND_AT: Vec2 = vec2(24.0, 20.0);
 const DIALOG_AT: Vec2 = vec2(100.0, 40.0);
 const BEHIND: &str = "select o.id, c.name as customer, o.total\nfrom shop.orders o\njoin shop.customers c on c.id = o.customer_id\nwhere o.total > 100\norder by o.id desc\nlimit 50;";
 
-/// The icons in the order of the page's Icons frame.
+/// The icons in the order the Icons section shows them.
 const ICONS: [Icon; 32] = [
     Icon::ChevronDown,
     Icon::KeyForeign,
@@ -148,7 +148,7 @@ pub fn prepare(ctx: &egui::Context, theme: egui::Theme) {
     ctx.set_theme(theme);
 }
 
-/// Every control in every state, one section per page component in the page's order.
+/// Every control in every state, one section per control.
 pub fn show(ui: &mut Ui) {
     egui::Frame::NONE.inner_margin(SPACE_24).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -167,7 +167,7 @@ pub fn show(ui: &mut Ui) {
             for key in ["Ctrl", "Shift", "Z"] {
                 ui.add(Keycap::new(key));
             }
-            // The page's 24 between the groups is an item of the row, with the gap either side.
+            // The 24 between the groups is an item of the row, with the gap either side.
             ui.add_space(SPACE_24 + KEYCAP_GAP);
             for key in ["Ctrl", "Z"] {
                 ui.add_enabled(false, Keycap::new(key));
@@ -195,7 +195,7 @@ pub fn show(ui: &mut Ui) {
     });
 }
 
-/// The Grid frame's columns: the row numbers, then each column's width, name, type, key and
+/// The Grid section's columns: the row numbers, then each column's width, name, type, key and
 /// whether its values sit right.
 const GRID_ROW_NUMBERS: f32 = 36.0;
 const GRID_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 5] = [
@@ -206,7 +206,7 @@ const GRID_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 5] = [
     (90.0, "paid", "bool", None, false),
 ];
 
-/// One of the Grid frame's rows: its values (`None` for NULL), and how it is drawn.
+/// One of the Grid section's rows: its values (`None` for NULL), and how it is drawn.
 struct GridRow {
     values: [Option<&'static str>; 5],
     hovered: bool,
@@ -224,8 +224,8 @@ struct GridRow {
 const PLAIN: GridRow =
     GridRow { values: [None; 5], hovered: false, selected: false, focus: None, whole: false, new: false, deleted: false, marks: &[] };
 
-/// The Grid frame's twelve rows, as the page draws them. Rows 10 and 11, where the page shows the
-/// cell editor over a cell, are plain: the editor is not one of the cells.
+/// The Grid section's twelve rows. Rows 10 and 11 are plain: the cell editor, which the grid
+/// draws over a cell, is not one of the cells.
 const GRID_ROWS: [GridRow; 12] = [
     GridRow { values: [Some("91"), Some("Customer 91"), Some("207.29"), Some("12"), Some("true")], ..PLAIN },
     GridRow { values: [Some("391"), Some("Customer 391"), Some("464.29"), Some("7"), Some("false")], hovered: true, ..PLAIN },
@@ -267,11 +267,11 @@ const GRID_ROWS: [GridRow; 12] = [
     },
 ];
 
-/// The grid's cells as the page's Grid frame shows them, then the two icons it draws with.
+/// The grid's cells, then the two icons it draws with.
 fn grid(ui: &mut Ui) {
     section(
         ui,
-        "grid: header (sorted, text, number, foreign key hovered); rows: plain, hover, selected with the focus on a key (its link), staged and staged focus, saved, failed, new, deleted, NULL / line break / empty, two plain rows where the page shows the cell editor, #17 the whole row selected",
+        "grid: header (sorted, text, number, foreign key hovered); rows: plain, hover, selected with the focus on a key (its link), staged and staged focus, saved, failed, new, deleted, NULL / line break / empty, two plain rows, the whole row selected",
         SPACE_8,
         |ui| {
             let width = GRID_ROW_NUMBERS + GRID_COLUMNS.iter().map(|c| c.0).sum::<f32>();
@@ -332,7 +332,7 @@ fn grid(ui: &mut Ui) {
     });
 }
 
-/// The tree's rows and the connection list's, as the page's Tree and sidebar frame shows them:
+/// The tree's rows and the connection list's:
 /// each list on `bg` with a 1 px `line` at its right.
 fn sidebar_rows(ui: &mut Ui) {
     let rel = TreeKind::Relation;
@@ -365,7 +365,7 @@ fn sidebar_rows(ui: &mut Ui) {
     ];
     section(
         ui,
-        "tree/row: schema open, table, table open with its columns (primary key, plain, foreign key), view, materialized view, hover, selected, focus (inferred), schema",
+        "tree/row: schema open, table, table open with its columns (primary key, plain, foreign key), view, materialized view, hover, selected, focus, schema",
         SPACE_8,
         |ui| {
             list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| {
@@ -390,16 +390,11 @@ fn sidebar_rows(ui: &mut Ui) {
         connection("Local postgres", DbKind::Postgres, "postgres@localhost:5432/postgres", ConnectionColor::None),
         connection("Notes", DbKind::Sqlite, "~/data/notes.sqlite", ConnectionColor::Purple),
     ];
-    section(
-        ui,
-        "sidebar/connection: default, selected, hover, focus (inferred), no colour, other engines (logo/mysql, logo/sqlite)",
-        SPACE_8,
-        |ui| {
-            list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| {
-                connections[i].paint(ui, rect);
-            })
-        },
-    );
+    section(ui, "sidebar/connection: default, selected, hover, focus, no colour, other engines (logo/mysql, logo/sqlite)", SPACE_8, |ui| {
+        list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| {
+            connections[i].paint(ui, rect);
+        })
+    });
 }
 
 /// The quick search's narrow box, for a cut row: this wide.
@@ -412,7 +407,7 @@ enum SearchItem<'a> {
     Note(Note<'a>),
 }
 
-/// The quick search as the screen draws it (QC with R4's rows), and its states.
+/// The quick search as the screen draws it, and its states.
 fn quick_searches(ui: &mut Ui) {
     let row = |hit| SearchItem::Row(SearchRow { hit, highlighted: false, hovered: false });
     let table = |schema, name, kind| Hit::Table { schema, name, kind };
@@ -474,26 +469,26 @@ fn search_box(ui: &mut Ui, salt: usize, width: f32, query: &str, items: &[Search
     });
 }
 
-/// The value panel's frame on the page: 340 by 372, three to a row, 16 apart.
+/// The value panel as drawn here: 340 by 372, three to a row, 16 apart.
 const VALUE_PANEL: Vec2 = vec2(340.0, 372.0);
 const VALUE_PANELS_PER_ROW: usize = 3;
 const VALUE_PANEL_GAP: f32 = 16.0;
 
-/// The page's values: the `meta` jsonb, the `notes` text, the value being edited, row 3.
+/// The values shown: the `meta` jsonb, the `notes` text, the value being edited, row 3.
 const VALUE_JSON: &str =
     r#"{"src": "web", "gift": true, "tags": ["express", "fragile"], "items": 3, "notes": "Leave at the door", "coupon": null, "weight_kg": 1.25}"#;
 const VALUE_TEXT: &str = "Leave at the door.\nRing twice, then wait.";
 const VALUE_EDITING: &str = "{\n  \"src\": \"web\",\n  \"gift\": false,\n  \"tags\": [\"new\", \"eu\"],\n  \"note\": null\n}";
 const VALUE_ROW: &str = r#"{"id": 691, "customer": "Customer 191", "total": 221.29, "shipped_at": "2025-04-02", "note": null, "paid": true}"#;
 
-/// One of the value panel's states as the page shows it: the panel, and the value in it (its text,
+/// One of the value panel's states: the panel, and the value in it (its text,
 /// whether it is JSON, where the editing caret is).
 pub(crate) struct ValueSample {
     pub panel: Panel<'static>,
     pub value: Option<(String, bool, Option<usize>)>,
 }
 
-/// The value panel's eight states with the page's values, in the page's order.
+/// The value panel's eight states with those values.
 pub(crate) fn value_samples() -> [ValueSample; 8] {
     let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
     let row = dbee_core::json::pretty(VALUE_ROW).unwrap_or_else(|| VALUE_ROW.to_owned());
@@ -517,7 +512,7 @@ pub(crate) fn value_samples() -> [ValueSample; 8] {
             panel: panel(ValueState::Editing, "meta", "json", facts(lines(VALUE_EDITING), 58)),
             value: Some((VALUE_EDITING.to_owned(), true, caret)),
         },
-        // The page's facts for the row: a row's size is the value panel screen's to work out.
+        // The facts for the row, given: a row's size is the value panel screen's to work out.
         ValueSample { panel: panel(ValueState::Row, "Row 3", "", facts(lines(&row), 134)), value: Some((row, true, None)) },
     ]
 }
@@ -537,11 +532,11 @@ pub(crate) fn value_panel(ui: &mut Ui, sample: &ValueSample, at: Rect) -> value:
     shown
 }
 
-/// The page's long type, for the narrow bar.
+/// A long type, for the narrow bar.
 const VALUE_LONG_TYPE: &str = "enum('small','Large')";
 
-/// The value panel's facts and its narrowest bar, as the app draws them: K2's text holding JSON
-/// (`FORMATTED AS JSON`), N2's cut value (`FIRST 10 MIB OF 19.1 MIB`), and the panel at 240 with
+/// The value panel's facts and its narrowest bar, as the app draws them: text holding JSON
+/// (`FORMATTED AS JSON`), a cut value (`FIRST 10 MIB OF 19.1 MIB`), and the panel at 240 with
 /// a long name and type (the type gone, the name cut, COPY and WRAP icons).
 pub(crate) fn value_facts_samples() -> [(ValueSample, f32); 3] {
     let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
@@ -583,15 +578,15 @@ pub(crate) fn value_facts_samples() -> [(ValueSample, f32); 3] {
     ]
 }
 
-/// The value panel in each state as the page's Value panel frame shows it; then its facts and its
+/// The value panel in each state; then its facts and its
 /// narrowest bar.
 fn value_panels(ui: &mut Ui) {
     let samples = value_samples();
-    section(ui, "value panel: json, text, NULL, empty (inferred), no cell selected, COPIED, editing, #17 a row as JSON (inferred)", SPACE_8, |ui| {
+    section(ui, "value panel: json, text, NULL, empty, no cell selected, COPIED, editing, a row as JSON", SPACE_8, |ui| {
         panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at))
     });
     let facts = value_facts_samples();
-    section(ui, "value panel: FORMATTED AS JSON (K2), a cut value (N2), 240 wide with a long name and type", SPACE_8, |ui| {
+    section(ui, "value panel: FORMATTED AS JSON, a cut value, 240 wide with a long name and type", SPACE_8, |ui| {
         panels(ui, facts.len(), |ui, i, at| {
             if let Some((sample, width)) = facts.get(i) {
                 _ = value_panel(ui, sample, Rect::from_min_size(at.min, vec2(*width, at.height())));
@@ -600,16 +595,16 @@ fn value_panels(ui: &mut Ui) {
     });
 }
 
-/// The Error band frame's bands: 840 wide, 12 apart.
+/// The Error band section's bands: 840 wide, 12 apart.
 const BAND_W: f32 = 840.0;
 const BANDS_APART: f32 = 12.0;
 const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", detail: None, hint: None, note: None, actions: &[] };
-/// ROLLBACK, under a failed transaction's band (R2).
+/// ROLLBACK, under a failed transaction's band.
 const ROLLBACK_ACTION: [Action<'static>; 1] = [Action { label: "Rollback", enabled: true, hover: crate::query_tab::ROLLBACK_HOVER }];
 const BAND_TOTL: &str = "column o.totl does not exist";
 const BAND_HINT: &str = "Perhaps you meant to reference the column \"o.total\".";
 
-/// The Error band frame's five bands, as the page draws them.
+/// The Error band section's five bands.
 pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
     Band { heading: "Query failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
     Band {
@@ -623,8 +618,8 @@ pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
     Band { heading: "Statement 2 failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
 ];
 
-/// The bands the app draws which the page's Error band frame doesn't: ROLLBACK under a failed
-/// transaction (R2, `rollback.png`), the table tab's headings and notes, a server's detail and
+/// More bands the app draws: ROLLBACK under a failed
+/// transaction, the table tab's headings and notes, a server's detail and
 /// hint both.
 pub(crate) const APP_BANDS: [Band<'static>; 6] = [
     Band {
@@ -661,17 +656,17 @@ pub(crate) const APP_BANDS: [Band<'static>; 6] = [
     },
 ];
 
-/// The error bands as the page's Error band frame shows them; then the app's until its screens.
+/// The five error bands, then the app's others.
 fn error_bands(ui: &mut Ui) {
     section(
         ui,
-        "error band (EC1): Postgres, hint and position; Postgres, DETAIL and no position; MySQL, the message only; SQLite, a position; statement 2 failed",
+        "error band: Postgres, hint and position; Postgres, DETAIL and no position; MySQL, the message only; SQLite, a position; statement 2 failed",
         SPACE_8,
         |ui| bands(ui, "page", &PAGE_BANDS),
     );
     section(
         ui,
-        "not in the Error band frame: ROLLBACK under a failed transaction (R2); the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
+        "more error bands: ROLLBACK under a failed transaction; the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
         SPACE_8,
         |ui| bands(ui, "app", &APP_BANDS),
     );
@@ -704,12 +699,12 @@ fn strips(ui: &mut Ui) {
     });
 }
 
-/// The Error band frame's editor: 600 wide on `card`, its lines 12 down; the line numbers in their
+/// The Error band section's editor: 600 wide on `card`, its lines 12 down; the line numbers in their
 /// boxes at its left, the code 12 after them.
 const EDITOR_W: f32 = 600.0;
 const EDITOR_PAD: f32 = 12.0;
 
-/// The editor as the page draws it: the error on line 1, its token underlined; the cursor on line 3.
+/// The editor: the error on line 1, its token underlined; the cursor on line 3.
 fn editor_sample(ui: &mut Ui) {
     section(ui, "editor: the error's line number in danger, the token underlined in danger; the current line's number in text", SPACE_8, |ui| {
         let t = tokens(ui.ctx());
@@ -735,7 +730,7 @@ fn editor_sample(ui: &mut Ui) {
     });
 }
 
-/// The Error band frame's structure table: 840 wide on `card`; its columns' widths and titles,
+/// The Error band section's structure table: 840 wide on `card`; its columns' widths and titles,
 /// then its rows.
 const STRUCTURE_W: f32 = 840.0;
 const STRUCTURE_COLUMNS: [(f32, &str); 6] = [(40.0, ""), (150.0, "Name"), (140.0, "Type"), (76.0, "Nullable"), (150.0, "Default"), (284.0, "Keys")];
@@ -749,7 +744,7 @@ const STRUCTURE_ROWS: [[structure::Cell<'static>; 6]; 4] = {
     ]
 };
 
-/// The structure view's parts as the page's frame draws them: COLUMNS, the header, four columns.
+/// The structure view's parts: COLUMNS, the header, four columns.
 fn structure_sample(ui: &mut Ui) {
     let caption = "structure view: a section heading, the header (ink line under it), rows with position, name, type, nullable check, default, keys (primary key, foreign key link)";
     section(ui, caption, 0.0, |ui| {
@@ -775,7 +770,7 @@ fn structure_sample(ui: &mut Ui) {
     });
 }
 
-/// The waiting states' grid: the Grid frame's first three columns.
+/// The waiting states' grid: the Grid section's first three columns.
 const WAIT_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 3] =
     [(100.0, "id", "int8", Some(Key::Primary), true), (150.0, "customer", "text", None, false), (110.0, "total", "numeric", None, true)];
 /// The waiting states' rows of the grid and of the tree.
@@ -784,7 +779,7 @@ const WAIT_TREE_ROWS: usize = 8;
 /// The empty areas the phrases sit in.
 const EMPTY_AREA: Vec2 = vec2(300.0, 120.0);
 
-/// The waiting states (LC): a first load's skeleton, a reload at 50 %, the tree's `LOADING`, a
+/// The waiting states: a first load's skeleton, a reload at 50 %, the tree's `LOADING`, a
 /// dimmed area's off control, and the one grey phrase in its two places. The footer's jobs with
 /// their timers and RECONNECTING are the status bar's sections.
 fn waiting(ui: &mut Ui) {
@@ -796,7 +791,7 @@ fn waiting(ui: &mut Ui) {
     };
     section(
         ui,
-        "loading (LC1, LC2): a table's first load, the real header over ten rows of fill bars (none in the row numbers, a number's bar at the right); a reload, the old rows at 50 % under the header at full strength",
+        "loading: a table's first load, the real header over ten rows of fill bars (none in the row numbers, a number's bar at the right); a reload, the old rows at 50 % under the header at full strength",
         SPACE_8,
         |ui| {
             side_by_side(ui, &mut |ui| {
@@ -806,7 +801,7 @@ fn waiting(ui: &mut Ui) {
             })
         },
     );
-    section(ui, "loading (LC4): the tree's count reads loading over its rows at 50 %; with no rows to keep, eight rows of bars", SPACE_8, |ui| {
+    section(ui, "loading: the tree's count reads loading over its rows at 50 %; with no rows to keep, eight rows of bars", SPACE_8, |ui| {
         side_by_side(ui, &mut |ui| {
             for rows in [true, false] {
                 wait_tree(ui, rows);
@@ -974,8 +969,7 @@ fn list(ui: &mut Ui, w: f32, h: f32, n: usize, row: impl Fn(&Ui, usize, Rect)) {
     }
 }
 
-/// The menu bar, the query tab's bars and the status bars, as the page's Tabs and bars frame and
-/// its Status bar frame show them.
+/// The menu bar, the query tab's bars and the status bars.
 fn bars(ui: &mut Ui) {
     section(ui, "menu bar, 30 tall, from menubar/title; then with View open", SPACE_8, |ui| {
         ui.vertical(|ui| {
@@ -1038,7 +1032,7 @@ fn bars(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: a count's job with its timer, a table's name keeps its case; reconnecting in its first 300 ms, its words alone; a name dbee made, as written, with no address; a long path cut in the middle",
+        "also: a count's job with its timer, a table's name keeps its case; reconnecting in its first 300 ms, its words alone; a name dbee made, as written, with no address; a long path cut in the middle",
         SPACE_8,
         |ui| {
             let job = Activity::Job {
@@ -1066,8 +1060,8 @@ fn bars(ui: &mut Ui) {
     );
 }
 
-/// The run row, the result tabs, the result bar and the row count, as the page's Tabs and bars
-/// frame shows them, and their first states.
+/// The run row, the result tabs, the result bar and the row count,
+/// and their first states.
 fn results(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -1094,7 +1088,7 @@ fn results(ui: &mut Ui) {
             });
         },
     );
-    section(ui, "result tab: inactive, hover, active, focus (inferred)", SPACE_8, |ui| {
+    section(ui, "result tab: inactive, hover, active, focus", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = SPACE_16;
         ui.add(ResultTab::new("select ... series"));
         ui.add(ResultTab::new("select ... series").look(hovered));
@@ -1188,7 +1182,7 @@ fn results(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: a run as it first shows, at 00:00.3; a count's first 300 ms, its words alone; a result's name keeps its case",
+        "also: a run as it first shows, at 00:00.3; a count's first 300 ms, its words alone; a result's name keeps its case",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {
@@ -1215,8 +1209,7 @@ fn results(ui: &mut Ui) {
     );
 }
 
-/// The table bar, the filter bar and the paging bar, as the page's Tabs and bars frame shows
-/// them.
+/// The table bar, the filter bar and the paging bar.
 fn table_tab_bars(ui: &mut Ui) {
     let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
         ui.vertical(|ui| {
@@ -1328,8 +1321,8 @@ fn table_tab_bars(ui: &mut Ui) {
     );
 }
 
-/// The sidebar's filter and count, as the page's Tabs and bars frame shows them, and the
-/// refresh's states the page doesn't draw.
+/// The sidebar's filter and count, and the refresh's other
+/// states.
 fn sidebar_header(ui: &mut Ui) {
     let focused = Look { focused: true, ..Look::default() };
     let row = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui, usize)| {
@@ -1373,7 +1366,7 @@ fn sidebar_header(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: the refresh while a refresh runs (its plain icon, a click does nothing) and off; the connection list's filter, no refresh; typed text keeps its case",
+        "also: the refresh while a refresh runs (its plain icon, a click does nothing) and off; the connection list's filter, no refresh; typed text keeps its case",
         SPACE_8,
         |ui| {
             row(ui, &mut |ui, n| {
@@ -1395,25 +1388,20 @@ fn sidebar_header(ui: &mut Ui) {
     );
 }
 
-/// The tabs, the list button and the strip, as the page's Tabs and bars frame shows them, the
+/// The tabs, the list button and the strip, the
 /// strip whose tabs don't fit with its list open, and a busy tab.
 fn tabs(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
-    section(
-        ui,
-        "tab: table and query; inactive, hover (shows close), active (unsaved dot, close), focus (inferred, like a bar button)",
-        SPACE_8,
-        |ui| {
-            ui.spacing_mut().item_spacing.x = SPACE_16;
-            for (tab, title) in [(Tab::table as fn(&'static str) -> Tab<'static>, "orders [3]"), (Tab::query, "Query 1")] {
-                tab(title).show(ui);
-                tab(title).look(hovered).show(ui);
-                tab(title).active(true).unsaved(true).show(ui);
-                tab(title).look(focused).show(ui);
-            }
-        },
-    );
+    section(ui, "tab: table and query; inactive, hover (shows close), active (unsaved dot, close), focus (like a bar button)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        for (tab, title) in [(Tab::table as fn(&'static str) -> Tab<'static>, "orders [3]"), (Tab::query, "Query 1")] {
+            tab(title).show(ui);
+            tab(title).look(hovered).show(ui);
+            tab(title).active(true).unsaved(true).show(ui);
+            tab(title).look(focused).show(ui);
+        }
+    });
     section(ui, "tab strip: tabs, then the new tab button (default, hover, focus), on card with the line under the inactive tabs", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = SPACE_16;
         ui.allocate_ui(vec2(STRIP_W, TAB_H), |ui| {
@@ -1452,14 +1440,14 @@ fn tabs(ui: &mut Ui) {
             });
         },
     );
-    section(ui, "not on the page yet: a busy tab, the spinner in its icon's place; inactive, active", SPACE_8, |ui| {
+    section(ui, "also: a busy tab, the spinner in its icon's place; inactive, active", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = SPACE_16;
         Tab::table("orders").busy(true).show(ui);
         Tab::query("Query 1").busy(true).active(true).show(ui);
     });
 }
 
-/// The page's tabs that don't fit, in strip order: each title and whether it is a query
+/// Seven tabs that don't fit, in strip order: each title and whether it is a query
 /// tab. Query 1 is the active one, with unsaved text.
 const TOO_MANY_TABS: [(&str, bool); 7] = [
     ("orders [3]", false),
@@ -1483,49 +1471,44 @@ fn too_many_tabs() -> Vec<Tab<'static>> {
         .collect()
 }
 
-/// The dialogs and the scrim, as the page's Dialogs frame shows them: two to a row, 24 apart and
+/// The dialogs and the scrim: two to a row, 24 apart and
 /// 32 between rows.
 fn dialogs(ui: &mut Ui) {
     let focused = Look { focused: true, ..Look::default() };
     let id = |n: &str| egui::Id::new("showcase-dialog").with(n);
     let cancel = Button::outline("Cancel", "dialog-cancel");
-    section(
-        ui,
-        "dialog: Screens' dialogs from the components (database password, fill from URL with an error, close anyway, delete connection)",
-        SPACE_8,
-        |ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing = vec2(SPACE_24, SPACE_32);
-                ui.horizontal_top(|ui| {
-                    let (mut password, mut save, mut url) = ("secretpass".to_owned(), true, "shop@pg14:5432".to_owned());
-                    Dialog::new(id("password"), "Database password")
-                        .text(Words::from("Enter the password of ").name("shop").plain(" on ").name("pg14.internal").plain("."))
-                        .body(|ui, _| {
-                            ui.add(Input::body(&mut password).password(true).look(focused));
-                            ui.add(Checkbox::new(&mut save, "Save in keyring"));
-                        })
-                        .buttons([Button::primary("Connect", "dialog-ok"), cancel])
-                        .in_place(ui);
-                    Dialog::new(id("url"), "Fill from URL")
-                        .body(|ui, _| {
-                            Field::unlabelled(Input::body(&mut url).error(true)).error(Some("Not a database URL")).show(ui);
-                        })
-                        .buttons([Button::primary("Fill", "dialog-ok"), cancel])
-                        .in_place(ui);
-                });
-                ui.horizontal_top(|ui| {
-                    Dialog::new(id("close"), "Close anyway?")
-                        .text("Close Query 1? Its query text will be lost.")
-                        .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
-                        .in_place(ui);
-                    Dialog::new(id("delete"), "Delete connection")
-                        .text(Words::from("Delete “").name("Shop live").plain("”? Its saved passwords are deleted with it."))
-                        .buttons([Button::danger("Delete", "dialog-ok"), cancel])
-                        .in_place(ui);
-                });
+    section(ui, "dialog: database password, fill from URL with an error, close anyway, delete connection", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = vec2(SPACE_24, SPACE_32);
+            ui.horizontal_top(|ui| {
+                let (mut password, mut save, mut url) = ("secretpass".to_owned(), true, "shop@pg14:5432".to_owned());
+                Dialog::new(id("password"), "Database password")
+                    .text(Words::from("Enter the password of ").name("shop").plain(" on ").name("pg14.internal").plain("."))
+                    .body(|ui, _| {
+                        ui.add(Input::body(&mut password).password(true).look(focused));
+                        ui.add(Checkbox::new(&mut save, "Save in keyring"));
+                    })
+                    .buttons([Button::primary("Connect", "dialog-ok"), cancel])
+                    .in_place(ui);
+                Dialog::new(id("url"), "Fill from URL")
+                    .body(|ui, _| {
+                        Field::unlabelled(Input::body(&mut url).error(true)).error(Some("Not a database URL")).show(ui);
+                    })
+                    .buttons([Button::primary("Fill", "dialog-ok"), cancel])
+                    .in_place(ui);
             });
-        },
-    );
+            ui.horizontal_top(|ui| {
+                Dialog::new(id("close"), "Close anyway?")
+                    .text("Close Query 1? Its query text will be lost.")
+                    .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
+                    .in_place(ui);
+                Dialog::new(id("delete"), "Delete connection")
+                    .text(Words::from("Delete “").name("Shop live").plain("”? Its saved passwords are deleted with it."))
+                    .buttons([Button::danger("Delete", "dialog-ok"), cancel])
+                    .in_place(ui);
+            });
+        });
+    });
     section(
         ui,
         "new: Apply again (an Apply whose outcome is unknown); the commit prompt on closing a tab or switching connections, COMMIT is the main button",
@@ -1539,7 +1522,7 @@ fn dialogs(ui: &mut Ui) {
                     )
                     .buttons([Button::danger("Apply again", "dialog-ok"), cancel])
                     .in_place(ui);
-                // The page's placeholder words: the commit prompt isn't built yet.
+                // Placeholder words: the commit prompt isn't built yet.
                 Dialog::new(id("commit"), "Commit the transaction?")
                     .text("Query 1 has changes that aren't committed.")
                     .buttons([Button::primary("Commit", "commit"), Button::outline("Rollback", "rollback"), cancel])
@@ -1554,7 +1537,7 @@ fn dialogs(ui: &mut Ui) {
         p.rect_filled(scene, CornerRadius::ZERO, t.bg);
         Text::Code.paint(p, scene.min + BEHIND_AT, Align2::LEFT_TOP, BEHIND, t.text);
         p.rect_filled(scene, CornerRadius::ZERO, t.scrim);
-        // The page draws the scene's edge over what it holds, the scrim too.
+        // The scene's edge is drawn over what it holds, the scrim too.
         p.rect_stroke(scene, CornerRadius::ZERO, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
         let at = UiBuilder::new().max_rect(Rect::from_min_size(scene.min + DIALOG_AT, DIALOG_SCENE)).layout(Layout::top_down(Align::Min));
         ui.scope_builder(at, |ui| {
@@ -1566,8 +1549,7 @@ fn dialogs(ui: &mut Ui) {
     });
 }
 
-/// The tooltips, the toasts and the toasts' icons, as the page's Tooltips and toasts frame shows
-/// them.
+/// The tooltips, the toasts and the toasts' icons.
 fn tooltips_and_toasts(ui: &mut Ui) {
     section(ui, "tooltip: one line, wrapped at 320; 4 px below the pointer, its left edge at the pointer", SPACE_8, |ui| {
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
@@ -1589,10 +1571,10 @@ fn tooltips_and_toasts(ui: &mut Ui) {
     });
 }
 
-/// The menus, their items and the menu bar's titles, as the page's Menus frame shows them.
+/// The menus, their items and the menu bar's titles.
 fn menus(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
-    section(ui, "menu: Edit as on Screens; menu/item, menu/separator, keycaps", SPACE_8, |ui| {
+    section(ui, "menu: Edit; menu/item, menu/separator, keycaps", SPACE_8, |ui| {
         menu::in_place(ui, MENU_W, |ui| {
             ui.add(Item::new("Undo").shortcut("Ctrl+Z"));
             ui.add(Item::new("Redo").shortcut("Ctrl+Shift+Z"));
@@ -1648,14 +1630,14 @@ fn menus(ui: &mut Ui) {
     );
 }
 
-/// A menu bar `width` wide at `at` holding `titles` (each with whether it is open), as the
-/// page's Menus frame draws one ([`menu::bar`]). Returns where the titles are.
+/// A menu bar `width` wide at `at` holding `titles` (each with whether it is open)
+/// ([`menu::bar`]). Returns where the titles are.
 fn menu_bar(ui: &mut Ui, at: egui::Pos2, width: f32, titles: &[(&str, bool)]) -> Vec<Rect> {
     let mut bar = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(width, SLIM_BAR_H))).layout(Layout::top_down(Align::Min)));
     menu::bar(&mut bar, |ui| titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect())
 }
 
-/// The boxed and text buttons in each of their states, as the page's Buttons frame shows them.
+/// The boxed and text buttons in each of their states.
 fn buttons(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -1726,8 +1708,7 @@ fn buttons(ui: &mut Ui) {
     });
 }
 
-/// The inputs in each of their states and two fields, as the page's Field and input frame shows
-/// them.
+/// The inputs in each of their states and two fields.
 fn inputs(ui: &mut Ui) {
     let focused = Look { focused: true, ..Look::default() };
     let rows: [(&str, fn(&mut String) -> Input<'_>, &str, &str, &str); 2] = [
@@ -1748,7 +1729,7 @@ fn inputs(ui: &mut Ui) {
         });
     }
     section(ui, "field: label plus input; with an error line", SPACE_8, |ui| {
-        // The page's fields stand on one line, their tops level.
+        // The fields stand on one line, their tops level.
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.x = ROW_GAP;
             let (mut name, mut url) = ("shop".to_owned(), "shop".to_owned());
@@ -1758,8 +1739,7 @@ fn inputs(ui: &mut Ui) {
     });
 }
 
-/// The dropdown, checkbox, segmented control and swatch in each of their states, as the page's
-/// Dropdown, Checkbox, Segmented and Swatch frames show them.
+/// The dropdown, checkbox, segmented control and swatch in each of their states.
 fn choices(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -1821,7 +1801,7 @@ fn choices(ui: &mut Ui) {
     }
 }
 
-/// A section: the page's caption, `gap` under it, then `row`.
+/// A section: its caption, `gap` under it, then `row`.
 fn section(ui: &mut Ui, caption: &str, gap: f32, row: impl FnOnce(&mut Ui)) {
     let t = tokens(ui.ctx());
     ui.add(Label::new(Text::Label.rich(caption).color(t.text_muted)).selectable(false));
@@ -1862,7 +1842,7 @@ const LOGO_BIG: f32 = 24.0;
 const LOGO_BOTTOM: f32 = 24.0;
 const LOGO_NAME_TOP: f32 = 30.0;
 
-/// Each engine's logo with its name, in their usual colour (the page's `logo/*`, `text_muted`).
+/// Each engine's logo with its name, in their usual colour (`logo/*`, `text_muted`).
 fn logos(ui: &mut Ui) {
     let t = tokens(ui.ctx());
     ui.spacing_mut().item_spacing.x = ICON_CELL_GAP.x;
@@ -1878,7 +1858,7 @@ fn logos(ui: &mut Ui) {
     }
 }
 
-/// The colour the page's Icons frame draws `icon` in.
+/// The colour the Icons section draws `icon` in.
 fn usual(icon: Icon, t: &Tokens) -> Color32 {
     match icon {
         Icon::Key | Icon::KeyPrimary => t.key,

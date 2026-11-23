@@ -102,7 +102,7 @@ fn jsonb_cell_shows_pretty_json_with_label() {
     assert_eq!(ui.document()["value"]["text"], json!(text));
     let v = ui.value("value-text");
     assert_eq!((v["highlighted"].clone(), v["cut"].clone(), v["selection"].clone()), (json!(true), json!(false), Json::Null), "{v}");
-    // No kind chip (K2): `jsonb` is drawn once, as the type; the facts say lines and bytes.
+    // No kind chip: `jsonb` is drawn once, as the type; the facts say lines and bytes.
     let panel = ui.rect("value-panel");
     assert_eq!(drawn_in(&ui, panel, "jsonb"), 1, "the type alone, no chip");
     let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
@@ -269,7 +269,7 @@ fn twenty_megabyte_cell(db: &TestDb) -> [(&'static str, Duration); 4] {
     assert_eq!((head["truncated"].clone(), head["bytes"].clone()), (json!(true), json!(20_000_000)), "{head}");
     let note = head["note"].as_str().unwrap_or_default().to_string();
     assert_eq!(note, "Showing the first 10.0 MiB of 19.1 MiB.", "the old sentence stays readable");
-    // N2: the facts say it; nothing is painted above the value.
+    // A cut value: the facts say it; nothing is painted above the value.
     assert_eq!(head["facts"], "1 line First 10 MiB of 19.1 MiB", "{head}");
     let panel = ui.rect("value-panel");
     assert!(ui.text_in(panel, &note).is_none(), "no note painted");
@@ -832,7 +832,7 @@ fn copy_copies_the_whole_value_as_stored() {
     assert_eq!(ui.copied().as_deref(), Some("staged text"), "the staged value");
 }
 
-/// A text column holding JSON: its facts start `Formatted as JSON` (K2), no chip.
+/// A text column holding JSON: its facts start `Formatted as JSON`, no chip.
 #[test]
 fn a_text_column_holding_json_says_formatted_as_json() {
     let db = dbee_testkit::require_testdb!();

@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn each_toast_matches_the_page() {
+    fn each_toast_has_its_look() {
         // 44 tall, `ink` (success) or `danger` (error), corners 4, no edge and no
         // shadow; 12 in, the 14 px icon, 12, the words in `body`, [12, the action: 28 tall, its
         // caps 12 in from a 1 px edge of the words' colour at 70 %, corners 2], 12, the 7 px

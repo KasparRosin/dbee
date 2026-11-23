@@ -312,7 +312,7 @@ fn reading(ui: &mut Ui) -> bool {
     }
 }
 
-/// LC on the page: nothing waits on screen before 300 ms; then CANCEL, LOADING and COLUMNS'
+/// Loading: nothing waits on screen before 300 ms; then CANCEL, LOADING and COLUMNS'
 /// heading and header over ten rows of bars. CANCEL leaves a first read's page saying so.
 #[test]
 fn the_first_read_shows_the_skeleton_after_300_ms() {

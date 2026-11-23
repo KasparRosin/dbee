@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn each_input_state_matches_the_page() {
+    fn each_input_state_has_its_look() {
         // 28 tall, corners 2, on `card`; the words 8 inside the 1 px edge and centred
         // up and down, in `body` or `data`; the placeholder `text_muted`; off, the words
         // `text_faint` and the edge as it was; keyboard focus a 2 px `ink` edge; an error a 1 px
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn a_field_clicked_with_the_mouse_keeps_its_edge() {
-        // Foundations' Focus rule: a field clicked with the mouse keeps its `line_strong` edge; Tab
+        // The focus rule: a field clicked with the mouse keeps its `line_strong` edge; Tab
         // to it and its edge turns 2 px `ink`; the words don't move between the two.
         for (theme, t) in both() {
             let seen = Seen { text: "db.example.com".into(), ..Seen::default() };
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn the_caret_is_one_pixel_of_ink() {
-        // The page's caret is 1 px of `ink`, 16 tall. egui draws it as tall as the text's row and
+        // The caret wanted is 1 px of `ink`, 16 tall. egui draws it as tall as the text's row and
         // 1.5 more at either end, which can't be set: 21 in `body`, 19 in `data`.
         for (theme, t) in both() {
             for font in [Text::Body, Text::Data] {

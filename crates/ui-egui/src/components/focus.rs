@@ -1,5 +1,5 @@
-//! Keyboard focus: whether a control shows it ([`shown`]), and the four looks foundations' Focus
-//! rule gives it. Every control draws focus through these.
+//! Keyboard focus: whether a control shows it ([`shown`]), and its four looks.
+//! Every control draws focus through these.
 //!
 //! The look shows whenever a control has focus, unless that focus came from a mouse or touch
 //! press on it: Tab, Shift+Tab and the arrows show it, and so does focus given by code (a dialog
@@ -71,7 +71,7 @@ pub fn box_inside(painter: &Painter, rect: Rect) {
 }
 
 /// A 1 px `on_ink` line 2 px inside `rect`, whatever is filled with `ink` (the main button, a
-/// selected segment). The page gives it corners of 1 whatever the corners of the ground.
+/// selected segment). It has corners of 1 whatever the corners of the ground.
 pub fn on_ink_line(painter: &Painter, rect: Rect) {
     line_inside(painter, rect, tokens(painter.ctx()).on_ink);
 }
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn the_four_focus_looks_sit_where_foundations_says() {
+    fn the_four_focus_looks_sit_on_or_inside_the_control() {
         let rect = Rect::from_min_size(egui::pos2(100.0, 100.0), vec2(60.0, 28.0));
         for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
             let look = |draw: fn(&Painter, Rect)| -> Vec<Edge> { edges(&painted(theme, |ui| draw(ui.painter(), rect))) };

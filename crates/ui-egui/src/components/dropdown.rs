@@ -45,7 +45,7 @@ impl<'a> Dropdown<'a> {
     }
 
     /// Its text in `text_muted`: what it chose counts for nothing now (a filter row left out of
-    /// the condition). Not on the page yet.
+    /// the condition).
     pub fn muted(mut self, muted: bool) -> Dropdown<'a> {
         self.muted = muted;
         self
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn each_dropdown_state_matches_the_page() {
+    fn each_dropdown_state_has_its_look() {
         // 160 by 28, `card` in a 1 px `line_strong` edge, corners 2; the chosen text
         // in `body`, `text`, 9 in and centred; the chevron in `text_muted`, its right end 9 from
         // the box's. Focus: the edge turns 2 px `ink`. Disabled: text and chevron `text_faint`.

@@ -1,6 +1,6 @@
 //! The colour swatch (`swatch`): a 20 square of a connection colour, or `card` with the no-colour
 //! mark; the chosen one has a 2 px `ink` edge. A colour shown as a mark is a square, never a
-//! circle (foundations). Reported to accessibility as a radio button named for its colour.
+//! circle. Reported to accessibility as a radio button named for its colour.
 
 use dbee_config::ConnectionColor;
 use egui::{CornerRadius, Response, Sense, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, WidgetType};
@@ -102,7 +102,7 @@ mod tests {
     use crate::theme::connection_color;
 
     #[test]
-    fn each_swatch_matches_the_page() {
+    fn each_swatch_has_its_look() {
         // 20 by 20, corners 2. A colour fills it, with no edge; none is `card` in a
         // 1 px `line_strong` edge with the no-colour mark in `text_muted`. Chosen: a 2 px `ink`
         // edge inside. Focus: a 2 px `ink` box 4 px around it. Review Focus 5: dark too.

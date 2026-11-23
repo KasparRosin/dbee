@@ -28,13 +28,13 @@ use crate::theme::size::{
 };
 use crate::theme::{self, Text, tokens};
 
-/// A title's menu opens at the menu bar's bottom edge: the page's bar holds the titles centred.
+/// A title's menu opens at the menu bar's bottom edge: the bar holds the titles centred.
 const UNDER_THE_BAR: f32 = (SLIM_BAR_H - MENU_TITLE_H) / 2.0;
 /// The menu bar's `line` along its bottom.
 const BAR_LINE: f32 = 1.0;
 
 /// The style of every menu and popup list in the mode `ctx` draws in: egui's menu style, the
-/// page's frame (`raised`, a 1 px `line` edge, corners 4, the one shadow, 4 inside the edge) and
+/// menu's frame (`raised`, a 1 px `line` edge, corners 4, the one shadow, 4 inside the edge) and
 /// the items one under the other. Tooltips keep the theme's own frame, with its `raised_line`
 /// edge.
 pub fn style(ctx: &Context) -> StyleModifier {
@@ -351,7 +351,7 @@ mod tests {
     use crate::components::tooltip::Hint;
     use crate::components::{Edge, ROOM, both, edges_in, flat, harness, icon_in, painted, texts};
 
-    /// The page's items are 230 wide.
+    /// The items are drawn 230 wide.
     const W: f32 = 230.0;
 
     fn close(a: f32, b: f32) -> bool {
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn each_menu_item_state_matches_the_page() {
+    fn each_menu_item_state_has_its_look() {
         // 28 tall; the words in `button`, 8 in (30 with the chosen mark's 14 px
         // column and 8), centred; the keys 3 apart, ending 8 from the right, 24 after the words
         // at least; the submenu's arrow in `text_muted`, ending 8 from the right. Hover:
@@ -663,8 +663,8 @@ mod tests {
     }
 
     #[test]
-    fn the_float_shadow_reaches_as_far_as_the_design() {
-        // The page's shadow (0 6, blur 18) fades out 24 under a menu's bottom edge, 12 over its
+    fn the_float_shadow_fades_out_at_its_blur_radius() {
+        // The shadow (0 6, blur 18) fades out 24 under a menu's bottom edge, 12 over its
         // top and 18 beside it. Measured on the painted mesh: where its fade ends.
         for (theme, t) in both() {
             let mut h = harness(theme, Rect::NOTHING, |ui, items| {

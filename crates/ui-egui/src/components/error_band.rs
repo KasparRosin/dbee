@@ -5,7 +5,7 @@
 //! `body` `text`; then each further field the server gives, its name in `label` capitals and
 //! `text_muted` over its text in `body` `text`, the detail before the hint (Postgres's and psql's
 //! order); then dbee's note in `small` `text_muted`. Its parts are 4 apart, a field and the note 8
-//! more. Last, its actions (R2): a left-aligned row of outline `button/box` buttons 12 under the
+//! more. Last, its actions: a left-aligned row of outline `button/box` buttons 12 under the
 //! last text, 8 apart (ROLLBACK on a failed transaction).
 //!
 //! The position takes room from the heading only while the heading keeps at least
@@ -186,7 +186,7 @@ mod tests {
     use crate::components::{both, edges, fills, harness_in, painted_in, sections, texts};
     use crate::theme::Text;
 
-    /// The page's band is this wide; the bands drawn here start at [`AT`], [`APART`] apart.
+    /// A band is drawn this wide; the bands drawn here start at [`AT`], [`APART`] apart.
     const W: f32 = 840.0;
     const AT: Pos2 = pos2(10.0, 10.0);
     const APART: f32 = 12.0;
@@ -218,10 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn the_error_band_matches_the_page() {
-        // The band's default (hint, detail and a position) and the page's five
+    fn the_error_band_has_its_look() {
+        // The band's default (hint, detail and a position) and the showcase's five
         // bands, then a note and a server's detail and hint without a
-        // position, which the page doesn't draw.
+        // position.
         let default = Band { detail: Some("Failing row contains (691, 42, null)."), ..PAGE_BANDS[0] };
         let [noted, both_fields] = [APP_BANDS[1], APP_BANDS[5]];
         let mut bands = PAGE_BANDS.to_vec();
@@ -230,10 +230,10 @@ mod tests {
             let (shapes, rects) = draw(theme, &bands);
             assert_eq!(rects.len(), bands.len(), "{theme:?}");
             let fills = fills(&shapes);
-            // The page's heights: the five bands 112, 112, 66, 66, 112; its default 158.
+            // The heights: the five bands 112, 112, 66, 66, 112; its default 158.
             for (i, r) in rects.iter().enumerate().take(6) {
                 let tall = [112.0, 112.0, 66.0, 66.0, 112.0, 158.0][i];
-                assert!(close(r.height(), tall) && close(r.width(), W), "{theme:?} band {i}: {r:?}, the page's {W} by {tall}");
+                assert!(close(r.height(), tall) && close(r.width(), W), "{theme:?} band {i}: {r:?}, not {W} by {tall}");
                 let (ground, edge) = (t.deleted, t.danger);
                 assert!(fills.contains(&(*r, ground)), "{theme:?} band {i}: on `deleted`, square: {fills:?}");
                 let left = Rect::from_min_max(r.min, pos2(r.left() + 2.0, r.bottom()));
@@ -498,7 +498,7 @@ mod tests {
         }
     }
 
-    /// R2: one action is an outline box 12 under the message, at the text's left; a click on it
+    /// One action is an outline box 12 under the message, at the text's left; a click on it
     /// reports it, not a jump.
     #[test]
     fn an_action_row_sits_12_under_the_message() {

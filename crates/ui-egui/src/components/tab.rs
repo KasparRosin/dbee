@@ -106,8 +106,8 @@ impl<'a> Tab<'a> {
         self
     }
 
-    /// One of its jobs runs: the spinner in its icon's place, as the design has no running mark
-    /// for a tab yet.
+    /// One of its jobs runs: the spinner in its icon's place; a tab has no other running
+    /// mark.
     pub fn busy(mut self, busy: bool) -> Tab<'a> {
         self.busy = busy;
         self
@@ -133,8 +133,8 @@ impl<'a> Tab<'a> {
         }
     }
 
-    /// The title, cut with "…" at [`TAB_TITLE_MAX`], the width of its box (whole points, as the
-    /// page's), and the tab's width: 12, the icon, 8, the title, [8, the dot], 8, the close, 12,
+    /// The title, cut with "…" at [`TAB_TITLE_MAX`], the width of its box (whole points),
+    /// and the tab's width: 12, the icon, 8, the title, [8, the dot], 8, the close, 12,
     /// the line.
     fn parts(&self, ui: &Ui) -> (Arc<Galley>, f32, f32) {
         let mut job = Text::Button.job_as_written(self.title, Color32::PLACEHOLDER);
@@ -633,13 +633,13 @@ mod tests {
     }
 
     #[test]
-    fn each_tab_state_matches_the_page() {
+    fn each_tab_state_has_its_look() {
         // 36 tall; 12, the icon, 8, the title in `button`, [8, the 8 px `ink` dot], 8,
         // the 7 px close, 12, a 1 px `line` at its right end. Inactive: `bg`, a `line` under it,
         // icon and title `text_muted`, centred above the line; hover: `hover`, the close shown;
         // active: `card`, no line under it, the 2 px `ink` line along its top, icon and title
         // `text`, the close shown; focus: a 2 px `ink` box 2 px inside. The close is `text_muted`.
-        // The page's widths with the close shown (the close's room is kept on every tab): table
+        // The widths with the close shown (the close's room is kept on every tab): table
         // 122, with the dot 138; query 106, with the dot 122.
         for (theme, t) in both() {
             for (kind, title, widths) in [(Kind::Table, "orders [3]", [122.0, 138.0]), (Kind::Query, "Query 1", [106.0, 122.0])] {
@@ -658,7 +658,7 @@ mod tests {
                     });
                     assert_eq!(at.height(), 36.0, "{at_}: 36 tall");
                     let page = if state == State::Active { widths[1] } else { widths[0] };
-                    assert!((at.width() - page).abs() <= 1.0, "{at_}: {} wide, the page's {page}", at.width());
+                    assert!((at.width() - page).abs() <= 1.0, "{at_}: {} wide, not {page}", at.width());
                     assert_eq!(fills_in(&shapes, at), tab_fills(at, state, &t), "{at_}: the ground and the lines");
                     let focus = Edge { outer: at.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
                     let want: Vec<Edge> = if state == State::Focus { vec![focus] } else { vec![] };
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn the_new_tab_button_matches_the_page() {
+    fn the_new_tab_button_has_its_look() {
         // 32 by 36, a `line` under it; `+` in `text_muted`, centred above the line;
         // hover `hover`; focus a 2 px `ink` box 2 px inside.
         for (theme, t) in both() {
@@ -787,7 +787,7 @@ mod tests {
         }
     }
 
-    /// The page's tabs that don't fit, in strip order: each title and whether it is a
+    /// Seven tabs that don't fit, in strip order: each title and whether it is a
     /// query tab. Query 1 has unsaved text.
     const PAGE: [(&str, bool); 7] = [
         ("orders [3]", false),
@@ -798,10 +798,10 @@ mod tests {
         ("Odd \"Name\"", false),
         ("dealers", false),
     ];
-    /// The page's strip is 840 wide.
+    /// The strip is drawn 840 wide.
     const STRIP: f32 = 840.0;
 
-    /// The first `n` of the page's tabs, `active` the active one.
+    /// The first `n` of those tabs, `active` the active one.
     fn page_tabs(n: usize, active: usize) -> Vec<Tab<'static>> {
         PAGE.iter()
             .take(n)
@@ -814,7 +814,7 @@ mod tests {
     }
 
     /// What a harness's strip drew in its last frame, the tab its caller made active, and how
-    /// wide the strip is and how many of the page's tabs it holds.
+    /// wide the strip is and how many of those tabs it holds.
     struct Drawn {
         active: usize,
         width: f32,
@@ -827,7 +827,7 @@ mod tests {
         asked: Vec<(usize, Asked)>,
     }
 
-    /// A strip `width` wide of the page's seven tabs in `theme`, room under it for its list; the
+    /// A strip `width` wide of the seven tabs in `theme`, room under it for its list; the
     /// caller makes a tab active when it is asked to.
     fn seven(theme: Theme, width: f32, active: usize) -> egui_kittest::Harness<'static, Drawn> {
         let drawn = Drawn {
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_button_matches_the_page() {
+    fn the_list_button_has_its_look() {
         // 32 by 36 like `tab/new`, a `line` under it; ⌄ (`icon/chevron-down`, 8 by
         // 4 at 12, 15.5) in `text_muted`, centred above the line; hover `hover`; focus a 2 px `ink`
         // box 2 px inside; open `fill`, as an open menu title.

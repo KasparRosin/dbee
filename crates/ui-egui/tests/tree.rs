@@ -436,7 +436,7 @@ fn a_tree_refresh_reads_loading_over_its_rows_at_half() {
     assert_eq!(alpha_of(&ui, orders, "orders"), Some(255), "the rows at full");
 }
 
-/// LC4: a refresh of a tree with no rows to show draws eight rows of bars once it has run 300 ms.
+/// A refresh of a tree with no rows to show draws eight rows of bars once it has run 300 ms.
 #[test]
 fn a_refresh_of_a_tree_with_nothing_shows_eight_bar_rows() {
     let db = dbee_testkit::require_testdb!();

@@ -135,7 +135,7 @@ pub struct Shown {
 pub(super) struct Piece {
     pub(super) galley: Arc<Galley>,
     says: String,
-    /// The letter spacing egui puts after the last letter too; the page's measure has none there.
+    /// The letter spacing egui puts after the last letter too; the words' width counts none there.
     trail: f32,
 }
 
@@ -464,7 +464,7 @@ mod tests {
     use super::*;
     use crate::components::{ROOM, both, fills_in, icon_in, painted, painted_in, texts};
 
-    /// The page's bar is 1100 wide; the harness holds this much.
+    /// The showcase's bar is 1100 wide; the harness holds this much.
     const W: f32 = 760.0;
 
     fn close(a: f32, b: f32) -> bool {
@@ -502,7 +502,7 @@ mod tests {
     ];
 
     #[test]
-    fn each_connection_block_matches_the_page() {
+    fn each_connection_block_has_its_look() {
         // The connection's block in the status bar: a 30 tall bar on `bg`, the colour as a 2 px edge
         // along its top and as the block under it, from the bar's left end, 28 tall, its name in
         // `label` capitals 12 in from either end, in the colour's own text colour. No colour: a
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn each_activity_matches_the_page() {
+    fn each_activity_has_its_look() {
         // The state, at the bar's right, 12 from its end, centred under the edge. In
         // transaction: an 8 px `staged_strong` square, 8, the words in `text`. Disconnected: the
         // words in `danger`, 8, RECONNECT (`button/text`). Reconnecting: the words in `text_muted`,
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn a_long_sqlite_path_is_cut_in_the_middle() {
-        // As the design draws it: a file's path with `~`, cut in the middle with … when
+        // A file's path with `~`, cut in the middle with … when
         // short of room, the whole path on hover; READ-ONLY outlasts it.
         const PATH: &str = "~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite";
         let path: &'static Address = Box::leak(Box::new(Address::File(PATH.into())));
@@ -754,7 +754,7 @@ mod tests {
         let all = texts(&h.output().shapes);
         assert!(all.iter().all(|(w, _, _)| !w.contains("sqlite")) && all.iter().any(|(w, _, _)| w == "READ-ONLY"), "{all:?}");
 
-        // A file's name longer than its room (as the design draws it): narrower and
+        // A file's name longer than its room (a long example): narrower and
         // narrower, the path is whole, then its folders are cut with the file's name whole, then
         // the folders go and the name shows alone, then the name is cut in its own middle (no
         // folder, one `…`), then it goes. It reads whole all along.
@@ -811,8 +811,8 @@ mod tests {
         assert_eq!(cut_middle(long, fits(39)).as_deref(), Some("northwind-traders-nightly.sqlite"), "the folders go");
         assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("northwind-tr…ghtly.sqlite"), "then the name is cut in its middle");
         assert_eq!(cut_middle(long, fits(12)), None, "fewer than 6 at either end");
-        let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
-        assert_eq!(cut_middle(design, fits(32)).as_deref(), Some("Orders-and-Invoi…s-Backup.sqlite"), "the design's example");
+        let long = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
+        assert_eq!(cut_middle(long, fits(32)).as_deref(), Some("Orders-and-Invoi…s-Backup.sqlite"), "the long example");
         assert_eq!(cut_middle("C:\\data\\clients\\a-long-file-name.db", fits(20)).as_deref(), Some("a-long-file-name.db"));
         assert_eq!(cut_middle("a-long-file-name-without-folders.db", fits(20)).as_deref(), Some("a-long-fil…olders.db"), "no folders");
     }

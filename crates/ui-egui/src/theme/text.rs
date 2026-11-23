@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ten_styles_match_the_design() {
+    fn the_ten_styles_have_their_fonts_and_sizes() {
         let inter = FontFamily::Name(INTER_MEDIUM.into());
         let mono = FontFamily::Name(MONO_MEDIUM.into());
         let rows = [

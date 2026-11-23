@@ -218,7 +218,7 @@ mod tests {
         [("light", LIGHT), ("dark", DARK)]
     }
 
-    /// One ground at a time, as foundations says: nothing here is stacked on another mark.
+    /// One ground at a time: nothing here is stacked on another mark.
     fn grounds(t: &Tokens) -> Vec<(&'static str, Color32)> {
         vec![
             ("bg", t.bg),

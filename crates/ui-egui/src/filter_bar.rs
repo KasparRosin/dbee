@@ -19,7 +19,7 @@
 //! hover (`The filters can't change now: …`). The raw field reads as SQL: a grey `WHERE` before
 //! the condition, not part of it.
 //!
-//! The bar is the page's (`filter row`, [`table_bars::filter_bar`]): on `card`, a line under it,
+//! The bar is the shared one (`filter row`, [`table_bars::filter_bar`]): on `card`, a line under it,
 //! each row 36 tall with its controls level, the shared controls 28 tall and 8 apart: the toggle,
 //! `−` and `+` (`button/icon` boxed), the column and the operator (`dropdown`), the value
 //! (`input`, data) and Apply (`button/box` outline); in the raw form the toggle, the field and
@@ -109,7 +109,7 @@ fn op_fit(ui: &egui::Ui) -> f32 {
     (widest + 2.0 * (DROPDOWN_PAD_X + 1.0) + DROPDOWN_GAP + Icon::ChevronDown.size().x + 1.0).ceil()
 }
 
-/// Apply as the bar draws it: outline, as the page.
+/// Apply as the bar draws it: an outline button.
 fn apply_button() -> BoxButton<'static> {
     BoxButton::outline("Apply")
 }
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn the_choices_give_way_in_a_narrow_tab() {
         // What the operator choice needs in the dropdown: "greater than or equal (>=)" in `body`
-        // with the dropdown's padding and chevron; Apply as the page's outline button.
+        // with the dropdown's padding and chevron; Apply as an outline button.
         let (fit, apply) = (190.0, 62.0);
         let fixed = fixed_w(apply);
         // Wide: the operator whole, the column as wide as it gets, the value field the rest.

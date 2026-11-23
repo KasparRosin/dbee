@@ -83,7 +83,7 @@ impl<'a> Segment<'a> {
             job.wrap = egui::text::TextWrapping::truncate_at_width((w - 2.0 * SEGMENT_DIVIDER).max(1.0));
         }
         let words = ui.painter().layout_job(job);
-        // egui puts the letter spacing after the last letter too; the page's measure has none there.
+        // egui puts the letter spacing after the last letter too; the segment's width counts none there.
         let reads = words.size().x - text.spacing();
         let natural = match self.style {
             Style::Caps => (reads + 2.0 * SEGMENT_PAD_X).ceil(),
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn each_segment_state_matches_the_page() {
+    fn each_segment_state_has_its_look() {
         // 26 tall. Selected: `ink`, its words `on_ink`; hovering it changes nothing;
         // off on `fill`. Not selected: no ground, `hover` when hovered, words `text`. Off: words
         // `text_faint`. Focus within the cell (the segment less its divider slot): a selected one
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn each_segmented_control_matches_the_page() {
+    fn each_segmented_control_has_its_look() {
         // A 28 box, `card` in a 1 px `line_strong` edge, corners 2; the segments 26
         // tall inside the edge, small ones sharing its width, caps ones as wide as their words. A
         // segment that isn't chosen and isn't the last ends in a 1 px `line` divider.
@@ -422,10 +422,7 @@ mod tests {
             let fills = fills(&shapes);
             for (i, s) in segments.iter().enumerate() {
                 let want = Rect::from_min_size(pos2(at.left() + 1.0 + i as f32 * each, at.top() + 1.0), vec2(each, 26.0));
-                assert!(
-                    (s.min - want.min).length() < 0.05 && (s.max - want.max).length() < 0.05,
-                    "{theme:?}: segment {i} {s:?}, the page's {want:?}"
-                );
+                assert!((s.min - want.min).length() < 0.05 && (s.max - want.max).length() < 0.05, "{theme:?}: segment {i} {s:?}, not {want:?}");
                 let divider = (Rect::from_min_size(pos2(s.right() - 1.0, s.top()), vec2(1.0, 26.0)), t.line);
                 assert_eq!(fills.contains(&divider), [0, 2, 3].contains(&i), "{theme:?}: segment {i}'s divider");
             }

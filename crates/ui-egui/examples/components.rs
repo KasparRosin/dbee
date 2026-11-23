@@ -1,5 +1,5 @@
-//! Every control of the design's Components page in every state, in a window and with no
-//! database, to look at against the page:
+//! The components showcase: every shared control in every state, in a window and with no
+//! database, to look at:
 //!
 //! `cargo run -p dbee-ui-egui --example components [-- --dark] [--screenshot <file.png>]`
 //!
