@@ -163,7 +163,7 @@ impl InstallKind {
         let marked = (probe.read)(&marker, MAX_MARKER)
             .filter(|bytes| bytes.len() <= MAX_MARKER)
             .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| InstallKind::from_marker(text.strip_suffix('\n').unwrap_or(&text), probe.os));
+            .and_then(|text| InstallKind::from_marker(one_line(&text), probe.os));
         if let Some(kind) = marked {
             return kind;
         }
@@ -187,6 +187,12 @@ impl InstallKind {
             read: &read_start,
         })
     }
+}
+
+/// `text` without the one line break a marker file may end with.
+fn one_line(text: &str) -> &str {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 /// `<prefix>/share` for a binary in `<prefix>/bin`.
@@ -356,8 +362,11 @@ mod tests {
         assert_eq!(tree.kind(Os::Linux, "/home/u/dbee-0.5.0-linux-x86_64/bin/dbee", None), InstallKind::Tar);
         assert_eq!(tree.kind(Os::FreeBsd, "/home/u/dbee-0.5.0-linux-x86_64/bin/dbee", None), InstallKind::Tar);
         for (word, kind) in [("msi", InstallKind::Msi), ("portable", InstallKind::Portable)] {
-            let tree = Tree::default().with("C:/Program Files/dbee/install-kind", word);
-            assert_eq!(tree.kind(Os::Windows, "C:/Program Files/dbee/dbee.exe", None), kind);
+            // With no line break, as the packaging writes it, or one of either kind.
+            for end in ["", "\n", "\r\n"] {
+                let tree = Tree::default().with("C:/Program Files/dbee/install-kind", &format!("{word}{end}"));
+                assert_eq!(tree.kind(Os::Windows, "C:/Program Files/dbee/dbee.exe", None), kind, "{end:?}");
+            }
         }
     }
 
@@ -387,7 +396,8 @@ mod tests {
             " deb\n",
             "DEB\n",
             "deb\n\n",
-            "deb\r\n",
+            "deb\r\r\n",
+            "deb\n\r",
             "snap\n",
             "deb rpm\n",
             "msi\n",

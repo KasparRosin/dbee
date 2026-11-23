@@ -51,9 +51,14 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$DBEE_BUILD_DATE/g" \
   "$LINUX/$APP_ID.metainfo.xml.in" >"$TREE/share/metainfo/$APP_ID.metainfo.xml"
 cp -R "$ROOT/assets/app-icon/hicolor" "$TREE/share/icons/"
 copy_docs "$TREE/share/doc/dbee"
+# How this copy was installed, one word, for the app's update button.
+install -d "$TREE/share/dbee"
+printf 'tar\n' >"$TREE/share/dbee/install-kind"
 
 tar -C "$WORK" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $DIST/$BASENAME.tar.gz"
+[ "$(tar -xzOf "$DIST/$BASENAME.tar.gz" "$BASENAME/share/dbee/install-kind")" = tar ] ||
+  { echo "error: the tarball's install-kind marker is not 'tar'" >&2; exit 1; }
 
 "$TREE/bin/dbee-cli" --version
 echo "==> done"

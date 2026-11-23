@@ -50,6 +50,8 @@ rm -rf "$WORK"
 mkdir -p "$WORK/stage"
 tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
 [ -x "$WORK/stage/bin/dbee" ] || { echo "error: $TARBALL has no bin/dbee" >&2; exit 1; }
+# The tarball's install-kind marker says `tar`; a Flatpak is known by /.flatpak-info and carries none.
+rm -rf "$WORK/stage/share/dbee"
 cp "$HERE/flatpak/$APP_ID.bundle.yml" "$WORK/$APP_ID.yml"
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB"
@@ -67,6 +69,7 @@ if [ "$TEST" = 1 ]; then
   flatpak info --user "$APP_ID"
   flatpak run --command=dbee-cli "$APP_ID" --version
   flatpak run --command=sh "$APP_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/icons/hicolor/scalable/apps'
+  flatpak run --command=sh "$APP_ID" -c '[ ! -e /app/share/dbee/install-kind ]' || { echo "error: the Flatpak carries an install-kind marker" >&2; exit 1; }
 fi
 echo "==> done"
 ls -lh "$OUT"

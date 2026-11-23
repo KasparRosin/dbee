@@ -122,6 +122,11 @@ runs:
             print("Flatpak manifests ok")
         PYEOF
 
+    - name: Install-kind markers
+      shell: bash
+      run: |
+        bash packaging/check-install-kind.sh
+
     - name: Embedded icons existence check
       shell: bash
       run: |

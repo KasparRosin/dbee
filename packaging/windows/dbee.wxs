@@ -173,6 +173,12 @@
         <File Id="DbeeCliExe" Source="$(var.BinDir)\dbee-cli.exe" KeyPath="yes" />
       </Component>
 
+      <!-- How this copy was installed, one word (msi) beside dbee.exe, written by package.ps1:
+           the app's update button reads it. -->
+      <Component Id="InstallKind">
+        <File Id="InstallKindMarker" Source="$(var.BinDir)\install-kind" KeyPath="yes" />
+      </Component>
+
       <!-- Open with: a ProgId whose open verb passes the file, listed under each extension's
            OpenWithProgids. Nothing writes the extensions' own default value (WiX's ProgId and
            Extension elements would), so dbee never takes a file type over. -->
