@@ -1,5 +1,5 @@
 //! A stored secret goes only where the settings kept with it allow, whatever the connections file
-//! or a window's copy of it says (the security review's C-2 and C-4).
+//! or a window's copy of it says.
 //!
 //! A stand-in driver records what each connect receives and takes only the password it is told to
 //! take, so no server is reached. Every session keeps its connections file in a throwaway home and

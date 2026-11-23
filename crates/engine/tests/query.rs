@@ -916,7 +916,7 @@ fn read_only_mysql_keeps_sql_mode() {
         run_text(&mut s, "SELECT @@SESSION.sql_mode").unwrap();
         let mode = first_value(&s);
         let write = |n: u32| format!("START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES ({n}); COMMIT");
-        // Fix round 4's concern 1: none of these may run.
+        // None of these may run.
         for sql in [
             "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')".to_owned(),
             format!("BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; {}; END -- '\"", write(1)),
