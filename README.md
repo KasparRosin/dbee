@@ -1,12 +1,19 @@
-# dbee
+<p align="center">
+  <img src="assets/app-icon/hicolor/256x256/apps/dev.rosin.dbee.png" alt="dbee" width="128">
+</p>
 
-dbee is a free, open-source desktop database client, written in Rust. It connects to PostgreSQL, MySQL, MariaDB and SQLite, directly or through an SSH tunnel: browse and filter tables, edit rows, run queries and copy results.
+<h1 align="center">dbee</h1>
 
-![dbee showing a table of orders filtered by two conditions: the schema tree on the left, the grid under the filter bar in the middle, the selected row as JSON on the right](assets/readme/screenshot-filters.png)
+<p align="center"><b>A fast, free database client for Linux, macOS and Windows.</b></p>
 
-## Status
+> [!NOTE]
+> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
+> The second, M2, brings the same workflow to MySQL, MariaDB and SQLite files, and it is built too. The third, M3, is a new look for every screen, with dark mode. File export and import come next (M4).\
+> Linux x86_64 is tested; the other platforms are defined, untested yet.
 
-dbee is **pre-alpha**. The daily workflow works on all four databases; importing and exporting files does not exist yet. Only Linux x86_64 is tested so far. [ROADMAP.md](ROADMAP.md) says where dbee stands, and [docs/gaps.md](docs/gaps.md) lists the known gaps.
+<p align="center">
+  <img src="assets/readme/screenshot-filters.png" alt="dbee with a table of orders filtered by two conditions: the schema tree on the left, the grid under its filter bar in the middle, the selected row as JSON on the right">
+</p>
 
 ## Install
 
