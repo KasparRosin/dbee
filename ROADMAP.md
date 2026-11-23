@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M4). M1 "Daily Postgres workflow" and M2 "Three databases" are built and wait for their last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (commands and tests counted again on 2026-11-23: 64 commands, 1,769 `#[test]` attributes; the progress log says what was fixed without naming reviews; parity numbers unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (the Platforms row says what the release pipeline builds; numbers unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite; both `#[ignore]`: `cargo xtask ci` skips them, and the CI workflow runs them on a virtual screen on every pull request). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M4. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
@@ -26,7 +26,7 @@ Why pre-alpha: five of the six alpha gate rows work end to end, measured in the 
 | Stability | 20,000-step command fuzz clean (measured on 2026-11-06 with `DBEE_FUZZ_STEPS=20000`; ci runs 300 steps); ~25 % (estimated) | — | [target-app-parity](docs/target-app-parity.md) |
 | File formats (import/export) | 0 % (measured) | M4 | [file-format-parity](docs/file-format-parity.md) |
 | Localization | 0 % (measured) | not estimated yet | [localization-parity](docs/localization-parity.md) |
-| Platforms | Linux x86_64 built, packaged and run; the rest not built yet | — | [hardware-parity](docs/hardware-parity.md) |
+| Platforms | Linux x86_64 built, packaged and run; the rest built by the release pipeline, and only Windows ARM64 of them installed and started | — | [hardware-parity](docs/hardware-parity.md) |
 
 Hours are not estimated yet: M1's and M2's agent hours were not logged, so there is nothing to calibrate on.
 
@@ -77,6 +77,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-23 | minor | Platforms: the other platforms are built by the release pipeline ([hardware-parity](docs/hardware-parity.md)); the row said they were not built yet. |
 | 2026-11-23 | minor | Headline numbers counted again: 64 commands (55 engine, 9 UI-only), 1,769 `#[test]` attributes in 122,785 lines, 2,053 tests listed by the harness. The progress log and this table say what was fixed without naming reviews. Parity numbers unchanged. |
 | 2026-11-23 | minor | Progress log and upcoming list to 2026-11-23 (the grid, the cell editor, STRUCTURE's columns, the view switch, selected text); the day tests run in the CI workflow; numbers unchanged. |
 | 2026-11-20 | minor | M3's screens: Structure 40 %, Tools and App 5 %, features ~38 %, overall ~30 % (estimated); upcoming list and progress log. |

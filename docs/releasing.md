@@ -1,10 +1,10 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (Linux riscv64 is built as `.deb`, `.rpm` and `.tar.gz`, as the release workflow does)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (the status names `v0.2.0`, the first full release)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `v<version>`, the tag alone. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
-**Status:** the pipeline has run twice by hand; the test release `v0.1.0` is published as an unsigned pre-release. User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
+**Status:** two releases are published, both unsigned: `v0.1.0`, a test of the pipeline, as a pre-release, and `v0.2.0` as the first full release. User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
 
 ## Cutting a release
 
