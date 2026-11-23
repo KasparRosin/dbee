@@ -127,16 +127,9 @@ impl<'a> UpdateButton<'a> {
         Some(ui.scope_builder(UiBuilder::new().max_rect(at).layout(Layout::left_to_right(Align::Min)), |ui| self.show(ui)).inner)
     }
 
-    /// Draws it from `ui`'s cursor, in a row of its own.
+    /// Draws it from `ui`'s cursor, in `ui`'s row: its boxes are items of that row, RETRY
+    /// [`UPDATE_RETRY_GAP`] after the words.
     pub fn show(self, ui: &mut Ui) -> Shown {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = UPDATE_RETRY_GAP;
-            self.cells(ui)
-        })
-        .inner
-    }
-
-    fn cells(self, ui: &mut Ui) -> Shown {
         let t = tokens(ui.ctx());
         let words = self.state.words();
         let colour = match self.state {
@@ -144,7 +137,14 @@ impl<'a> UpdateButton<'a> {
             UpdateLook::Failed { .. } => t.danger,
             _ => t.text,
         };
+        let failed = matches!(self.state, UpdateLook::Failed { .. });
+        // The row's own gap follows the last box; only the one before RETRY is the button's.
+        let row_gap = ui.spacing().item_spacing.x;
+        if failed {
+            ui.spacing_mut().item_spacing.x = UPDATE_RETRY_GAP;
+        }
         let main = cell(ui, self.state.icon(), &words, colour, self.state.clickable(), self.look);
+        ui.spacing_mut().item_spacing.x = row_gap;
         let UpdateLook::Failed { reason } = self.state else { return Shown { main, retry: None } };
         let reason: String = if reason.chars().count() > REASON_MAX {
             reason.chars().take(REASON_MAX).chain(std::iter::once('…')).collect()
