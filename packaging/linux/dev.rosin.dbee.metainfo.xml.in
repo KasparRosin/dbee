@@ -13,8 +13,8 @@
   <description>
     <p>
       dbee is an open-source desktop database client written in Rust. This pre-alpha
-      covers the daily PostgreSQL workflow: connect, also through an SSH tunnel; browse,
-      filter and edit tables; run queries; and copy results.
+      covers the daily workflow on PostgreSQL, MySQL, MariaDB and SQLite: connect, also
+      through an SSH tunnel; browse, filter and edit tables; run queries; and copy results.
     </p>
   </description>
   <launchable type="desktop-id">dev.rosin.dbee.desktop</launchable>
@@ -30,6 +30,9 @@
     <keyword>database</keyword>
     <keyword>sql</keyword>
     <keyword>postgresql</keyword>
+    <keyword>mysql</keyword>
+    <keyword>mariadb</keyword>
+    <keyword>sqlite</keyword>
   </keywords>
   <!-- App colours from the icon palette: green #4caf1e / ink #111719 (assets/app-icon/README.md). -->
   <branding>

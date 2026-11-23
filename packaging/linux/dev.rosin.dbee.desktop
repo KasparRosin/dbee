@@ -2,7 +2,7 @@
 Type=Application
 Name=dbee
 GenericName=Database Client
-Comment=Browse, filter and edit PostgreSQL databases
+Comment=Browse, filter and edit PostgreSQL, MySQL, MariaDB and SQLite databases
 Exec=dbee %f
 TryExec=dbee
 Icon=dev.rosin.dbee
@@ -11,4 +11,4 @@ StartupNotify=true
 StartupWMClass=dev.rosin.dbee
 Categories=Development;Database;
 MimeType=application/vnd.sqlite3;application/x-sqlite3;
-Keywords=database;sql;postgres;postgresql;query;
+Keywords=database;sql;postgres;postgresql;mysql;mariadb;sqlite;query;
