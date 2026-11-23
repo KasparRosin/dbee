@@ -1,7 +1,7 @@
 # The AGENTS.md quality gate (`cargo xtask ci`: fmt, clippy -D warnings, test, assets, tokens,
 # layers, provenance) on every pull request and every push to main, so a merge burst can't land
-# a red tree that nobody notices until the next change. After it, the M1 and M2 days and
-# `control_access` run in the real app on a virtual screen.
+# a red tree that nobody notices until the next change. After it, the end-to-end tests drive the
+# real app in a window under Xvfb.
 name: CI
 
 on:
@@ -32,12 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Linux build dependencies (winit, wgpu, rfd)
+      - name: Install Linux build dependencies (winit, wgpu, rfd) and Xvfb for the window tests
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+            libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
+            xvfb xauth libxkbcommon-x11-0
 
       - name: Install Rust (the release, profile and components in rust-toolchain.toml)
         run: rustup toolchain install
@@ -50,17 +51,16 @@ jobs:
         run: cargo xtask ci
 
       # The test servers are still up from the gate, and these test binaries were built by it.
-      - name: The M1 and M2 days, in the real app on a virtual screen
+      - name: End-to-end tests (the real app in a window, under Xvfb)
         run: |
-          sudo apt-get install -y --no-install-recommends xvfb xauth libxkbcommon-x11-0
           xvfb-run -a -s "-screen 0 1920x1080x24" \
             cargo test --workspace --test m1_day --test m2_day --test control_access -- --ignored --nocapture
 
-      - name: Keep the days' pictures when they fail
+      - name: Upload the end-to-end screenshots on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: day-pictures
+          name: e2e-screenshots
           path: |
             target/m1-day/
             target/m2-day/
