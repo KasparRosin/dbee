@@ -13,4 +13,4 @@ Please don't open a public issue, pull request or discussion for a vulnerability
 
 ## Supported versions
 
-dbee is pre-alpha and has no releases yet, so there is no table of supported versions: fixes land on `main`.
+dbee is pre-alpha, so there is no table of supported versions: fixes land on `main`.

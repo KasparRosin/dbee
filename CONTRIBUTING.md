@@ -4,8 +4,8 @@ Thanks for helping. These notes keep the history easy to read and the checks gre
 
 ## Commit messages
 
-The subject line is `<type>: <summary>`. When the change belongs to an issue or pull request, or to a milestone task,
-add it as the scope: `<type>(<scope>): <summary>`.
+The subject line is `<type>: <summary>`. When the change belongs to an issue or pull request, or to a milestone or one
+of its tasks, add it as the scope: `<type>(<scope>): <summary>`.
 
 | Type | For |
 |---|---|
@@ -21,7 +21,8 @@ add it as the scope: `<type>(<scope>): <summary>`.
 | `revert` | undoing an earlier commit |
 | `style` | formatting only |
 
-The scope is an issue or pull request (`#12`) or a milestone task (`M2.6`, see [ROADMAP.md](ROADMAP.md)). For example:
+The scope is an issue or pull request (`#12`), a milestone (`M3`, see [ROADMAP.md](ROADMAP.md)) or one of its tasks
+(`M2.6`). For example:
 
 - `feat(M2.6): database types with their ports and URL schemes`
 - `fix(#8): read-only connections stay read-only after a query tab run`
@@ -31,8 +32,9 @@ Pull request titles take the same form. The body, when there is one, says why.
 
 ## Before a pull request
 
-Run `cargo xtask ci`: formatting, clippy, the tests, and the asset, layering and provenance checks. Tests that need
-database servers run against `cargo xtask testdb up` (Docker); [docs/testing.md](docs/testing.md) has the details.
+Run `cargo xtask ci`: formatting, clippy, the tests, and the asset, theme token, layering and provenance checks. Tests
+that need database servers run against `cargo xtask testdb up` (Docker); [docs/testing.md](docs/testing.md) has the
+details.
 
 ## The rules for the code
 

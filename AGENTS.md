@@ -30,17 +30,17 @@ People trust dbee with their databases; a crash can lose an unsaved query or lea
 - **Clean-room.** Beekeeper Studio may be *observed* black-box only, with synthetic data; observation notes and screenshots stay outside the repository. Never read, disassemble or copy anything inside its bundle (`app.asar`, resources, plugins), its source repository or its network traffic; never commit files produced by Beekeeper Studio; never copy GPL/AGPL/LGPL code, and don't read the sources of other database GUIs (DBeaver, pgAdmin, HeidiSQL, DbGate…). Wire protocols and SQL behaviour come from public specifications (PostgreSQL and MySQL protocol documentation, the SQLite file format, MS-TDS), public documentation and observation.
 - **Fonts:** Inter and JetBrains Mono are bundled from `assets/fonts/` (SIL OFL 1.1, each file with a row in `ATTRIBUTION.md`), with egui's default fonts behind them as the fallback. No other font file is committed.
 - **Test corpora** (real database files) live outside this repo, fetched pinned and sha256-verified. Never commit large binary fixtures; build test databases in code.
-- **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*` (id, label, menu path, shortcut, params doc, `enabled`, `run`) + tests. Ids follow Beekeeper Studio's menus plus primitives (`connection.open`, `query.run`, `table.open`). UI-only commands live in `crates/ui-egui`. The control channel, CLI and MCP reach all of them.
+- **Everything is a command.** User-visible behaviour = a command in `crates/engine/src/cmd/*` (id, label, menu path, shortcut, params doc, `enabled`, `run`) + tests. Ids follow Beekeeper Studio's menus plus primitives (`connection.open`, `query.run`, `table.open`). UI-only commands live in `crates/ui-egui`. The control channel reaches all of them; the CLI and an MCP server are planned.
 - **Programmatic calls never open dialogs**: a command with empty params runs with defaults or returns an error; only menu-style invocation opens a dialog (`UiRequest::Dialog`).
 - **Layering** is enforced by `cargo xtask layers`: domain crates (L0–L4) → `engine` (L5) → `ui-egui`/`mcp` (L6) → `apps/*` (L7). Nothing below L6 depends on egui/eframe/winit/rfd/wgpu. **The UI crate is swappable.** Register every new crate in `xtask/src/layers.rs` and `docs/architecture.md`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)`.
 - **Rust only** (no handwritten JS/TS).
-- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, provenance).
-- **Commit subjects** and pull request titles follow [`CONTRIBUTING.md`](CONTRIBUTING.md): `<type>: <summary>` or `<type>(<scope>): <summary>`, for example `feat(M2.6): …` or `fix(#9): …`. One task id per commit.
+- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, tokens, layers, provenance).
+- **Commit subjects** and pull request titles follow [`CONTRIBUTING.md`](CONTRIBUTING.md): `<type>: <summary>` or `<type>(<scope>): <summary>`, for example `feat(M2.6): …` or `fix(#9): …`. One scope per commit.
 
 ## Running and looking at the app
-- `cargo run -p dbee` opens the app. `DBEE_NO_PREFS=1` keeps no connections file and no log file.
-- `dbee --control <port>` serves the control channel (JSON lines on `127.0.0.1`, `docs/control-protocol.md`); `cargo xtask run-isolated` runs the app with it on a throwaway home (`docs/agents.md` §4).
+- `cargo run -p dbee` opens the app. `DBEE_NO_PREFS=1` keeps no connections file, no settings file and no log file.
+- `dbee --control <port>` serves the control channel (JSON lines on `127.0.0.1`, `docs/control-protocol.md`); `cargo xtask run-isolated` runs the app with it on a throwaway home (`docs/agents.md`, "Verifying UI work").
 - Planned, documented before it exists: the CLI commands in `docs/cli.md`.
 - **For UI work, look at the result** (a screenshot of the window).
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates you own; delete your target dir when done.
