@@ -46,7 +46,8 @@
 //! ([`crate::shortcuts`]: a focused text field keeps them).
 //!
 //! **Editing.** A double-click (or a triple one) asks to edit the cell ([`GridAct::Edit`]); the
-//! caller decides whether it can. While a cell is being edited ([`Grid::editing`]), the grid
+//! caller decides whether it can. While one of a row's cells is edited the row shows no selection
+//! ground ([`Grid::editing`]): text selected in the editor has the selection's own colour. While a cell is being edited ([`Grid::editing`]), the grid
 //! keeps where that cell was drawn and which part of the rows was in view
 //! ([`GridState::editing_rect`]), for the editor to sit over it ([`crate::editors`]). Every
 //! column of a row in view is laid out, so the cell can be drawn scrolled away to the side.
@@ -632,9 +633,19 @@ impl Grid<'_> {
     }
 
     /// Row `row` lights as selected across the grid: it holds the one selected cell, or the
-    /// selection takes in every column of it.
+    /// selection takes in every column of it. Not while one of its cells is edited
+    /// ([`Grid::edited`]).
     fn lit(&self, row: usize) -> bool {
-        self.spans(row) || self.selection.is_some_and(|sel| sel.anchor == sel.focus && sel.anchor.0 == row)
+        !self.edited(row) && (self.spans(row) || self.selection.is_some_and(|sel| sel.anchor == sel.focus && sel.anchor.0 == row))
+    }
+
+    /// A cell of row `row` is being edited. The row then shows no selection ground, on its cells,
+    /// its number or past its last column: selected text in the editor is drawn on the very
+    /// colour a selected row has (`text_selection` is `selection`), and would not stand out from
+    /// the row round it. The editor's `ink` outline says which cell, and the selection itself is
+    /// unchanged: it lights again when the editor closes.
+    fn edited(&self, row: usize) -> bool {
+        self.editing.is_some_and(|(r, _)| r == row)
     }
 
     /// The selection takes in every column of row `row`: whole rows, or a rectangle as wide as
@@ -723,8 +734,8 @@ impl Grid<'_> {
             n: self.first_number.saturating_add(row as u64),
             new: src.columns() > 0 && src.mark(row, 0) == Some(Mark::New),
             deleted: src.deleted(row),
-            selected: self.selection.map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row)),
-            whole: self.whole_row(row),
+            selected: !self.edited(row) && self.selection.map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row)),
+            whole: !self.edited(row) && self.whole_row(row),
             hovered,
         };
         number.paint(ui, rect);
@@ -748,8 +759,8 @@ impl Grid<'_> {
             mark,
             // A lit row's unmarked cells take its ground; a marked one keeps its mark, and its
             // outline only where it is in the selection.
-            selected: covers(self.selection, (row, col)) || (lit && mark.is_none()),
-            focused: self.selection.is_some_and(|s| s.anchor == s.focus) && focus == Some((row, col)),
+            selected: !self.edited(row) && (covers(self.selection, (row, col)) || (lit && mark.is_none())),
+            focused: !self.edited(row) && self.selection.is_some_and(|s| s.anchor == s.focus) && focus == Some((row, col)),
             deleted: self.source.deleted(row),
             link: self.links && self.key(col) == Some(Key::Foreign),
             row_selected: focus.is_some_and(|f| f.0 == row),

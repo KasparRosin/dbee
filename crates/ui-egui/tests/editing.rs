@@ -1788,3 +1788,86 @@ fn json_is_coloured_while_it_is_edited() {
     assert_eq!(colour_of(&ui, at, &text, 8..9), Some(tokens.text), "after the broken spot: `text`");
     ui.key("Escape");
 }
+
+/// How far two grounds are apart: the contrast ratio of their luminances (WCAG's), 1 for the
+/// same colour.
+fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let lum = |c: egui::Color32| {
+        let lin = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+    };
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The ground egui paints behind the selected part of the text `words` drawn inside `at`: the colour of
+/// the rect it adds to the text's mesh (the vertices that are not one of the text's own colours,
+/// `text`).
+fn selection_ground(ui: &Ui, at: egui::Rect, words: &str, text: [egui::Color32; 2]) -> Option<egui::Color32> {
+    let inside = ui.texts().into_iter().filter(|(r, g)| g.text() == words && at.expand(1.0).contains(r.center()));
+    inside
+        .flat_map(|(_, g)| g.rows.iter().flat_map(|row| row.visuals.mesh.vertices.iter().map(|v| v.color)).collect::<Vec<_>>())
+        .find(|c| !text.contains(c))
+}
+
+/// Text selected in the cell's editor stands out from what is round it as much as the same
+/// selection does in the value panel, in light and in dark: from the editor's own ground, and
+/// from the ground of the row the editor stands in. A row lit as selected is the colour of the
+/// selection, so while one of its cells is edited the row is drawn unlit.
+#[test]
+fn selected_text_in_the_cell_editor_shows_as_well_as_in_the_panel() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, APP_SIZE);
+    for (mode, command, tokens) in [("dark", "ui.themeDark", dbee_ui_egui::theme::DARK), ("light", "ui.themeLight", dbee_ui_egui::theme::LIGHT)] {
+        ui.execute(command, json!({}));
+        ui.frame();
+        // A cell alone (its whole row lights as selected), and the focus cell of a rectangle of
+        // cells (its neighbours in the selection are lit, its row is not).
+        for (case, select) in [("one cell", json!({ "anchor": [1, 1] })), ("a rectangle", json!({ "anchor": [0, 2], "focus": [1, 1] }))] {
+            let at_ = format!("{mode}, {case}");
+            ui.execute("selection.set", select);
+            ui.frame();
+            let neighbour = ui.drawn("grid-cell-1-2").center();
+            assert_eq!(colour_at(&ui, neighbour), Some(tokens.selection), "{at_}: before the edit the neighbour is lit");
+            ui.key("Enter");
+            if ui.editor().is_none() {
+                ui.frame();
+            }
+            ui.frame();
+            assert_eq!(ui.editor_text(), "Bob", "{at_}: open, all of it selected");
+            let (cell, panel) = (ui.drawn("cell-editor"), ui.drawn("value-editor"));
+            let in_cell =
+                selection_ground(&ui, cell, "Bob", [tokens.text, tokens.ink]).unwrap_or_else(|| panic!("{at_}: a selection in the cell's editor"));
+            let own = colour_at(&ui, egui::pos2(cell.right() - 4.0, cell.center().y)).unwrap();
+            let row: Vec<egui::Color32> =
+                ["grid-cell-1-0", "grid-cell-1-2", "grid-row-1"].iter().map(|id| colour_at(&ui, ui.drawn(id).center()).unwrap()).collect();
+            // The same selection in the panel.
+            ui.click("value-editor");
+            ui.ctrl("A");
+            ui.frame();
+            let in_panel =
+                selection_ground(&ui, panel, "Bob", [tokens.text, tokens.ink]).unwrap_or_else(|| panic!("{at_}: a selection in the panel"));
+            let panel_ground = colour_at(&ui, egui::pos2(panel.right() - 4.0, panel.bottom() - 4.0)).unwrap();
+            let want = contrast(in_panel, panel_ground);
+            assert!(want > 1.1, "{at_}: the panel's selection shows: {in_panel:?} on {panel_ground:?}");
+            assert!(contrast(in_cell, own) >= want, "{at_}: from the editor's own ground: {in_cell:?} on {own:?}, the panel's {want}");
+            for (ground, what) in row.iter().zip(["the cell before it", "the cell after it", "the row's number"]) {
+                assert!(
+                    contrast(in_cell, *ground) >= want,
+                    "{at_}: from {what}: {in_cell:?} beside {ground:?} is {}, the panel's {want}",
+                    contrast(in_cell, *ground)
+                );
+            }
+            ui.key("Escape");
+            for _ in 0..3 {
+                ui.frame();
+            }
+            // The edit over, the selection lights again.
+            assert_eq!(colour_at(&ui, ui.drawn("grid-cell-1-2").center()), Some(tokens.selection), "{at_}: lit again after the edit");
+        }
+    }
+}
