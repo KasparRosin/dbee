@@ -6,11 +6,6 @@
 
 <p align="center"><b>A fast, free database client for Linux, macOS and Windows.</b></p>
 
-> [!NOTE]
-> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
-> The second, M2, brings the same workflow to MySQL, MariaDB and SQLite files, and it is built too. The third, M3, is a new look for every screen, with dark mode. File export and import come next (M4).\
-> Linux x86_64 is tested; the other platforms are defined, untested yet.
-
 <p align="center">
   <img src="assets/readme/screenshot-filters.png" alt="dbee with a table of orders filtered by two conditions: the schema tree on the left, the grid under its filter bar in the middle, the selected row as JSON on the right">
 </p>
