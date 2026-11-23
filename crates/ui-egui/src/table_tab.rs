@@ -734,7 +734,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
                     // The editor is always drawn over its cell; out of view, the cell draws nothing of it.
-                    edited_elsewhere: false,
                     saved,
                     dimmed: loading.is_some(),
                 };

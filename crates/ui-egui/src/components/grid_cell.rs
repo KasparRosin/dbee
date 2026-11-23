@@ -1013,7 +1013,6 @@ mod tests {
                 links: true,
                 first_number: 1,
                 editing: None,
-                edited_elsewhere: false,
                 saved: s.saved,
                 dimmed: false,
             };
@@ -1191,7 +1190,6 @@ mod tests {
                     links: false,
                     first_number: 1,
                     editing: None,
-                    edited_elsewhere: false,
                     saved: 0.0,
                     dimmed: false,
                 };

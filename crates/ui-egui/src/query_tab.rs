@@ -1379,7 +1379,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     links: false,
                     first_number: 1,
                     editing: None,
-                    edited_elsewhere: false,
                     saved: 0.0,
                     dimmed: false,
                 };

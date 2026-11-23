@@ -727,7 +727,6 @@ fn grid_frame_within_budget() {
                 links: false,
                 first_number: 1,
                 editing: None,
-                edited_elsewhere: false,
                 saved: 0.0,
                 dimmed: false,
             };
