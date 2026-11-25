@@ -2,7 +2,9 @@
 //!
 //! **The grid.** On a table tab it is the loaded page followed by the new rows staged on it (grid
 //! rows `0..data.rows.len()` are loaded, the rest `row - len` into `Edits::new_rows`); on a query
-//! tab it is the shown result. A cell's text is its staged value when it has one, else the loaded
+//! tab it is the shown result, in its sorted order when it has one (`query.sortResult`: grid row
+//! `i` is the row [`Grid::order`] puts there, and every read here, a copy's and the value view's
+//! too, goes through it). A cell's text is its staged value when it has one, else the loaded
 //! one; a row shorter than the columns, or a new row's unset cell, reads as NULL. Nothing here
 //! indexes: a selection that no longer fits the grid is clamped or dropped, never a panic.
 //!
@@ -11,7 +13,8 @@
 //! it is the focus row instead: the object Copy as JSON writes for it, pretty-printed, cut at the
 //! same cap as a long value. Classifying and pretty-printing walk the whole value (up to 20 MB),
 //! and the UI asks for the view every frame, so the session keeps the last one ([`Cache`]) and
-//! builds a new one only when the tab, the cell or row, the data or the staged values change.
+//! builds a new one only when the tab, the cell or row, the data, the order of a sorted result's
+//! rows or the staged values change.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,12 +22,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use dbee_core::copy::{Cells, row_json};
 use dbee_core::json::{self, JsonKind, MAX_PRETTY_BYTES};
-use dbee_core::{Column, ResultSet};
+use dbee_core::{Cell, Column, ResultSet};
 use dbee_sql::select::PAGE_SIZE;
 use serde::{Serialize, Serializer};
 
 use crate::edits::Edits;
-use crate::state::{Selection, Tab};
+use crate::state::{Selection, Tab, received_row};
 use crate::{Json, TabId};
 
 /// The most text a value view holds: the cap `json::pretty` works up to.
@@ -155,6 +158,9 @@ impl ValueView {
 pub(crate) struct Grid<'a> {
     pub tab: TabId,
     pub data: &'a Arc<ResultSet>,
+    /// A sorted query result's row order: grid row `i` is `data.rows[order[i]]`. `None` for rows
+    /// as they are held (a table tab's page, a result as received).
+    pub order: Option<&'a Arc<[u32]>>,
     /// A table tab's staged edits.
     pub edits: Option<&'a Edits>,
     pub selection: Option<Selection>,
@@ -169,11 +175,15 @@ impl<'a> Grid<'a> {
             Tab::Table(t) => Some(Grid {
                 tab: t.id,
                 data: t.data.as_ref()?,
+                order: None,
                 edits: Some(&*t.edits),
                 selection: t.selection,
                 first: t.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
             }),
-            Tab::Query(q) => Some(Grid { tab: q.id, data: &q.shown_result()?.result, edits: None, selection: q.selection, first: 1 }),
+            Tab::Query(q) => {
+                let shown = q.shown_result()?;
+                Some(Grid { tab: q.id, data: &shown.result, order: shown.order(), edits: None, selection: q.selection, first: 1 })
+            }
         }
     }
 
@@ -212,7 +222,13 @@ impl<'a> Grid<'a> {
         if let Some(staged) = self.edits.and_then(|e| e.shown(self.data, row, col)) {
             return staged;
         }
-        self.data.rows.get(row)?.get(col)?.as_deref()
+        self.held(row)?.get(col)?.as_deref()
+    }
+
+    /// The cells held for grid row `row`: through the order, when the rows are sorted.
+    fn held(&self, row: usize) -> Option<&'a [Cell]> {
+        let at = received_row(self.order.map(|order| &**order), row)?;
+        self.data.rows.get(at).map(Vec::as_slice)
     }
 
     /// The view of row `row`: its object as Copy as JSON writes it, cut at the cap.
@@ -257,7 +273,7 @@ impl Cells for Rect<'_, '_> {
             return Ok(());
         }
         // A query's result: the row's cells straight from the data, NULL past a short row's end.
-        let cells = self.grid.data.rows.get(self.top.saturating_add(row)).and_then(|r| r.get(self.left..)).unwrap_or_default();
+        let cells = self.grid.held(self.top.saturating_add(row)).and_then(|r| r.get(self.left..)).unwrap_or_default();
         let cells = cells.get(..self.columns).unwrap_or(cells);
         for v in cells {
             f(v.as_deref())?;
@@ -282,6 +298,9 @@ struct Entry {
     shown: Shown,
     /// Held, so its address cannot be reused by other data while the entry lives.
     data: Arc<ResultSet>,
+    /// The order the data's rows were in, held as the data is: a sort is a new list, so the row
+    /// at the focus may be another.
+    order: Option<Arc<[u32]>>,
     revision: u64,
     view: Arc<ValueView>,
 }
@@ -308,6 +327,7 @@ impl Cache {
             && e.shown == shown
             && e.revision == revision
             && Arc::ptr_eq(&e.data, grid.data)
+            && same_order(e.order.as_ref(), grid.order)
         {
             return Some(Arc::clone(&e.view));
         }
@@ -317,13 +337,22 @@ impl Cache {
         };
         let view = Arc::new(view);
         self.built.fetch_add(1, Ordering::Relaxed);
-        *slot = Some(Entry { tab: grid.tab, shown, data: Arc::clone(grid.data), revision, view: Arc::clone(&view) });
+        *slot = Some(Entry { tab: grid.tab, shown, data: Arc::clone(grid.data), order: grid.order.cloned(), revision, view: Arc::clone(&view) });
         Some(view)
     }
 
     /// How many views were built, for tests of the caching.
     pub fn built(&self) -> usize {
         self.built.load(Ordering::Relaxed)
+    }
+}
+
+/// Both as received, or the very same list.
+fn same_order(a: Option<&Arc<[u32]>>, b: Option<&Arc<[u32]>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
     }
 }
 
@@ -452,7 +481,7 @@ mod tests {
     fn query_tab(columns: Vec<Column>, rows: Vec<Vec<Option<String>>>, selection: Selection) -> Tab {
         let rs = ResultSet { columns, rows_seen: rows.len() as u64, rows, complete: true, rows_affected: None, database_after: Default::default() };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
-        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs), ms: 0 });
+        q.results.push(StatementOutcome::new(0..0, Arc::new(rs), 0));
         q.selection = Some(selection);
         Tab::Query(q)
     }
@@ -484,6 +513,77 @@ mod tests {
         assert_eq!(summary(&v)["row"], 1);
     }
 
+    /// A sorted result is read through its order by everything here: a cell, a copy's rows
+    /// ([`Rect::each`]), a row's view and the cached value view, which a new order makes anew.
+    #[test]
+    fn a_sorted_result_reads_through_its_order() {
+        let rows = vec![vec![Some("b".into()), Some("1".into())], vec![Some("c".into())], vec![Some("a".into()), Some("3".into())]];
+        let cell = Selection { anchor: (0, 0), focus: (0, 0), whole: false };
+        let mut tab = query_tab(vec![col("t", "text"), col("n", "int4")], rows, cell);
+        let reorder = |tab: &mut Tab, order: Option<Vec<u32>>| {
+            let Tab::Query(q) = tab else { panic!("a query tab") };
+            q.results[0].order = order.map(Arc::from);
+        };
+        let select = |tab: &mut Tab, sel: Selection| {
+            let Tab::Query(q) = tab else { panic!("a query tab") };
+            q.selection = Some(sel);
+        };
+        /// Every row of the grid as a copy reads it, by `each` and by `cell`.
+        fn read(tab: &Tab) -> Vec<Vec<Option<String>>> {
+            let grid = Grid::of(tab).unwrap();
+            let rect = Rect { grid: &grid, top: 0, left: 0, rows: grid.rows(), columns: grid.columns() };
+            let by_each: Vec<Vec<Option<String>>> = (0..rect.rows)
+                .map(|row| {
+                    let mut cells = Vec::new();
+                    rect.each(row, |v| {
+                        cells.push(v.map(str::to_owned));
+                        Ok::<(), ()>(())
+                    })
+                    .unwrap();
+                    cells
+                })
+                .collect();
+            let by_cell: Vec<Vec<Option<String>>> =
+                (0..rect.rows).map(|row| (0..rect.columns).map(|c| Cells::cell(&rect, row, c).map(str::to_owned)).collect()).collect();
+            assert_eq!(by_each, by_cell);
+            by_each
+        }
+        let s = |v: &str| Some(v.to_owned());
+        let cache = Cache::default();
+        assert_eq!(read(&tab), [[s("b"), s("1")], [s("c"), None], [s("a"), s("3")]]);
+        assert_eq!(cache.get(&tab).unwrap().text, "b");
+        // Sorted: the same grid position is another row, for the cell, the copy and the view.
+        reorder(&mut tab, Some(vec![2, 0, 1]));
+        assert_eq!(read(&tab), [[s("a"), s("3")], [s("b"), s("1")], [s("c"), None]]);
+        assert_eq!(Grid::of(&tab).unwrap().cell(2, 0), Some("c"));
+        assert_eq!(cache.get(&tab).unwrap().text, "a", "a new order is a new view");
+        assert_eq!(cache.built(), 2);
+        cache.get(&tab);
+        assert_eq!(cache.built(), 2, "the same order: the view kept");
+        // The same order as a new list (the same sort asked again) is built again; as received too.
+        reorder(&mut tab, Some(vec![2, 0, 1]));
+        assert_eq!((cache.get(&tab).unwrap().text.as_str(), cache.built()), ("a", 3));
+        reorder(&mut tab, None);
+        assert_eq!((cache.get(&tab).unwrap().text.as_str(), cache.built()), ("b", 4));
+        // A whole row: the object of the row now there, numbered by its place in the grid.
+        reorder(&mut tab, Some(vec![1, 2, 0]));
+        select(&mut tab, Selection { anchor: (2, 0), focus: (2, 1), whole: true });
+        let v = cache.get(&tab).unwrap();
+        assert_eq!((v.text.as_str(), v.row), ("{\n  \"t\": \"b\",\n  \"n\": 1\n}", Some(3)));
+        // A part of the rows from the second column on, as a copy of a selection takes it.
+        let grid = Grid::of(&tab).unwrap();
+        let rect = Rect { grid: &grid, top: 1, left: 1, rows: 2, columns: 1 };
+        assert_eq!((rect.cell(0, 0), rect.cell(1, 0), rect.cell(2, 0)), (Some("3"), Some("1"), None));
+        // An order that names a row the result does not have, or holds fewer rows than it, reads
+        // as NULL there: never a panic.
+        reorder(&mut tab, Some(vec![7, u32::MAX, 0]));
+        assert_eq!(read(&tab), [[None, None], [None, None], [s("b"), s("1")]]);
+        reorder(&mut tab, Some(vec![2]));
+        assert_eq!(read(&tab), [[s("a"), s("3")], [None, None], [None, None]]);
+        select(&mut tab, Selection { anchor: (1, 0), focus: (1, 0), whole: false });
+        assert!(cache.get(&tab).unwrap().is_null);
+    }
+
     #[test]
     fn ragged_rows_and_stale_selections_do_not_panic() {
         let rs = ResultSet {
@@ -495,7 +595,7 @@ mod tests {
             database_after: Default::default(),
         };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
-        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs), ms: 0 });
+        q.results.push(StatementOutcome::new(0..0, Arc::new(rs), 0));
         q.selection = Some(Selection { anchor: (0, 0), focus: (50, 50), whole: false });
         let tab = Tab::Query(q);
         let g = Grid::of(&tab).expect("a grid");

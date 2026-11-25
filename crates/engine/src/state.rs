@@ -7,10 +7,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, DatabaseAfter, ForeignKey, ResultSet, TableInfo, TableRef, TableStructure};
+use dbee_core::{Catalog, Cell, DatabaseAfter, ForeignKey, ResultSet, TableInfo, TableRef, TableStructure};
 use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState, TransactionState};
 use dbee_sql::Dialect;
-use dbee_sql::filter::{Condition, Filter, Sort};
+use dbee_sql::filter::{Condition, Filter, Sort, SortDir};
 use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
@@ -386,7 +386,13 @@ impl QueryTab {
     }
 }
 
-/// One statement's result in a query tab.
+/// One statement's result in a query tab, and the order its rows are shown in.
+///
+/// The rows stay as the server sent them: a sort ([`ResultSort`]) is a list of row indices beside
+/// them (`order`), so sorting copies no cell and dropping the sort gives the received order back.
+/// Whoever reads a row for the grid, a copy or the value view reads it through [`Self::row`] or
+/// [`Self::cell`] (the engine's own readers through `view::Grid`), never from `result.rows` by
+/// its position in the grid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatementOutcome {
     /// Where the statement is in the tab text: bytes, without the `;` and the comments around it.
@@ -395,6 +401,57 @@ pub struct StatementOutcome {
     pub result: Arc<ResultSet>,
     /// How long the statement took, in milliseconds from sending it to its result.
     pub ms: u64,
+    /// The column the rows are sorted by in memory (`query.sortResult`); `None` as received.
+    pub(crate) sort: Option<ResultSort>,
+    /// With a sort: grid row `i` is `result.rows[order[i]]`. Behind `Arc`, as the result is; a new
+    /// sort is a new list, which is how the value view knows its row may have changed.
+    pub(crate) order: Option<Arc<[u32]>>,
+}
+
+impl StatementOutcome {
+    /// A statement's result as received, unsorted.
+    pub fn new(range: Range<usize>, result: Arc<ResultSet>, ms: u64) -> StatementOutcome {
+        StatementOutcome { range, result, ms, sort: None, order: None }
+    }
+
+    /// The column the rows are sorted by, when they are.
+    pub fn sort(&self) -> Option<ResultSort> {
+        self.sort
+    }
+
+    /// The order the rows are shown in, when they are sorted.
+    pub(crate) fn order(&self) -> Option<&Arc<[u32]>> {
+        self.order.as_ref()
+    }
+
+    /// The cells of grid row `row`: the row the sort puts there. `None` past the last row.
+    pub fn row(&self, row: usize) -> Option<&[Cell]> {
+        let at = received_row(self.order.as_deref(), row)?;
+        self.result.rows.get(at).map(Vec::as_slice)
+    }
+
+    /// The text of grid cell `(row, col)`; `None` is NULL, also for a cell the row does not have.
+    pub fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        self.row(row)?.get(col)?.as_deref()
+    }
+}
+
+/// The index in a result's rows of grid row `row` under `order` (`None`: as received). `None`
+/// for a row the order does not hold.
+pub(crate) fn received_row(order: Option<&[u32]>, row: usize) -> Option<usize> {
+    match order {
+        None => Some(row),
+        Some(order) => order.get(row).and_then(|at| usize::try_from(*at).ok()),
+    }
+}
+
+/// A query result's sort: one column, by its index (result columns can share a name, or have
+/// none), in memory over the rows held ([`dbee_core::sort`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultSort {
+    pub column: usize,
+    pub dir: SortDir,
 }
 
 /// Why a query run stopped before its last statement.

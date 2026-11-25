@@ -1,8 +1,8 @@
 //! Query tabs: run all and run current, one result per statement, errors and the statement they
-//! name, the result cap, cancel, a tab's database, and what closing the tab, disconnecting or
-//! reconnecting does to a running query, on every engine ([`for_each_engine`]). Needs the Docker
-//! test servers (`cargo xtask testdb up`); tests that write make their own tables in `scratch`
-//! and drop them at the end.
+//! name, the result cap, cancel, a result sorted in memory (`query.sortResult`), a tab's database,
+//! and what closing the tab, disconnecting or reconnecting does to a running query, on every engine
+//! ([`for_each_engine`]). Needs the Docker test servers (`cargo xtask testdb up`); tests that write
+//! make their own tables in `scratch` and drop them at the end.
 
 mod common;
 
@@ -1524,8 +1524,8 @@ fn query_commands_need_a_query_tab_and_a_connection() {
     // One session at a time (see `common`).
     for_each_engine(|t, s| {
         open_table(s, t.schema("shop"), "customers");
-        for id in ["query.run", "query.cancel", "query.showResult"] {
-            assert_eq!(s.execute(id, json!({ "index": 0 })).unwrap_err().data()["why"], "no query tab is active", "{id}");
+        for id in ["query.run", "query.cancel", "query.showResult", "query.sortResult"] {
+            assert_eq!(s.execute(id, json!({ "index": 0, "column": 0 })).unwrap_err().data()["why"], "no query tab is active", "{id}");
         }
         tab(s, "select 1");
         assert_eq!(s.execute("query.showResult", json!({ "index": 0 })).unwrap_err().code(), "badParams", "no results yet");
@@ -1964,4 +1964,375 @@ impl Drop for Removed {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+// ---- query.sortResult ------------------------------------------------------------------------
+
+/// Four rows of a number and a text, in no order.
+const UNSORTED: &str = "select 2 as n, 'pear' as t union all select 10, 'Apple' union all select 9, 'apple' union all select 100, 'fig'";
+
+/// The shown result's rows as the grid has them, read as a copy of every cell reads them: one
+/// line per row, the values separated by `|`, NULL empty.
+fn grid_rows(s: &mut Session) -> Vec<String> {
+    let before = s.inspect()["selection"].clone();
+    run(s, "selection.all", json!({}));
+    let copied = run(s, "copy.selection", json!({ "format": "tsv" }));
+    // Not `lines()`: a last row that is one NULL is an empty line at the end.
+    let rows = copied["text"].as_str().unwrap().split('\n').map(|l| l.replace('\t', "|")).collect();
+    // The selection the test had comes back.
+    if before.is_null() {
+        if let Some(Tab::Query(_)) = s.state().active_tab() {
+            run(s, "selection.set", json!({ "anchor": [0, 0] }));
+        }
+    } else {
+        run(s, "selection.set", json!({ "anchor": before["anchor"], "focus": before["focus"] }));
+    }
+    rows
+}
+
+/// `query.sortResult` with `params`.
+fn sort_result(s: &mut Session, params: Json) -> Json {
+    run(s, "query.sortResult", params)
+}
+
+/// The sort of result `index` of the active query tab, as `inspect()` shows it.
+fn sort_of(s: &Session, index: usize) -> Json {
+    shown(s)["results"][index]["sort"].clone()
+}
+
+#[test]
+fn sort_result_asc_desc_none() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let tab = tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        assert_eq!(sort_of(s, 0), Json::Null, "{}: a new result is as received", t.name());
+        let received = grid_rows(s);
+        assert_eq!(received, ["2|pear", "10|Apple", "9|apple", "100|fig"], "{}", t.name());
+        // Each direction by name. Numbers sort by value, on an engine that names no type too.
+        let asc = json!({ "column": 0, "name": "n", "dir": "asc" });
+        assert_eq!(sort_result(s, json!({ "column": 0, "dir": "asc" })), json!({ "tab": tab, "shown": 0, "sort": asc }), "{}", t.name());
+        assert_eq!(sort_of(s, 0), asc);
+        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|fig"], "{}", t.name());
+        let desc = json!({ "column": 0, "name": "n", "dir": "desc" });
+        assert_eq!(sort_result(s, json!({ "column": 0, "dir": "desc" }))["sort"], desc);
+        assert_eq!(sort_of(s, 0), desc);
+        assert_eq!(grid_rows(s), ["100|fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
+        // `none` gives back the order the server sent, exactly.
+        assert_eq!(sort_result(s, json!({ "column": 0, "dir": "none" })), json!({ "tab": tab, "shown": 0, "sort": null }));
+        assert_eq!(sort_of(s, 0), Json::Null);
+        assert_eq!(grid_rows(s), received, "{}", t.name());
+        // Without `dir` the column's sort moves on as a header click does: asc, desc, none.
+        for (want, rows) in [
+            (json!({ "column": 1, "name": "t", "dir": "asc" }), vec!["10|Apple", "9|apple", "100|fig", "2|pear"]),
+            (json!({ "column": 1, "name": "t", "dir": "desc" }), vec!["2|pear", "100|fig", "9|apple", "10|Apple"]),
+            (Json::Null, received.iter().map(String::as_str).collect()),
+        ] {
+            assert_eq!(sort_result(s, json!({ "column": 1 }))["sort"], want, "{}", t.name());
+            assert_eq!(grid_rows(s), rows, "{}: {want}", t.name());
+        }
+        // Another column starts at asc, whatever the sorted one was at, and replaces it.
+        sort_result(s, json!({ "column": 1, "dir": "desc" }));
+        assert_eq!(sort_result(s, json!({ "column": 0 }))["sort"], asc);
+        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|fig"]);
+        // `none` for a column that is not the sorted one drops the sort all the same.
+        assert_eq!(sort_result(s, json!({ "column": 1, "dir": "none" }))["sort"], Json::Null);
+        assert_eq!(grid_rows(s), received);
+        // The rows themselves never move: the state holds them as received.
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        assert_eq!(qt.results[0].result.rows[1], vec![Some("10".to_owned()), Some("Apple".to_owned())]);
+    });
+}
+
+#[test]
+fn sort_result_nulls_as_the_engine_sorts_them() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let rows = "select 2 as n union all select null union all select 10 union all select null union all select 1";
+        tab(s, rows);
+        for dir in ["asc", "desc"] {
+            // In memory, then the same rows by the database's own ORDER BY.
+            run(s, "query.setText", json!({ "text": rows }));
+            run(s, "query.run", json!({}));
+            sort_result(s, json!({ "column": 0, "dir": dir }));
+            let in_memory = grid_rows(s);
+            run(s, "query.setText", json!({ "text": format!("select n from ({rows}) x order by n {dir}") }));
+            run(s, "query.run", json!({}));
+            assert_eq!(sort_of(s, 0), Json::Null);
+            let by_the_database = grid_rows(s);
+            assert_eq!(in_memory, by_the_database, "{}: {dir}", t.name());
+            assert_eq!(in_memory.iter().filter(|r| r.is_empty()).count(), 2, "{}: {in_memory:?}", t.name());
+        }
+    });
+}
+
+#[test]
+fn each_result_keeps_its_own_sort() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, "select 2 as a union all select 1; select 'b' as b union all select 'a' union all select 'c'");
+        assert_eq!(run(s, "query.run", json!({}))["shown"], 1);
+        let b_asc = json!({ "column": 0, "name": "b", "dir": "asc" });
+        assert_eq!(sort_result(s, json!({ "column": 0 })), json!({ "tab": shown(s)["tab"], "shown": 1, "sort": b_asc }));
+        assert_eq!((sort_of(s, 0), sort_of(s, 1)), (Json::Null, b_asc.clone()), "{}", t.name());
+        // The other result is as received, and takes a sort of its own.
+        run(s, "query.showResult", json!({ "index": 0 }));
+        assert_eq!(grid_rows(s), ["2", "1"]);
+        let a_desc = json!({ "column": 0, "name": "a", "dir": "desc" });
+        sort_result(s, json!({ "column": 0, "dir": "asc" }));
+        assert_eq!(grid_rows(s), ["1", "2"]);
+        sort_result(s, json!({ "column": 0 }));
+        assert_eq!((sort_of(s, 0), sort_of(s, 1)), (a_desc.clone(), b_asc.clone()), "{}", t.name());
+        // Each is shown as it was left.
+        assert_eq!(run(s, "query.showResult", json!({ "index": 1 }))["result"]["sort"], b_asc);
+        assert_eq!(grid_rows(s), ["a", "b", "c"]);
+        assert_eq!(run(s, "query.showResult", json!({ "index": 0 }))["result"]["sort"], a_desc);
+        assert_eq!(grid_rows(s), ["2", "1"]);
+    });
+}
+
+#[test]
+fn running_again_drops_the_sort() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        sort_result(s, json!({ "column": 0, "dir": "desc" }));
+        assert_eq!(grid_rows(s).first().map(String::as_str), Some("100|fig"));
+        let r = run(s, "query.run", json!({}));
+        assert_eq!(r["results"][0]["sort"], Json::Null, "{}: {r}", t.name());
+        assert_eq!(sort_of(s, 0), Json::Null);
+        assert_eq!(grid_rows(s), ["2|pear", "10|Apple", "9|apple", "100|fig"], "{}", t.name());
+        // A header click then starts at asc again.
+        assert_eq!(sort_result(s, json!({ "column": 0 }))["sort"]["dir"], "asc");
+    });
+}
+
+#[test]
+fn a_cut_result_sorts_the_rows_it_holds() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, &format!("select id as n from {}.big_rows where id <= 25000 order by id", t.schema("shop")));
+        run(s, "query.run", json!({}));
+        let held = |s: &Session| {
+            let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+            std::sync::Arc::clone(&qt.results[0].result)
+        };
+        let before = held(s);
+        sort_result(s, json!({ "column": 0, "dir": "desc" }));
+        // The 10,000 rows held, largest first: not the table's 25,000.
+        let first = |s: &mut Session, row: usize| {
+            run(s, "selection.set", json!({ "anchor": [row, 0] }));
+            run(s, "copy.selection", json!({ "format": "tsv" }))["text"].as_str().unwrap().to_owned()
+        };
+        assert_eq!((first(s, 0), first(s, 1), first(s, 9_999)), ("10000".to_owned(), "9999".to_owned(), "1".to_owned()), "{}", t.name());
+        let r = &shown(s)["results"][0];
+        assert_eq!(
+            (r["rows"].as_u64(), r["rowsSeen"].as_u64(), r["complete"].as_bool()),
+            (Some(10_000), Some(25_000), Some(false)),
+            "{}: {r}",
+            t.name()
+        );
+        assert_eq!(r["sort"]["dir"], "desc");
+        // The sort moved and copied no row: the tab holds the very rows the run brought.
+        let after = held(s);
+        assert!(std::sync::Arc::ptr_eq(&before, &after), "{}: the result was copied", t.name());
+        assert_eq!(after.rows.first(), Some(&vec![Some("1".to_owned())]));
+    });
+}
+
+#[test]
+fn the_selection_stays_and_the_value_follows_the_sorted_rows() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        let at = json!({ "anchor": [0, 1], "focus": [0, 1], "whole": false });
+        run(s, "selection.set", json!({ "anchor": [0, 1] }));
+        assert_eq!(run(s, "value.show", json!({}))["text"], "pear", "{}", t.name());
+        let built = s.value_view_computations();
+        // The selection stays where it is; the value is the cell now under it.
+        sort_result(s, json!({ "column": 0, "dir": "desc" }));
+        assert_eq!(s.inspect()["selection"], at, "{}", t.name());
+        assert_eq!(run(s, "value.show", json!({}))["text"], "fig", "{}: the cell now at the selection", t.name());
+        assert_eq!(s.inspect()["value"]["text"], "fig");
+        assert_eq!(s.value_view_computations(), built + 1, "{}: the kept view was dropped, and built once", t.name());
+        // Each new order is a new view, `none` too.
+        sort_result(s, json!({ "column": 0, "dir": "asc" }));
+        assert_eq!(s.value_view().map(|v| v.text), Some("pear".to_owned()));
+        sort_result(s, json!({ "column": 1, "dir": "asc" }));
+        assert_eq!(s.value_view().map(|v| v.text), Some("Apple".to_owned()));
+        sort_result(s, json!({ "column": 1, "dir": "none" }));
+        assert_eq!(s.value_view().map(|v| v.text), Some("pear".to_owned()));
+        assert_eq!(s.value_view_computations(), built + 4);
+        // A whole row's view is the row now there.
+        run(s, "selection.rows", json!({ "first": 3 }));
+        assert!(s.value_view().unwrap().text.contains("\"fig\""), "{}", t.name());
+        sort_result(s, json!({ "column": 0, "dir": "desc" }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [3, 0], "focus": [3, 1], "whole": true }));
+        let row = s.value_view().unwrap();
+        assert!(row.text.contains("\"pear\"") && row.row == Some(4), "{}: {}", t.name(), row.text);
+    });
+}
+
+#[test]
+fn copy_gives_the_rows_as_sorted() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        sort_result(s, json!({ "column": 1, "dir": "asc" }));
+        let copy = |s: &mut Session, format: &str| run(s, "copy.selection", json!({ "format": format }))["text"].as_str().unwrap().to_owned();
+        // A rectangle in the middle of the grid, in every format.
+        run(s, "selection.set", json!({ "anchor": [1, 0], "focus": [2, 1] }));
+        assert_eq!(copy(s, "tsv"), "9\tapple\n100\tfig", "{}", t.name());
+        assert_eq!(copy(s, "tsvHeader"), "n\tt\n9\tapple\n100\tfig");
+        assert_eq!(copy(s, "csv").replace("\r\n", "\n").trim_end(), "n,t\n9,apple\n100,fig");
+        let objects: Json = serde_json::from_str(&copy(s, "json")).unwrap();
+        assert_eq!(objects.as_array().map(Vec::len), Some(2), "{objects}");
+        assert_eq!((&objects[0]["t"], &objects[1]["t"]), (&json!("apple"), &json!("fig")), "{}: {objects}", t.name());
+        // Whole rows, and a single column out of the sorted one.
+        run(s, "selection.rows", json!({ "first": 0, "last": 1 }));
+        assert_eq!(copy(s, "tsv"), "10\tApple\n9\tapple");
+        run(s, "selection.set", json!({ "anchor": [0, 0], "focus": [3, 0] }));
+        assert_eq!(copy(s, "tsv"), "10\n9\n100\n2", "{}", t.name());
+        run(s, "value.show", json!({}));
+        assert_eq!(run(s, "value.copy", json!({}))["text"], "2", "{}: the focus cell's value", t.name());
+    });
+}
+
+#[test]
+fn sort_result_refuses_garbage() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        sort_result(s, json!({ "column": 1, "dir": "asc" }));
+        run(s, "selection.set", json!({ "anchor": [2, 1] }));
+        let before = (s.inspect(), grid_rows(s));
+        for bad in [
+            json!({}),
+            json!({ "column": 2 }),
+            json!({ "column": 99, "dir": "asc" }),
+            json!({ "column": u64::MAX }),
+            json!({ "column": -1 }),
+            json!({ "column": 1.5 }),
+            json!({ "column": "0" }),
+            json!({ "column": "n" }),
+            json!({ "column": [0] }),
+            json!({ "column": null, "dir": "asc" }),
+            json!({ "column": 0, "dir": "up" }),
+            json!({ "column": 0, "dir": "" }),
+            json!({ "column": 0, "dir": "ASC" }),
+            json!({ "column": 0, "dir": 1 }),
+            json!({ "column": 2, "dir": "none" }),
+        ] {
+            let e = s.execute("query.sortResult", bad.clone()).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{}: {bad}: {e}", t.name());
+            assert_eq!(s.inspect(), before.0, "{}: {bad} changed something", t.name());
+        }
+        assert_eq!(grid_rows(s), before.1);
+    });
+}
+
+#[test]
+fn sort_result_needs_a_shown_result() {
+    let _db = require_testdb!();
+    {
+        // No connection: a query tab that never ran.
+        let mut s = session();
+        tab(&mut s, "select 1");
+        assert_eq!(s.enabled("query.sortResult"), Err("no result is shown".to_owned()));
+        assert_eq!(s.execute("query.sortResult", json!({ "column": 0 })).unwrap_err().data()["why"], "no result is shown");
+    }
+    for_each_engine(|t, s| {
+        let why = |s: &mut Session| {
+            let e = s.execute("query.sortResult", json!({ "column": 0 })).unwrap_err();
+            assert_eq!(e.code(), "disabled", "{e}");
+            assert_eq!(s.enabled("query.sortResult").unwrap_err(), e.data()["why"].as_str().unwrap(), "the enabled check and the run agree");
+            e.data()["why"].as_str().unwrap().to_owned()
+        };
+        // A table tab is no query tab, sorted or not.
+        open_table(s, t.schema("shop"), "customers");
+        assert_eq!(why(s), "no query tab is active", "{}", t.name());
+        // A query tab before its first run, and one whose result has no columns.
+        tab(s, "select 1 as a");
+        assert_eq!(why(s), "no result is shown", "{}", t.name());
+        run(s, "query.setText", json!({ "text": format!("drop table if exists {}.{}", t.schema("scratch"), unique("t_never_made")) }));
+        let r = run(s, "query.run", json!({}));
+        assert_eq!(r["results"][0]["columns"], json!([]), "{}: {r}", t.name());
+        assert_eq!(why(s), "no result is shown", "{}", t.name());
+        // With rows to show it runs; a result with columns and no rows sorts too (nothing moves).
+        run(s, "query.setText", json!({ "text": "select 1 as a" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(s.enabled("query.sortResult"), Ok(()));
+        assert_eq!(sort_result(s, json!({ "column": 0 }))["sort"]["dir"], "asc");
+        run(s, "query.setText", json!({ "text": "select a from (select 1 as a) x where a > 5" }));
+        assert_eq!(run(s, "query.run", json!({}))["results"][0]["rows"], 0);
+        assert_eq!(sort_result(s, json!({ "column": 0, "dir": "desc" }))["sort"]["dir"], "desc", "{}", t.name());
+        assert_eq!(s.inspect()["selection"], Json::Null);
+    });
+}
+
+/// The sort is a view of a run's result: a replay has no result to sort, and undo is for staged
+/// edits (in a query tab Ctrl+Z is the editor's).
+#[test]
+fn sort_result_is_not_journaled_or_undoable() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        let journal = s.journal().to_vec();
+        let undo_off = |s: &mut Session| {
+            for id in ["edit.undo", "edit.redo"] {
+                assert_eq!(s.execute(id, json!({})).unwrap_err().code(), "disabled", "{}: {id}", t.name());
+            }
+        };
+        undo_off(s);
+        sort_result(s, json!({ "column": 0, "dir": "desc" }));
+        sort_result(s, json!({ "column": 1 }));
+        assert_eq!(s.journal(), journal, "{}: the journal took a sort", t.name());
+        assert!(!s.journal().iter().any(|(id, _)| id == "query.sortResult"));
+        // Nothing to undo or redo, and asking changes nothing.
+        let sorted = (sort_of(s, 0), grid_rows(s));
+        undo_off(s);
+        assert_eq!((sort_of(s, 0), grid_rows(s)), sorted, "{}", t.name());
+        let info = s.commands().into_iter().find(|c| c.id == "query.sortResult").expect("the command is registered");
+        assert!(info.enabled && info.menu.is_empty() && info.shortcut.is_none(), "{info:?}");
+    });
+}
+
+#[test]
+fn sort_result_works_while_the_connection_is_lost_and_while_a_run_goes() {
+    let _db = require_testdb!();
+    for_each_engine_exclusive(|t, s| {
+        tab(s, UNSORTED);
+        run(s, "query.run", json!({}));
+        // While the tab's next run goes, the last run's result is still the one shown.
+        let m = marker();
+        run(s, "query.setText", json!({ "text": slow_with(t, &m) }));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        assert_eq!(shown(s)["running"], json!(job.0), "{}", t.name());
+        assert_eq!(sort_result(s, json!({ "column": 0, "dir": "desc" }))["sort"]["dir"], "desc", "{}", t.name());
+        assert_eq!(grid_rows(s), ["100|fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
+        run(s, "query.cancel", json!({}));
+        assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        run(s, "query.setText", json!({ "text": UNSORTED }));
+        run(s, "query.run", json!({}));
+        kill_dbee_connections(t, s);
+        // A command that needs the database finds the connection gone.
+        assert_eq!(run_err(s, "schema.refresh", json!({})).code(), "connectionLost", "{}", t.name());
+        assert_eq!(s.inspect()["connection"]["lost"], true);
+        assert_eq!(s.execute("query.run", json!({})).unwrap_err().code(), "disabled");
+        // The rows are still there, and sort without the database.
+        assert_eq!(s.enabled("query.sortResult"), Ok(()));
+        assert_eq!(sort_result(s, json!({ "column": 1 }))["sort"], json!({ "column": 1, "name": "t", "dir": "asc" }), "{}", t.name());
+        assert_eq!(grid_rows(s), ["10|Apple", "9|apple", "100|fig", "2|pear"], "{}", t.name());
+        assert_eq!(s.inspect()["jobs"], json!([]), "{}: a sort starts no job", t.name());
+    });
 }

@@ -5,6 +5,7 @@ use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, code, is_word, word};
 use crate::refusal::{CHAIN, CHANGES_MODE, Code, READ_WRITE, Refusal};
+use dbee_core::sort::Nulls;
 
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
@@ -22,6 +23,7 @@ pub(crate) const RULES: Rules = Rules {
     // error, one in a /* */ comment is ignored, and one followed only by spaces ends the
     // statement there, so the engine refuses every NUL outside a string literal.
     text_holds_nul: true,
+    nulls: Nulls::First,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Eq, Op::Ne, Op::Like, Op::NotLike], "Compares by the column's collation; most ignore upper and lower case.")],
     schema_word: ("database", "Databases"),

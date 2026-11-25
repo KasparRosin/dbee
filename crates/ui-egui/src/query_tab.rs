@@ -29,9 +29,14 @@
 //!   hairline under it: none after dbee's own cancel, which the bar says; with ROLLBACK while the
 //!   connection's transaction has failed (`query.rollback`, off while a run, a commit or a
 //!   rollback goes on the connection: [`can_end`]), whose outcome is a toast;
-//! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
-//!   selecting and copying work, and the value panel follows the selected cell). A statement
-//!   without rows draws nothing there: the bar says what it did. With no result yet, nothing.
+//! - the shown result: a grid that edits nothing ([`crate::grid`]: no editing, no links;
+//!   selecting and copying work, and the value panel follows the selected cell). A click on a
+//!   column's header sorts the result by it, in memory (`query.sortResult`: asc, desc, then the
+//!   order the server sent; the header shows the arrow, as a table tab's does): the rows are read
+//!   in the result's order ([`Shown`]), each result keeps its own, and a new run shows its
+//!   results as they came. Of a result the cap cut, the header's hover says it sorts the rows
+//!   loaded ([`sort_hint`]). A statement without rows draws nothing there: the bar says what it
+//!   did. With no result yet, nothing.
 //!
 //! The editor and the run row take the body's whole width. The result bar, the band and the grid
 //! are the results column: they take it too while the value panel is shut, and stand beside it
@@ -134,7 +139,7 @@ use crate::components::results::{ResultAsked, ResultBar, ResultTab, RunAsked, Ru
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
-use crate::grid::{Grid, GridAct, GridState, RowEdits};
+use crate::grid::{Grid, GridAct, GridSource, GridState, RowEdits};
 use crate::quiet::Watch;
 use crate::theme::{
     self, Text,
@@ -225,6 +230,37 @@ fn rows_word(n: u64) -> String {
 fn cut_notice(kept: usize, seen: u64) -> String {
     let total = rows_word(seen);
     format!("First {} of {total}", thousands(kept as u64))
+}
+
+/// What the header's hover says a click does on a result the cap cut: it sorts the rows loaded,
+/// not the statement's. `None` for a whole result, which says the grid's own words.
+fn sort_hint(result: &ResultSet) -> Option<String> {
+    (!result.complete).then(|| format!("Sort the {} loaded by this column", rows_word(result.rows.len() as u64)))
+}
+
+/// A result's rows as the grid reads them: in the order its sort gives them
+/// ([`StatementOutcome::cell`]), under the result's own columns.
+struct Shown<'a>(&'a StatementOutcome);
+
+impl GridSource for Shown<'_> {
+    fn columns(&self) -> usize {
+        self.0.result.columns()
+    }
+    fn column_name(&self, col: usize) -> &str {
+        self.0.result.column_name(col)
+    }
+    fn column_type(&self, col: usize) -> &str {
+        self.0.result.column_type(col)
+    }
+    fn rows(&self) -> usize {
+        GridSource::rows(&*self.0.result)
+    }
+    fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        self.0.cell(row, col)
+    }
+    fn right_aligned(&self, col: usize) -> bool {
+        self.0.result.right_aligned(col)
+    }
 }
 
 /// What a result with rows holds: `3 rows`, or the cap notice when a cap cut it.
@@ -1366,15 +1402,17 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         }
         match shown {
             Some(o) if !o.result.columns.is_empty() => {
-                let data: &ResultSet = &o.result;
+                let source = Shown(o);
+                let hint = sort_hint(&o.result);
                 let grid = Grid {
                     id: Id::new(("dbee-result-grid", state.results.run, q.shown)),
-                    source: data,
+                    source: &source,
                     keys: &[],
                     selection: q.selection,
-                    sort: None,
-                    sortable: false,
+                    sort: o.sort().map(|sort| (sort.column, sort.dir)),
+                    sortable: true,
                     blocked: None,
+                    sort_hint: hint.as_deref(),
                     edits: RowEdits::None,
                     links: false,
                     first_number: 1,
@@ -1394,8 +1432,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                         }
                         GridAct::SelectRows { first, last } => runs.push(("selection.rows", json!({ "first": first, "last": last }))),
                         GridAct::Copy(format) => runs.push(("clipboard.copy", json!({ "format": format }))),
-                        // Read-only: no sorting, editing or links.
-                        GridAct::Sort(_) | GridAct::Follow { .. } | GridAct::SetNull { .. } | GridAct::DeleteRows(_) | GridAct::Edit { .. } => {}
+                        GridAct::Sort(column) => runs.push(("query.sortResult", json!({ "column": column }))),
+                        // No editing and no links.
+                        GridAct::Follow { .. } | GridAct::SetNull { .. } | GridAct::DeleteRows(_) | GridAct::Edit { .. } => {}
                     }
                 }
             }

@@ -72,7 +72,9 @@
 //! `timestamptz` for `timestamp with time zone`); a name or type that does not fit is cut with
 //! `…`, the sort mark keeping its room at any width ([`Header::paint`]). The hover says the whole
 //! name and type, as the database writes it, whenever the header shows less, then what a click
-//! does.
+//! does: on a table tab it sorts in the database (`table.sort`, a new page), on a query tab it
+//! sorts the result's rows in memory (`query.sortResult`), which the hover of a result the cap cut
+//! says ([`Grid::sort_hint`]).
 //!
 //! Automation ids: `grid-header-<col>` (value `{name, type, shown, cut, key, sort}`: `type` the
 //! whole type, `shown` the one drawn, `cut` whether the name or it was cut), `grid-cell-<row>-<col>`
@@ -284,6 +286,9 @@ pub struct Grid<'a> {
     /// Why sorting cannot run now (staged changes, a lost connection), shown on a header's hover;
     /// a click still asks, and the command says why.
     pub blocked: Option<&'a str>,
+    /// What a header's hover says a click does, where it is not `Sort by this column`: a query
+    /// result the cap cut says it sorts the rows loaded.
+    pub sort_hint: Option<&'a str>,
     /// Whether the menu offers Set as NULL and Delete row.
     pub edits: RowEdits<'a>,
     /// Foreign key cells of the selected row show the link that follows them.
@@ -693,9 +698,10 @@ impl Grid<'_> {
     fn head_hint(&self, col: usize, cut: bool) -> Option<String> {
         let (name, ty) = (self.source.column_name(col), self.source.column_type(col));
         let whole = (cut || short_type(ty) != ty).then(|| if ty.is_empty() { name.to_owned() } else { format!("{name} {ty}") });
+        let does = self.sort_hint.unwrap_or("Sort by this column");
         let sort = match (self.sortable, self.blocked) {
-            (true, None) => Some("Sort by this column".to_owned()),
-            (true, Some(why)) => Some(format!("Sort by this column: not now, {why}")),
+            (true, None) => Some(does.to_owned()),
+            (true, Some(why)) => Some(format!("{does}: not now, {why}")),
             (false, _) => None,
         };
         match (whole, sort) {
