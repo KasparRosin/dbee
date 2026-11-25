@@ -1361,7 +1361,7 @@ mod tests {
             assert!(s.state.tabs == before.1, "{params} changed the tab");
         }
         // Text descending, as left before the hostile params: NULL first (no connection reads as
-        // Postgres), the short row's missing cell is NULL too, and ties keep the received order.
+        // Postgres), and the short row's missing cell is NULL too.
         assert_eq!(copied(&mut s), "9|/10|b/100|a/|A");
         // Numbers ascending; the selection stays, and the copy and the value are of the rows shown.
         done(&mut s, "selection.set", json!({ "anchor": [0, 0], "focus": [1, 1] }));

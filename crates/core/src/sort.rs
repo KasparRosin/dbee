@@ -192,8 +192,10 @@ pub const NUMBER_BYTES: usize = 1024;
 /// any spelling (`1`, `1.0`, `0.1e1`, `001`) reads as the same three, so two numbers compare by
 /// a few slice comparisons, whatever their length.
 ///
-/// **Past the exponent's bound** the order is by a rule, not by value. `top` saturates at the
-/// ends of an `i64`, so of two numbers whose place is at or past an end, the digits decide:
+/// **Near the exponent's bound** the order is by a rule, not by value. The written exponent
+/// saturates at the ends of an `i64` before the digits' place is counted in, and `top` saturates
+/// there too, so of two numbers whose exponent is at an end or within the cell's length of it,
+/// the digits decide:
 /// `9e9223372036854775806` sorts above `1e9223372036854775807`, though it is the smaller, and
 /// `1e9223372036854775807` equals `10e9223372036854775807`. No database prints such a number.
 /// The order stays total there (`numbers_past_the_exponent_bound_keep_a_total_order`).
@@ -386,6 +388,9 @@ mod tests {
         let long = "1".repeat(NUMBER_BYTES + 1);
         assert_eq!(eq(&long, "2"), Ordering::Greater);
         assert_eq!(eq(&"1".repeat(NUMBER_BYTES), "2"), Ordering::Greater, "a number, and the larger");
+        // The bound itself: zeros are zero up to it, and text one byte past it.
+        assert_eq!(eq(&"0".repeat(NUMBER_BYTES), "0"), Ordering::Equal, "still a number");
+        assert_eq!(eq(&"0".repeat(NUMBER_BYTES + 1), "0"), Ordering::Greater, "text, after the numbers");
         assert_eq!(eq(&format!("0.{}", "0".repeat(NUMBER_BYTES - 3)), "0"), Ordering::Equal);
         // No numbers: they are text, after the numbers.
         for text in ["", "-", "+", ".", "e5", "1e", "1e+", "1.2.3", "1 ", " 1", "0x10", "1,000", "١", "--1", "1e5e5"] {
@@ -464,7 +469,7 @@ mod tests {
         assert_eq!(cmp("1e9223372036854775807", "10e9223372036854775807"), Ordering::Equal);
         assert_eq!(cmp("1e9223372036854775807", "1e99999999999999999999999999"), Ordering::Equal);
         assert_eq!(cmp("0.01e-9223372036854775808", "0.001e-9223372036854775808"), Ordering::Equal);
-        assert_eq!(cmp("1e-9223372036854775808", "0.1e-9223372036854775808"), Ordering::Greater, "not yet at the bound: by value");
+        assert_eq!(cmp("1e-9223372036854775808", "0.1e-9223372036854775808"), Ordering::Greater, "the digits' place still tells these two apart");
         // Below the bound it is by value.
         assert_eq!(cmp("9e9223372036854775805", "1e9223372036854775806"), Ordering::Less);
         assert_eq!(cmp("1e9223372036854775805", "10e9223372036854775804"), Ordering::Equal);
