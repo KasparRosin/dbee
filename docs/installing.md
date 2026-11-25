@@ -1,6 +1,6 @@
 # Installing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (new: how a copy learns of a newer release)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor (macOS: the disk image itself is blocked, and how to open it)
 
 Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
 
@@ -8,11 +8,21 @@ dbee's builds aren't signed (see [releasing.md](releasing.md), "Signing"). macOS
 
 ## macOS (11 or later, Intel and Apple silicon)
 
-1. Open `dbee-<version>-macos-universal.dmg` and drag dbee to Applications.
-2. Open dbee. macOS says it can't check it for malicious software; close that.
-3. Open System Settings → Privacy & Security, find the line about dbee under Security, press **Open Anyway** and confirm.
+1. Download `dbee-<version>-macos-universal.dmg`.
+2. In Terminal, unblock it and open it:
 
-From then on dbee opens normally. On macOS 14 or older, Control-click dbee in Applications and choose Open also works. From a terminal, the same in one step: `xattr -dr com.apple.quarantine /Applications/dbee.app`.
+   ```sh
+   xattr -d com.apple.quarantine ~/Downloads/dbee-*-macos-universal.dmg
+   open ~/Downloads/dbee-*-macos-universal.dmg
+   ```
+
+If macOS blocks the app when you open it:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/dbee.app
+```
+
+Without Terminal: after macOS refuses the file, open System Settings → Privacy & Security and press **Open Anyway**.
 
 The command-line tool is `dbee-cli-<version>-macos-universal.zip`.
 
