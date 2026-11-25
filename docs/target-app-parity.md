@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (checked against the M3 tree: the Query and Data rows and "What works today" say what the cell editor, the value panel, the error band and the tracked transaction do; "Effort and calibration" keeps the dates and counts; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor ("What works today": a query's result sorted by a header click; "Performance": what that sort costs at the cap; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -110,6 +110,8 @@ The launch check, a release build to the connection screen with the window shown
 
 The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 40.3 s and 39.8 s on 2026-11-05 (the load was not recorded for those two), 91.9 s in that day's `--ignored` run (load 22.14 at its start), and 37.6 s on 2026-11-06 (load 7.79 at its start, 5.70 at its end).
 
+Sorting a query result at the cap (`query.sortResult`, 10,000 rows, in the frame of the click) took 2.4 ms for numbers, 9.4 ms for short texts, 7.2 ms for 10,000 copies of one 20 kB text and 199 ms for 10,000 texts of 20 kB that differ in case at their first character, the worst the text rule meets (medians of 5; targets 16 ms, and 500 ms for the last). Measured 2026-11-25 on an Intel Core i5-14400F (16 threads) in the dev container, dev profile, at a load average of 3.51 / 5.52 / 4.14, with `a_sort_of_ten_thousand_rows_within_a_frame` (`crates/core/src/sort.rs`).
+
 Beekeeper Studio's own timings were not measured.
 
 ## Platforms
@@ -139,7 +141,7 @@ Agent hours were not logged in either, so per-area hours are not estimated yet. 
 - **Browsing:** a schema tree with a filter (databases on MySQL and MariaDB); quick search (Ctrl+P) over the tables and the saved connections, switching connection; table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging by 100, estimated and exact counts, and foreign keys followed into a filtered tab.
 - **Editing:** staged edits (an editor in the cell for every type, the value panel showing the same draft and taking new lines; set NULL, add and delete rows), undo and redo, and Apply or Ctrl+S in one transaction, all or nothing.
 - **Values:** a value panel with the whole value of a cell, or a selected row as JSON, JSON pretty-printed and coloured, selectable and copyable.
-- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results; an error band that jumps to the position, with ROLLBACK under a failed transaction; an open transaction shown in the status bar and asked about on close; on MySQL and MariaDB the database a tab runs in.
+- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results, each sorted in memory by a click on a column header; an error band that jumps to the position, with ROLLBACK under a failed transaction; an open transaction shown in the status bar and asked about on close; on MySQL and MariaDB the database a tab runs in.
 - **Copying:** values, with a header, or as CSV, JSON or Markdown, up to 8 MiB.
 - **Structure:** a table tab's STRUCTURE, read-only: columns, indexes, foreign keys, the keys that reference the table, triggers.
 - **Look:** M3's redesign on every screen built so far, in light and dark; nothing that waits shows before it has run 300 ms.
@@ -153,6 +155,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | "What works today": a query's result is sorted in memory by a header click. "Performance": the sort's cost at the 10,000-row cap. No grade changes: what Beekeeper Studio does there was not observed. |
 | 2026-11-23 | minor | Checked against the M3 tree. Query: what dbee does with a transaction a script opens (manual transactions still missing). Data: the value panel shows a selected row and an edited cell's draft. "What works today": the cell editor, the error band, the transaction. "Effort and calibration" keeps the dates and counts only. Grades unchanged. |
 | 2026-11-20 | minor | M3's screens: Structure 40 % (2 of 5, read-only; estimated), App 12 % (light and dark themes), features ~38 %, overall ~30 % (estimated); UI ~45 % stands (24 elements, 3 done, 18 partial); what works today gains Structure and the look. |
 | 2026-11-08 | minor | Platforms: the first test release built every row (2026-10-29), regular CI builds Linux only; M2 effort; import and export are M4 (M3 is the Redesign). |
