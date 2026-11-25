@@ -1,6 +1,6 @@
 # .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
-# the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand env vars in `src`) and
-# exports VERSION and NFPM_ARCH.
+# the file tree, substitutes its path for ${STAGE} and the markers' folder for ${MARKERS} (nfpm
+# doesn't expand env vars in `src`) and exports VERSION and NFPM_ARCH.
 #
 #   nfpm package -f packaging/linux/nfpm.yaml -p deb -t dist/release/
 name: dbee
@@ -67,6 +67,15 @@ contents:
   - src: ${STAGE}/usr/share/
     dst: /usr/share/
     type: tree
+  # How this copy was installed, one word, for the app's update button: each packager its own.
+  - src: ${MARKERS}/deb
+    dst: /usr/share/dbee/install-kind
+    packager: deb
+    file_info: { mode: 0644 }
+  - src: ${MARKERS}/rpm
+    dst: /usr/share/dbee/install-kind
+    packager: rpm
+    file_info: { mode: 0644 }
 
 scripts:
   postinstall: packaging/linux/postinst.sh

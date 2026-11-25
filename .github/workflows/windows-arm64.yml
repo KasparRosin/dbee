@@ -74,6 +74,13 @@ jobs:
             Write-Output "ok $path (ARM64)"
           }
 
+          # How this copy was installed, for the app's update button: the one word `msi`.
+          $marker = Join-Path $dir 'install-kind'
+          if (-not (Test-Path $marker)) { throw "the install-kind marker is not installed in $dir" }
+          $word = [System.IO.File]::ReadAllText($marker)
+          if ($word -ne 'msi') { throw "the install-kind marker should be 'msi', but is '$word'" }
+          Write-Output "ok $marker (msi)"
+
           $cli = Join-Path $dir $cliExeName
           $out = & $cli --version 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { Write-Output $out; throw "$cli --version exited $LASTEXITCODE" }

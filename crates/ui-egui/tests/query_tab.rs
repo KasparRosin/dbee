@@ -938,6 +938,7 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_drivers::all(),
+        updates: None,
     })
     .unwrap();
     let mut app = DbeeApp::new(session, None);
@@ -1054,6 +1055,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_drivers::all(),
+        updates: None,
     })
     .unwrap();
     let mut app = DbeeApp::new(session, None);

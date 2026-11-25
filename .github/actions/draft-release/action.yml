@@ -1,5 +1,5 @@
 name: "Draft GitHub Release"
-description: "Collects release artifacts, computes sha256 checksums, and creates or updates a draft GitHub Release"
+description: "Collects release artifacts, computes sha256 checksums, signs them, and creates or updates a draft GitHub Release"
 
 inputs:
   version:
@@ -9,6 +9,10 @@ inputs:
     description: "Whether release is marked as prerelease"
     required: false
     default: "false"
+  signing-key:
+    description: "The release key: an ed25519 private key in PEM (PKCS#8). Empty: the release is not signed"
+    required: false
+    default: ""
   github-token:
     description: "GitHub token for authenticating gh CLI"
     required: true
@@ -27,7 +31,38 @@ runs:
       shell: bash
       working-directory: artifacts
       run: |
+        rm -f SHA256SUMS.txt SHA256SUMS.txt.sig
         sha256sum -- * | tee SHA256SUMS.txt
+
+    # The signature is the 64 raw bytes of ed25519 over the checksum file, which the app will
+    # check against the keys compiled into it before it installs anything
+    # (crates/update/src/signature.rs; no copy fetches it yet).
+    - name: Sign the checksums
+      shell: bash
+      working-directory: artifacts
+      env:
+        SIGNING_KEY: ${{ inputs.signing-key }}
+      run: |
+        if [ -z "$SIGNING_KEY" ]; then
+          echo "::warning::The release is not signed: RELEASE_SIGNING_KEY is empty. Add it to the release environment (docs/releasing.md)."
+          exit 0
+        fi
+        key="$(mktemp "$RUNNER_TEMP/release-key.XXXXXX")"
+        trap 'rm -f "$key"' EXIT
+        printf '%s\n' "$SIGNING_KEY" >"$key"
+        openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS.txt -out SHA256SUMS.txt.sig
+        [ "$(stat -c %s SHA256SUMS.txt.sig)" = 64 ] || { echo "::error::The signature is not 64 bytes long."; exit 1; }
+
+    # With a key pinned in this tree, a release without a signature by it is refused here, before
+    # anyone can publish it. The keys are this release's own: the copies in use hold the keys of
+    # the release they were built from (docs/releasing.md, replacing a key).
+    - name: Check the release as the app will
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        rustup toolchain install
+        cargo run --locked -p dbee-update --example check_release -- artifacts "$VERSION"
 
     - name: Create or update draft release
       shell: bash

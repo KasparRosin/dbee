@@ -7,6 +7,11 @@
 #   $DIST/dbee-<version>-linux-<arch>.rpm       Fedora, openSUSE, RHEL, ...
 #   $DIST/dbee-<version>-linux-<arch>.tar.gz    plain FHS-style tree (bin/, share/)
 #
+# The .deb, the .rpm and the .tar.gz each carry a one-word marker, share/dbee/install-kind (`deb`,
+# `rpm`, `tar`), which tells the app how it was installed, so its update button knows what it
+# can do. The staged tree every format shares holds none: the AppImage must not carry one, and
+# the Flatpak bundle is built from the tarball without it (flatpak-bundle.sh).
+#
 # Usage: packaging/linux/package.sh [--skip-build] [--formats "appimage deb rpm tar"]
 #
 # Needs: cargo; nfpm for deb/rpm (https://nfpm.goreleaser.com); appimagetool for the AppImage
@@ -82,12 +87,30 @@ fi
 
 has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# The install-kind markers, one file per word, outside the staged tree.
+MARKERS="$WORK/install-kind"
+mkdir -p "$MARKERS"
+for kind in deb rpm tar; do printf '%s\n' "$kind" >"$MARKERS/$kind"; done
+
+# check_marker <word> <what was read from the package>: the package carries exactly that word.
+check_marker() {
+  if [ "$2" = "$1" ]; then
+    echo "ok: the install-kind marker is '$1'"
+  else
+    echo "error: the install-kind marker should be '$1', but is '$2'" >&2
+    exit 1
+  fi
+}
+
 # ---- .tar.gz ------------------------------------------------------------------------------------
 if has tar; then
   mkdir -p "$WORK/tar"
   cp -R "$STAGE/usr" "$WORK/tar/$BASENAME"
+  # Into the tarball's own tree only, never into $STAGE.
+  install -Dm644 "$MARKERS/tar" "$WORK/tar/$BASENAME/share/dbee/install-kind"
   tar -C "$WORK/tar" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"
   echo "wrote $DIST/$BASENAME.tar.gz"
+  check_marker tar "$(tar -xzOf "$DIST/$BASENAME.tar.gz" "$BASENAME/share/dbee/install-kind")"
 fi
 
 # ---- .deb / .rpm --------------------------------------------------------------------------------
@@ -96,16 +119,37 @@ if has deb || has rpm; then
   export VERSION
   export NFPM_ARCH="$DEB_ARCH"
   # nfpm expands env vars in fields like `version` and `arch`, but not in `contents[].src`.
-  sed "s|\${STAGE}|$STAGE|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
+  sed -e "s|\${STAGE}|$STAGE|g" -e "s|\${MARKERS}|$MARKERS|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
   for fmt in deb rpm; do
     if has "$fmt"; then (cd "$ROOT" && nfpm package -f "$WORK/nfpm.yaml" -p "$fmt" -t "$DIST/$BASENAME.$fmt"); fi
   done
+  # Each package carries its own marker, read back from the file that ships, where this machine
+  # has the tool to open it.
+  if has deb; then
+    if command -v dpkg-deb >/dev/null; then
+      check_marker deb "$(dpkg-deb --fsys-tarfile "$DIST/$BASENAME.deb" | tar -xO ./usr/share/dbee/install-kind)"
+    else
+      warn "dpkg-deb not found, so the .deb's install-kind marker was not checked"
+    fi
+  fi
+  if has rpm; then
+    if command -v rpm2cpio >/dev/null && command -v cpio >/dev/null; then
+      check_marker rpm "$(rpm2cpio "$DIST/$BASENAME.rpm" | cpio --quiet -i --to-stdout '*usr/share/dbee/install-kind')"
+    else
+      warn "rpm2cpio or cpio not found, so the .rpm's install-kind marker was not checked"
+    fi
+  fi
 fi
 
 # ---- AppImage -----------------------------------------------------------------------------------
 if has appimage; then
   APPDIR="$WORK/dbee.AppDir"
   cp -R "$STAGE" "$APPDIR"
+  # An AppImage is known by $APPIMAGE; a marker in it would name another format.
+  if [ -n "$(find "$APPDIR" -name install-kind)" ]; then
+    echo "error: the AppImage's tree carries an install-kind marker" >&2
+    exit 1
+  fi
   mv "$APPDIR/usr/share/doc" "$WORK/doc-unused"
   ln -s usr/bin/dbee "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"

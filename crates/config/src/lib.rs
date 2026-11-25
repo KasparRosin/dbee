@@ -14,5 +14,8 @@ pub use connection::{
 };
 pub use kind::mysql::ALLOW_PUBLIC_KEY;
 pub use secrets::{KeyringStore, MemoryStore, SavedFor, SecretError, SecretKind, SecretStore, StoredSecret, keyring_store};
-pub use settings::{SETTINGS_FILE, SETTINGS_VERSION, SaveError, ThemeChoice, load_theme, save_theme};
+pub use settings::{
+    SETTINGS_FILE, SETTINGS_VERSION, SaveError, ThemeChoice, load_theme, load_update_check, read_small_file, save_theme, save_update_check,
+    write_small_file,
+};
 pub use store::{ConnectionStore, RecentEntry};

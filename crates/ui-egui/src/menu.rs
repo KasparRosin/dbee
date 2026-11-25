@@ -11,6 +11,11 @@
 //! with the params of its shortcut's row ([`SHORTCUTS`]), so an entry does what its keys do (Copy
 //! copies as tab-separated values); without a shortcut, with `{}`.
 //!
+//! At the bar's right end stands the update button ([`crate::components::update`]) while the
+//! session knows a newer release (`update-button`, and `update-retry` after a failed install); it
+//! is not drawn when the titles leave it no room. A click runs `app.update`
+//! ([`DbeeApp::update_clicked`]).
+//!
 //! Automation ids: `menu-<Top>` for the top menus (`menu-File`) and `menu-<command id>` for the
 //! entries (`menu-tab.newQuery`), with the value `{label, shortcut, why?, checked?}`; a submenu's
 //! button is tagged with its path (`menu-View-Theme`). Entries are drawn
@@ -25,6 +30,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::menu::{self, Item};
 use crate::components::tooltip::Hint;
+use crate::components::update::{RETRY, UpdateButton};
 use crate::shortcuts::SHORTCUTS;
 
 /// The top menus that come first, in this order.
@@ -67,17 +73,40 @@ pub(crate) fn bar_taking(app: &mut DbeeApp, ui: &mut egui::Ui, taken: &[(&str, O
     }
     let mut chosen: Option<&'static str> = None;
     let checked = crate::ui_commands::theme_id(app.theme_choice);
+    let update = app.update_look();
+    let mut update_clicked = false;
     let tags = &mut app.tags;
     menu::bar(ui, |ui| {
+        let row = ui.max_rect();
+        let mut titles_right = row.left();
         MenuBar::new().ui(ui, |ui| {
             // The titles stand side by side: each holds its own room around its word.
             ui.spacing_mut().item_spacing.x = 0.0;
             for top in tops(&commands) {
                 let (r, _) = menu::bar_title(ui, top, |ui| entries(ui, &commands, &[top], checked, tags, &mut chosen));
+                titles_right = titles_right.max(r.rect.right());
                 tags.tag(&format!("menu-{top}"), &r);
             }
-        })
+        });
+        let Some(look) = &update else { return };
+        let button = UpdateButton::new(look);
+        // Short of room after the titles, it is not drawn.
+        let Some(shown) = button.show_in_bar(ui, row, titles_right) else { return };
+        let mut value = json!({ "state": look.id(), "label": look.words() });
+        if let crate::components::update::UpdateLook::Failed { reason } = look {
+            value["reason"] = json!(reason);
+        }
+        tags.tag_value_as("update-button", &shown.main, value, shown.main.sense.senses_click());
+        update_clicked = shown.main.clicked();
+        if let Some(retry) = &shown.retry {
+            tags.tag_value("update-retry", retry, RETRY);
+            update_clicked |= retry.clicked();
+        }
     });
+    if update_clicked {
+        let ctx = ui.ctx().clone();
+        app.update_clicked(&ctx);
+    }
     let id = chosen?;
     if taken.iter().any(|(t, _)| *t == id) {
         return Some(id);

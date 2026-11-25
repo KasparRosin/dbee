@@ -25,6 +25,12 @@
 //!   run-isolated`) limits database files to those folders, and keeps SQL from opening other files
 //!   ([`SessionOptions::allowed_dirs`]). With `DBEE_ALLOW_TARGETS` set and this not, no folder is
 //!   allowed.
+//! - The update check ([`updates`]) asks GitHub for the newest release a few seconds after the
+//!   start and once a day. `DBEE_NO_UPDATE_CHECK=1` turns it off for good; it is also off in an
+//!   isolated run (`DBEE_ALLOW_TARGETS`), with `DBEE_NO_PREFS`, and in a development build (a
+//!   binary under a cargo target folder). `DBEE_UPDATE_MANIFEST_URL` and
+//!   `DBEE_UPDATE_PRETEND_VERSION` are test aids, taken only for `http://127.0.0.1:<port>`
+//!   (`docs/testing.md`).
 //! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
 //! - The session opens connections with every driver dbee ships (`dbee_drivers::all()`).
 //!
@@ -43,9 +49,10 @@ use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
 use dbee_config::{MemoryStore, SecretStore, keyring_store};
-use dbee_engine::{Session, SessionOptions};
+use dbee_engine::{Session, SessionOptions, Updates};
 use dbee_ssh::SshEnv;
 use dbee_ui_egui::{Clipboard, DbeeApp};
+use dbee_update::{FIRST_CHECK_DELAY, HttpFetch, InstallKind, MANIFEST_URL_ENV, PRETEND_VERSION_ENV, Platform, Repo, Source};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_ID: &str = "dev.rosin.dbee";
@@ -191,10 +198,67 @@ fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
         secrets: secret_store(),
         ssh: SshEnv::from_os(),
         notify: Some(notify),
+        updates: updates(allowed_targets.is_some()),
         allowed_targets,
         allowed_dirs,
         drivers: dbee_drivers::all(),
     }
+}
+
+/// Why this run never checks for updates, or `None` when it does. `no_check` is
+/// `DBEE_NO_UPDATE_CHECK` (anything but empty or `0` turns the check off), `isolated` an isolated
+/// run (`DBEE_ALLOW_TARGETS`), `prefs` whether the run keeps preferences (no `DBEE_NO_PREFS`),
+/// `development` a binary under a cargo target folder, and `test_source` a test server on this
+/// machine named by `DBEE_UPDATE_MANIFEST_URL`, which lifts the development rule alone, so a
+/// test can drive a development build's check.
+fn update_checks_off(no_check: Option<OsString>, isolated: bool, prefs: bool, development: bool, test_source: bool) -> Option<&'static str> {
+    if no_check.is_some_and(|v| !v.is_empty() && v != "0") {
+        Some("DBEE_NO_UPDATE_CHECK is set")
+    } else if isolated {
+        Some("an isolated run")
+    } else if !prefs {
+        Some("DBEE_NO_PREFS is set")
+    } else if development && !test_source {
+        Some("a development build")
+    } else {
+        None
+    }
+}
+
+/// What the session checks for updates with; `None` in a run that never checks
+/// ([`update_checks_off`]). The check reads GitHub's newest release of the repository the binary
+/// was built for; with a test source it reads that instead, keeps no answer, and takes the
+/// version `DBEE_UPDATE_PRETEND_VERSION` names as this copy's.
+fn updates(isolated: bool) -> Option<Updates> {
+    let test_source = std::env::var(MANIFEST_URL_ENV).ok().and_then(|url| Source::loopback(&url));
+    let development = std::env::current_exe().is_ok_and(|exe| dbee_update::is_development_build(&exe, &|path| path.exists()));
+    if let Some(why) = update_checks_off(std::env::var_os("DBEE_NO_UPDATE_CHECK"), isolated, prefs_enabled(), development, test_source.is_some()) {
+        log::info!("this run does not check for updates: {why}");
+        return None;
+    }
+    let repo = Repo::built_in();
+    let own = dbee_update::parse_version(VERSION).ok()?;
+    let (source, current) = match test_source {
+        Some(source) => {
+            let pretend = std::env::var(PRETEND_VERSION_ENV).ok().and_then(|v| dbee_update::parse_version(&v).ok());
+            log::info!("the update check reads a test server on this machine ({MANIFEST_URL_ENV})");
+            (source, pretend.unwrap_or(own))
+        }
+        None => (Source::GitHub(repo.clone()), own),
+    };
+    let kind = InstallKind::of_this_process();
+    log::info!("the update check is on: this copy is installed as `{}`", kind.id());
+    Some(Updates {
+        fetch: Arc::new(HttpFetch::new(&source, VERSION)),
+        installer: None,
+        current,
+        kind,
+        platform: Platform::current(),
+        repo,
+        automatic: true,
+        first_check: FIRST_CHECK_DELAY,
+        remember: !source.is_loopback(),
+    })
 }
 
 /// What the panic hook logs: where, not the message, which can quote cell values or SQL (the
@@ -352,6 +416,36 @@ mod start_tests {
 
     fn args(a: &[&str]) -> Vec<OsString> {
         a.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_update_check_is_off_where_it_must_be() {
+        let off = |no_check: Option<&str>, isolated, prefs, development, test_source| {
+            update_checks_off(no_check.map(OsString::from), isolated, prefs, development, test_source)
+        };
+        // An installed copy checks.
+        assert_eq!(off(None, false, true, false, false), None);
+        assert_eq!(off(Some(""), false, true, false, false), None);
+        assert_eq!(off(Some("0"), false, true, false, false), None);
+        // The variable, an isolated run, a run without preferences and a development build do not.
+        for value in ["1", "true", "yes", "off"] {
+            assert_eq!(off(Some(value), false, true, false, false), Some("DBEE_NO_UPDATE_CHECK is set"), "{value}");
+        }
+        assert_eq!(off(None, true, true, false, false), Some("an isolated run"));
+        assert_eq!(off(None, false, false, false, false), Some("DBEE_NO_PREFS is set"));
+        assert_eq!(off(None, false, true, true, false), Some("a development build"));
+        // A test server on this machine lifts the development rule, and no other.
+        assert_eq!(off(None, false, true, true, true), None);
+        assert_eq!(off(Some("1"), false, true, true, true), Some("DBEE_NO_UPDATE_CHECK is set"));
+        assert_eq!(off(None, true, true, true, true), Some("an isolated run"));
+        assert_eq!(off(None, false, false, true, true), Some("DBEE_NO_PREFS is set"));
+    }
+
+    /// The tests' own binary runs from a cargo target folder, so it never checks.
+    #[test]
+    fn this_test_binary_is_a_development_build() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(dbee_update::is_development_build(&exe, &|path| path.exists()), "{}", exe.display());
     }
 
     #[test]

@@ -39,6 +39,7 @@ use super::tab::{self, ListButton, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
+use super::update::{UpdateButton, UpdateLook};
 use super::value::{self, CopyButton, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
     BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, QS_LIST_GAP, QS_PAD, QS_ROW_H, QS_W,
@@ -106,7 +107,7 @@ const DIALOG_AT: Vec2 = vec2(100.0, 40.0);
 const BEHIND: &str = "select o.id, c.name as customer, o.total\nfrom shop.orders o\njoin shop.customers c on c.id = o.customer_id\nwhere o.total > 100\norder by o.id desc\nlimit 50;";
 
 /// The icons in the order the Icons section shows them.
-const ICONS: [Icon; 32] = [
+const ICONS: [Icon; 33] = [
     Icon::ChevronDown,
     Icon::KeyForeign,
     Icon::KeyPrimary,
@@ -139,6 +140,7 @@ const ICONS: [Icon; 32] = [
     Icon::SortDescending,
     Icon::SortAscending,
     Icon::ChevronRight,
+    Icon::Download,
 ];
 
 /// Sets dbee's fonts and theme on `ctx`, drawing in `theme`. The fonts are there from the next
@@ -192,6 +194,7 @@ pub fn show(ui: &mut Ui) {
         editor_sample(ui);
         structure_sample(ui);
         waiting(ui);
+        update_buttons(ui);
     });
 }
 
@@ -1635,6 +1638,45 @@ fn menus(ui: &mut Ui) {
 fn menu_bar(ui: &mut Ui, at: egui::Pos2, width: f32, titles: &[(&str, bool)]) -> Vec<Rect> {
     let mut bar = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(width, SLIM_BAR_H))).layout(Layout::top_down(Align::Min)));
     menu::bar(&mut bar, |ui| titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect())
+}
+
+/// The update button in each of its states, and where it stands in the menu bar.
+fn update_buttons(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    let download = UpdateLook::Download { to: "0.5.0".into() };
+    section(
+        ui,
+        "update button: update, updating with a percent and without, restart to update, update failed with retry, download; download hovered, focused",
+        SPACE_8,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_16;
+            for state in [
+                UpdateLook::Update { from: "0.4.0".into(), to: "0.5.0".into() },
+                UpdateLook::Updating { percent: Some(42) },
+                UpdateLook::Updating { percent: None },
+                UpdateLook::Restart,
+                UpdateLook::Failed { reason: "The download's checksum is wrong.".into() },
+                download.clone(),
+            ] {
+                UpdateButton::new(&state).show(ui);
+            }
+            UpdateButton::new(&download).look(hovered).show(ui);
+            UpdateButton::new(&download).look(focused).show(ui);
+        },
+    );
+    section(ui, "update button at the menu bar's right end, 12 from it; with no newer release the bar ends empty", SPACE_8, |ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(STRIP_W, SLIM_BAR_H), Sense::hover());
+        let mut bar = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+        menu::bar(&mut bar, |ui| {
+            let row = ui.max_rect();
+            let mut titles_right = row.left();
+            for title in ["File", "Edit", "View", "Query"] {
+                titles_right = titles_right.max(ui.add(BarTitle::new(title)).rect.right());
+            }
+            UpdateButton::new(&download).show_in_bar(ui, row, titles_right);
+        });
+    });
 }
 
 /// The boxed and text buttons in each of their states.

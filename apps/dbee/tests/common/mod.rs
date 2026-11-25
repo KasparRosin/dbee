@@ -67,6 +67,15 @@ fn token_file(home: &Path) -> PathBuf {
 
 /// The app as an isolated run starts it, on `port`, with a screenshot folder and its own token file.
 pub fn command(root: &Path, home: &Path, db: &TestDb, shots: &str, port: u16) -> Command {
+    let mut command = on_a_throwaway_home(root, home, shots, port);
+    command.env("DBEE_ALLOW_TARGETS", allowed(db)).env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap());
+    command
+}
+
+/// The app on `home` with in-memory secrets and clipboard, no SSH agent, its own token file and a
+/// screenshot folder: an isolated run's environment but for the allowed targets and folders,
+/// which [`command`] adds.
+fn on_a_throwaway_home(root: &Path, home: &Path, shots: &str, port: u16) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbee"));
     command
         .current_dir(root)
@@ -82,12 +91,16 @@ pub fn command(root: &Path, home: &Path, db: &TestDb, shots: &str, port: u16) ->
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("DBEE_SECRET_STORE", "memory")
         .env("DBEE_CLIPBOARD", "memory")
-        .env("DBEE_ALLOW_TARGETS", allowed(db))
-        .env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap())
         .env("DBEE_SCREENSHOT_DIR", root.join(shots))
         .env("DBEE_CONTROL_TOKEN_FILE", token_file(home))
         .env_remove("SSH_AUTH_SOCK")
-        .env_remove("DBEE_CONTROL_PORT");
+        .env_remove("DBEE_CONTROL_PORT")
+        .env_remove("DBEE_ALLOW_TARGETS")
+        .env_remove("DBEE_ALLOW_DIRS")
+        .env_remove("DBEE_NO_PREFS")
+        .env_remove("DBEE_NO_UPDATE_CHECK")
+        .env_remove("DBEE_UPDATE_MANIFEST_URL")
+        .env_remove("DBEE_UPDATE_PRETEND_VERSION");
     command
 }
 
@@ -130,6 +143,16 @@ impl App {
         App::launch(root, home, db, shots, &[], ports)
     }
 
+    /// The app on `home` with `env` set and no allowed targets: not an isolated run, so the
+    /// update check's own rules decide whether it checks. It opens no connection in these tests;
+    /// its manifest source must be a listener of the test's own on `127.0.0.1`, or none.
+    pub fn start_with_env(root: &Path, home: &Path, shots: &'static str, env: &[(&str, &str)]) -> App {
+        let port = free_port();
+        let mut command = on_a_throwaway_home(root, home, shots, port);
+        command.envs(env.iter().copied());
+        App::spawned(command, home, shots, port)
+    }
+
     fn launch(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr], ports: &[u16]) -> App {
         let port = free_port();
         let mut command = command(root, home, db, shots, port);
@@ -137,7 +160,12 @@ impl App {
             let also = ports.iter().map(|p| format!("127.0.0.1:{p}"));
             command.env("DBEE_ALLOW_TARGETS", std::iter::once(allowed(db)).chain(also).collect::<Vec<_>>().join(","));
         }
-        let child = command.args(args).spawn().unwrap();
+        command.args(args);
+        App::spawned(command, home, shots, port)
+    }
+
+    fn spawned(mut command: Command, home: &Path, shots: &'static str, port: u16) -> App {
+        let child = command.spawn().unwrap();
         let child = Running(child);
         // The channel listens before the window opens, and the file comes once it does.
         let token_file = token_file(home);

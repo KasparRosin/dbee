@@ -47,11 +47,12 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
-use dbee_engine::{CommandInfo, ConnectionId, EngineError, JobId, Json, Outcome, Screen, Session, Which};
+use dbee_engine::{CommandInfo, ConnectionId, EngineError, JobId, Json, Outcome, Screen, Session, UpdateState, Which};
 use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::toast::{self, Act, Kind, Toast};
+use crate::components::update::UpdateLook;
 use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Ending, Rerun};
@@ -136,6 +137,11 @@ fn not_saved(e: &dbee_config::SaveError) -> Words {
     }
 }
 
+/// The command the update button runs.
+const UPDATE: &str = "app.update";
+/// The command whose job an update check is.
+const CHECK_FOR_UPDATES: &str = "app.checkForUpdates";
+
 /// The window over one session.
 pub struct DbeeApp {
     pub(crate) session: Session,
@@ -177,6 +183,8 @@ pub struct DbeeApp {
     pub(crate) carry: Vec<egui::Event>,
     /// The file to open in the first frame that draws ([`DbeeApp::with_file`]).
     file: Option<PathBuf>,
+    /// The last page the window opened in the browser ([`DbeeApp::open_page`]).
+    opened_url: Option<String>,
 }
 
 /// Where copied text goes ([`DbeeApp::with_clipboard`]).
@@ -336,6 +344,7 @@ impl DbeeApp {
             system_mode: None,
             carry: Vec::new(),
             file: None,
+            opened_url: None,
         }
     }
 
@@ -404,6 +413,56 @@ impl DbeeApp {
 
     pub fn tags(&self) -> &Tags {
         &self.tags
+    }
+
+    /// What the update button says now, from the session's update state; `None` with no newer
+    /// release, when there is no button.
+    pub(crate) fn update_look(&self) -> Option<UpdateLook> {
+        Some(match &self.session.state().update {
+            UpdateState::None => return None,
+            UpdateState::Available(offer) => match &offer.action {
+                dbee_update::Action::Install { .. } => UpdateLook::Update { from: offer.from.to_string(), to: offer.to.to_string() },
+                dbee_update::Action::OpenPage { .. } => UpdateLook::Download { to: offer.to.to_string() },
+            },
+            UpdateState::Updating(_) => UpdateLook::Updating { percent: self.session.update_percent() },
+            UpdateState::Ready(_) => UpdateLook::Restart,
+            UpdateState::Failed { reason, .. } => UpdateLook::Failed { reason: reason.clone() },
+        })
+    }
+
+    /// A click on the update button or its RETRY: runs `app.update`, and opens the release's page
+    /// when that is what the offer does. An install shows its progress and its end in the button,
+    /// so only a refusal becomes a notice. A restart is not built yet: `RESTART TO UPDATE` does
+    /// nothing more.
+    pub(crate) fn update_clicked(&mut self, ctx: &egui::Context) {
+        match self.run(UPDATE, json!({})) {
+            Ok(Outcome::Done(answer)) => {
+                if answer["action"] == "openPage"
+                    && let Some(url) = answer["url"].as_str()
+                {
+                    self.open_page(ctx, url);
+                }
+            }
+            Ok(Outcome::Started(_)) => {}
+            Err(e) => self.notice(Kind::Error, notice_text(&e)),
+        }
+    }
+
+    /// Opens `url` in the browser: an HTTPS page only. With [`Clipboard::Memory`] (isolated runs
+    /// and tests) nothing leaves the app, and the URL is only kept, as [`DbeeApp::opened_url`].
+    pub(crate) fn open_page(&mut self, ctx: &egui::Context, url: &str) {
+        if !url.starts_with("https://") {
+            return;
+        }
+        self.opened_url = Some(url.to_owned());
+        if self.memory.is_none() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
+    }
+
+    /// The last page the window opened in the browser, or with [`Clipboard::Memory`] would have.
+    pub fn opened_url(&self) -> Option<&str> {
+        self.opened_url.as_deref()
     }
 
     /// Runs command `id`: a UI-only command ([`crate::ui_commands`]) or the engine's.
@@ -752,6 +811,11 @@ impl DbeeApp {
         self.hand_over_copies(&ctx);
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
+        }
+        // The automatic update check starts in a frame's pump: wake up for it. While a check
+        // runs, its job's end wakes the window.
+        if let Some(wait) = self.session.next_update_check().filter(|_| !self.session.running(CHECK_FOR_UPDATES)) {
+            ctx.request_repaint_after(wait);
         }
         // A mode chosen in this frame is set before the next one (`feed_input`).
         if control::needs_frames(self) || !self.carry.is_empty() || ctx.theme() != self.mode() {

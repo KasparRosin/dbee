@@ -1,4 +1,5 @@
-//! The settings file beside the connections file: `{"version": 1, "theme": "dark"}`.
+//! The settings file beside the connections file:
+//! `{"version": 1, "theme": "dark", "checkForUpdates": false}`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,25 @@ impl std::error::Error for SaveError {
 /// Saves it, keeping the file's other fields. `None` writes nothing. A newer dbee's file, or one
 /// whose version isn't a whole number, is left alone, and is an error.
 pub fn save_theme(dir: Option<&Path>, theme: ThemeChoice) -> Result<(), SaveError> {
+    save_field(dir, "theme", theme.as_str().into())
+}
+
+/// The field of the automatic update check.
+const CHECK_FOR_UPDATES: &str = "checkForUpdates";
+
+/// Whether the settings in `dir` leave the automatic update check on: off only when the file says
+/// `"checkForUpdates": false`. Anything missing or unreadable, and `None`, mean on.
+pub fn load_update_check(dir: Option<&Path>) -> bool {
+    dir.and_then(read_object).and_then(|map| map.get(CHECK_FOR_UPDATES).and_then(serde_json::Value::as_bool)).unwrap_or(true)
+}
+
+/// Saves whether the automatic update check is on, as [`save_theme`] saves the theme.
+pub fn save_update_check(dir: Option<&Path>, on: bool) -> Result<(), SaveError> {
+    save_field(dir, CHECK_FOR_UPDATES, on.into())
+}
+
+/// Sets one field of the file, keeping the others.
+fn save_field(dir: Option<&Path>, key: &str, value: serde_json::Value) -> Result<(), SaveError> {
     let Some(dir) = dir else { return Ok(()) };
     let file = dir.join(SETTINGS_FILE);
     let mut map = read_object(dir).unwrap_or_default();
@@ -87,13 +107,28 @@ pub fn save_theme(dir: Option<&Path>, theme: ThemeChoice) -> Result<(), SaveErro
         return Err(SaveError::Newer(file));
     }
     map.insert("version".into(), SETTINGS_VERSION.into());
-    map.insert("theme".into(), theme.as_str().into());
+    map.insert(key.into(), value);
     let written = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other).and_then(|mut bytes| {
         bytes.push(b'\n');
         private_dir(dir)?;
         replace_private_file(&file, &bytes)
     });
     written.map_err(|e| SaveError::Io(file, e))
+}
+
+/// The first `max` bytes of the file `name` in `dir`, for a small file of dbee's own kept beside
+/// the settings (the update check's last answer); `None` when it is missing, unreadable or
+/// larger.
+pub fn read_small_file(dir: &Path, name: &str, max: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(dir.join(name)).ok()?.take(max.checked_add(1)?).read_to_end(&mut bytes).ok()?;
+    (u64::try_from(bytes.len()).ok()? <= max).then_some(bytes)
+}
+
+/// Writes the file `name` in `dir` whole, private to this user, as the settings file is written.
+pub fn write_small_file(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    private_dir(dir)?;
+    replace_private_file(&dir.join(name), bytes)
 }
 
 #[cfg(test)]
@@ -184,6 +219,55 @@ mod tests {
         write(&th.home, r#"{"version":1}"#);
         save_theme(Some(&th.home), ThemeChoice::Light).unwrap();
         assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Light);
+    }
+
+    #[test]
+    fn the_update_check_is_on_unless_the_file_says_off() {
+        let th = dbee_testkit::temp_home(None, None);
+        assert!(load_update_check(None));
+        assert!(load_update_check(Some(&th.home)));
+        for text in [
+            "garbage{",
+            "[]",
+            r#"{"checkForUpdates": "no"}"#,
+            r#"{"checkForUpdates": 0}"#,
+            r#"{"checkForUpdates": null}"#,
+            r#"{"checkForUpdates": true}"#,
+        ] {
+            write(&th.home, text);
+            assert!(load_update_check(Some(&th.home)), "{text}");
+        }
+        write(&th.home, r#"{"version":1,"theme":"dark","checkForUpdates":false}"#);
+        assert!(!load_update_check(Some(&th.home)));
+        assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn the_update_check_and_the_theme_keep_each_other() {
+        let th = dbee_testkit::temp_home(None, None);
+        save_update_check(None, false).unwrap();
+        save_theme(Some(&th.home), ThemeChoice::Dark).unwrap();
+        save_update_check(Some(&th.home), false).unwrap();
+        assert!(!load_update_check(Some(&th.home)));
+        assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Dark);
+        save_theme(Some(&th.home), ThemeChoice::Light).unwrap();
+        assert!(!load_update_check(Some(&th.home)));
+        save_update_check(Some(&th.home), true).unwrap();
+        assert!(load_update_check(Some(&th.home)));
+        assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Light);
+        write(&th.home, r#"{"version":2}"#);
+        assert!(matches!(save_update_check(Some(&th.home), false), Err(SaveError::Newer(_))));
+    }
+
+    #[test]
+    fn a_small_file_comes_back_and_a_larger_one_does_not() {
+        let th = dbee_testkit::temp_home(None, None);
+        let dir = th.home.join("config");
+        assert_eq!(read_small_file(&dir, "note.json", 16), None);
+        write_small_file(&dir, "note.json", b"0123456789abcdef").unwrap();
+        assert_eq!(read_small_file(&dir, "note.json", 16).as_deref(), Some(&b"0123456789abcdef"[..]));
+        assert_eq!(read_small_file(&dir, "note.json", 15), None);
+        assert_eq!(read_small_file(&dir, "note.json", u64::MAX), None);
     }
 
     #[cfg(unix)]

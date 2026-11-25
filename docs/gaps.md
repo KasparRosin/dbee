@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-23 · **Change:** minor (the closed entries 63, 67, 85 and 86 are dropped as done entries are, 87 is titled for what is left of it; evidence and estimates state the facts without naming reviews, phases or who decided) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-25 · **Change:** minor (entry 59: the release key exists and is pinned; a signed release is left) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -402,12 +402,16 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** with many saved connections, the one you use most can be far down the list.
 - **Estimate:** 1 h (estimated). Left out of M3.
 
-### 59. No update check or update button (F)
+### 59. The update button only offers a download: no install step, and releases are not signed (F)
 
-- **Missing:** an update check and a button at the right end of the menu bar. With no update out it shows nothing. When one is out it reads `UPDATE 0.4.0 → 0.5.0`, and a click starts the update; the system asks for the password if it needs root (pkexec). While it runs it reads `UPDATING 42%`, then `RESTART TO UPDATE`, or `UPDATE FAILED` with the reason on hover and RETRY. A copy installed by a package manager or Flatpak shows `DOWNLOAD 0.5.0`, which opens the download page. Planned since 2026-11-10; its look is not designed yet.
-- **Evidence:** no update code in the tree; the version shows only on the connection screen (`crates/ui-egui/src/connections.rs`).
-- **Impact:** a user learns of a new version only by looking on GitHub.
-- **Estimate:** 8 h (estimated), once designed: the check is a new network request to GitHub, the download and install need a security review, and each package format updates in its own way.
+- **Exists:** the check and the button. A copy asks GitHub for the newest release's `SHA256SUMS.txt` a few seconds after it starts and once a day (one HTTPS GET; [`decisions.md`](decisions.md)), and when that release is newer, the right end of the menu bar reads `DOWNLOAD 0.5.0` on both screens: a click opens the release's page. With no newer release nothing is shown. The other states are drawn and the session's state machine runs them (`UPDATE 0.4.0 → 0.5.0`, `UPDATING 42%`, `RESTART TO UPDATE`, `UPDATE FAILED` with the reason on hover and `RETRY`), but only tests and the components showcase reach them, through an install step the tests bring. Each package carries a one-word marker of how it was installed, and the app reads it (`deb`, `rpm`, `tar`, `msi`, `portable`; AppImage, Flatpak and the macOS app are known without one).
+- **Missing:** the install step for each format: `.deb` and `.rpm` through pkexec (apt-get, dnf or zypper; the system asks for the password once per update), the AppImage, the `.tar.gz`, the Windows portable zip and MSI, and the macOS app. Flatpak and an unknown install keep `DOWNLOAD`. dbee itself never runs as root.
+- **Missing:** a signed release. The check for an ed25519 signature over `SHA256SUMS.txt` is written and tested (`crates/update/src/signature.rs`, with a signature made by openssl as the workflow makes one). The release key exists since 2026-11-25: its private half is the secret `RELEASE_SIGNING_KEY` of the `release` environment, its public half is in `PINNED_KEYS`, and the release workflow signs the file into `SHA256SUMS.txt.sig` and refuses to draft a release without a signature by it ([`decisions.md`](decisions.md), 2026-11-24). No release has run the signing step yet, so that the secret and the pinned key belong together is not yet shown, and 0.3.0 and earlier are unsigned. The app does not fetch the signature yet either. Until the app checks a release's signature nothing may be installed: the install step must refuse a manifest without a valid signature, and a file whose SHA-256 is not the manifest's.
+- **Missing:** the restart: `RESTART TO UPDATE` is drawn, and a click does nothing more yet.
+- **Limit:** the Windows and FreeBSD marker edits (`packaging/windows/`, `packaging/freebsd/package.sh`) were not built here; the Linux packages were, and each carries its marker (measured, 2026-11-23). No test runs on macOS or Windows, so the app bundle's detection is tested on pretend trees only.
+- **Evidence:** `crates/update` (its tests), `crates/engine/tests/update.rs`, `crates/ui-egui/tests/update.rs`, `apps/dbee/tests/update_check.rs` (the real window against a stand-in on `127.0.0.1`); `Updates::installer` is `None` in `apps/dbee/src/main.rs`; `.github/actions/draft-release/action.yml` (the signing and check steps), `crates/update/examples/check_release.rs`.
+- **Impact:** a user learns of a new version in the app, but still downloads and installs it by hand.
+- **Estimate:** 10 h (estimated): each format installs in its own way, the download and install need a security review, and Windows and macOS need a machine to run them on.
 
 ### 61. At the smallest window, three texts are cut and the filter's APPLY is out of view (U)
 
@@ -568,6 +572,9 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | Entry 59: the release key exists and its public half is pinned; no release is signed with it yet. |
+| 2026-11-24 | minor | Entry 59: the release key is a secret of the `release` environment; the release workflow signs `SHA256SUMS.txt` and checks the release as the app will. The key is not made yet. |
+| 2026-11-23 | minor | Entry 59 retitled for what is left of it: the update check, the button (`DOWNLOAD <version>` for every copy) and the packages' install-kind markers exist; installing per format, signed releases and the restart do not. |
 | 2026-11-23 | minor | Entries 63, 67, 85 and 86 dropped, closed on 2026-11-22 (86 as decided: one cell keeps copying as a TSV field); what 63 and 85 left stays true: a type longer than a 320-wide column is cut with `…` and read whole on hover, and a line break in a cell's one-line editor is a gap. Entry 87 titled for what is left. The entries after them keep their numbers. Evidence, estimates and revision rows state the facts without naming reviews, phases, screens or who decided. |
 | 2026-11-23 | minor | Entries 63 and 67 closed (the grid header since 2026-11-22: short type names, a first width that counts the type in the data font, the whole name and type on hover). Entry 88 added: the cell's editor and the value panel's text keep separate undo histories over one draft (not reproduced). |
 | 2026-11-23 | minor | Entry 87 decided: `text_selection` is a colour of its own (`#3D3D3D` in dark, `#D8D8D8` in light, provisional), behind selected text everywhere; `selection` is unchanged; dark's `text_muted` on it is 4.46 to 1. |

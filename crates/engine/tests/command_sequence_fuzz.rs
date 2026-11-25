@@ -56,6 +56,9 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("query.commit", &[("tab", Hint::Tab)]),
     ("query.rollback", &[("tab", Hint::Tab)]),
     ("tab.close", &[("tab", Hint::Tab), ("force", Hint::Bool)]),
+    ("app.checkForUpdates", &[]),
+    ("app.update", &[]),
+    ("app.setUpdateCheck", &[("enabled", Hint::Bool)]),
     ("connection.list", &[]),
     ("connection.save", &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text)]),
     ("connection.delete", &[("id", SAVED_ID)]),
@@ -406,6 +409,7 @@ fn session() -> Session {
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_drivers::all(),
+        updates: None,
     };
     Session::new(options).unwrap()
 }

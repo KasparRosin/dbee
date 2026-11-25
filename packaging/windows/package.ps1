@@ -90,6 +90,10 @@ Copy-Item (Join-Path $Bin 'dbee.exe'), (Join-Path $Bin 'dbee-cli.exe') $Stage
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'dbee.exe') (Join-Path $Stage 'dbee-cli.exe')
 
+# How a copy was installed, one word beside dbee.exe, for the app's update button: `msi` in the
+# installer (dbee.wxs takes it from $Stage), `portable` in the zip. No line break after the word.
+Set-Content -NoNewline -Encoding ascii -Path (Join-Path $Stage 'install-kind') -Value 'msi'
+
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "dbee-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
@@ -106,6 +110,7 @@ $Portable = Join-Path $TargetDir "windows-package\dbee-$Version-windows-$Arch-po
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
+Set-Content -NoNewline -Encoding ascii -Path (Join-Path $Portable 'install-kind') -Value 'portable'
 foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }
@@ -113,6 +118,19 @@ foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
 $Zip = Join-Path $Dist "dbee-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
+# The zip that ships carries the marker, and it says `portable`.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$Archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+try {
+  $Entry = $Archive.Entries | Where-Object { $_.Name -eq 'install-kind' }
+  if (@($Entry).Count -ne 1) { throw "the portable zip should hold one install-kind marker, but holds $(@($Entry).Count)" }
+  $Reader = [System.IO.StreamReader]::new($Entry.Open())
+  try { $Word = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+  if ($Word -ne 'portable') { throw "the portable zip's install-kind marker should be 'portable', but is '$Word'" }
+  Write-Output "ok: the portable zip's install-kind marker is 'portable'"
+} finally {
+  $Archive.Dispose()
+}
 
 # Smoke-test the CLI when this machine can run it. An ARM64 build made on an x64 runner can't run
 # here; .github/workflows/windows-arm64.yml installs and runs it on ARM64 instead.
