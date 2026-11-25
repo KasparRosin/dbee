@@ -2066,6 +2066,34 @@ fn sort_result_nulls_as_the_engine_sorts_them() {
     });
 }
 
+/// MySQL's and MariaDB's `TINYINT(1)` is their boolean, and holds any small integer: it sorts by
+/// value, as the server's own `ORDER BY` puts it, NULL included.
+#[test]
+fn a_tinyint_boolean_sorts_as_the_server_sorts_it() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let name = unique("t_sort_bool");
+        let _drop = scratch_table(t, &name, "CREATE TABLE {t} (id INT PRIMARY KEY, flag TINYINT(1))");
+        let table = format!("{}.{name}", t.schema("scratch"));
+        q(t, &format!("INSERT INTO {table} VALUES (1, 2), (2, -1), (3, 10), (4, NULL), (5, -5), (6, 0), (7, 1)"));
+        tab(s, "select 1");
+        for dir in ["asc", "desc"] {
+            run(s, "query.setText", json!({ "text": format!("select flag from {table} order by id") }));
+            let r = run(s, "query.run", json!({}));
+            assert_eq!(r["results"][0]["columns"][0]["class"], "bool", "{}: {r}", t.name());
+            sort_result(s, json!({ "column": 0, "dir": dir }));
+            let in_memory = grid_rows(s);
+            run(s, "query.setText", json!({ "text": format!("select flag from {table} order by flag {dir}") }));
+            run(s, "query.run", json!({}));
+            assert_eq!(in_memory, grid_rows(s), "{}: {dir}", t.name());
+            let values: Vec<&str> = in_memory.iter().map(String::as_str).collect();
+            let asc = ["", "-5", "-1", "0", "1", "2", "10"];
+            let want: Vec<&str> = if dir == "asc" { asc.to_vec() } else { asc.iter().rev().copied().collect() };
+            assert_eq!(values, want, "{}: {dir}", t.name());
+        }
+    });
+}
+
 #[test]
 fn each_result_keeps_its_own_sort() {
     let _db = require_testdb!();

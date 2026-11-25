@@ -543,7 +543,7 @@ fn the_result_grid_edits_nothing() {
     }
     ui.click("grid-menu-copy");
     assert_eq!(ui.copied().as_deref(), Some("Customer 2"));
-    assert_eq!(ui.document()["jobs"], json!([]));
+    assert_eq!(ui.document()["jobs"], json!([]), "a double-click and the menu's copy start no job");
 }
 
 /// Four rows of a number and a text, in no order.
@@ -564,7 +564,8 @@ fn a_header_click_sorts_the_result() {
     let head = ui.value("grid-header-0");
     assert_eq!((head["name"].clone(), head["sort"].clone()), (json!("n"), Json::Null), "{head}");
     assert_eq!(drawn_column(&mut ui, 0, 4), ["10", "2", "100", "9"]);
-    // Asc, desc, then the order the server sent; the rows are redrawn in the click's own frame.
+    // Asc, desc, then the order the server sent; the rows are drawn in the new order in the frame
+    // after the click.
     for (dir, numbers, texts) in [
         (json!("asc"), ["2", "9", "10", "100"], ["pear", "apple", "Apple", "fig"]),
         (json!("desc"), ["100", "10", "9", "2"], ["fig", "Apple", "apple", "pear"]),
@@ -620,6 +621,18 @@ fn the_value_panel_and_copy_follow_the_sorted_result() {
     assert_eq!(ui.document()["value"]["text"], "pear");
     ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some("pear"));
+    // The arrow keys move the selection over the rows as shown.
+    ui.key("ArrowDown");
+    ui.frame();
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1], "whole": false }));
+    assert_eq!(ui.value("value-text")["text"], "apple", "the second row as sorted (9, apple)");
+    ui.key("ArrowDown");
+    ui.key("ArrowLeft");
+    ui.key_with("ArrowDown", json!({ "shift": true }));
+    ui.frame();
+    assert_eq!(ui.value("value-text")["text"], "100");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("10\n100"));
     // A whole sorted row, and every cell in the order shown.
     ui.click("grid-row-3");
     ui.ctrl("C");
@@ -637,7 +650,8 @@ fn the_value_panel_and_copy_follow_the_sorted_result() {
 fn a_cut_results_header_says_it_sorts_the_rows_loaded() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
-    ui.text("select generate_series(1, 25000) as n");
+    let long = "a_rather_long_column_name_its_header_has_no_room_for_at_all";
+    ui.text(&format!("select g as n, g as {long} from generate_series(1, 25000) g"));
     ui.ctrl("Enter");
     ui.ran();
     assert_eq!(ui.value("query-rows"), "First 10,000 of 25,000 rows");
@@ -645,6 +659,12 @@ fn a_cut_results_header_says_it_sorts_the_rows_loaded() {
     ui.rest(head);
     let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
     assert_eq!(said, ["Sort the 10,000 rows loaded by this column"]);
+    // A header that shows less than its name says the whole name and type first, then the same.
+    assert_eq!(ui.value("grid-header-1")["cut"], true, "{}", ui.value("grid-header-1"));
+    let head = ui.drawn("grid-header-1").center();
+    ui.rest(head);
+    let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
+    assert_eq!(said, [format!("{long} int4\nSort the 10,000 rows loaded by this column")]);
     // It sorts them: the largest of the rows held comes first, and the bar keeps its notice.
     ui.click("grid-header-0");
     ui.click("grid-header-0");

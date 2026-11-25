@@ -1267,6 +1267,139 @@ mod tests {
 
     const T: Duration = Duration::from_secs(30);
 
+    /// A session with no database whose active query tab shows two results, the second one:
+    /// `(n, t)` in four rows, one short and one with a NULL, and `(x)` in two.
+    fn with_results() -> Session {
+        use dbee_core::{Column, TypeClass};
+
+        let mut s = Session::new(SessionOptions::default()).unwrap();
+        let id = s.state.take_tab_id();
+        let mut q = QueryTab::new(id, "q".into(), String::new());
+        let col = |name: &str, class| Column { name: name.into(), base_type: String::new(), type_label: String::new(), class };
+        let cell = |v: &str| Some(v.to_owned());
+        let first = ResultSet {
+            columns: vec![col("n", TypeClass::Number), col("t", TypeClass::Text)],
+            rows: vec![vec![cell("10"), cell("b")], vec![cell("9")], vec![None, cell("A")], vec![cell("100"), cell("a")]],
+            rows_seen: 4,
+            complete: true,
+            ..ResultSet::default()
+        };
+        let second = ResultSet {
+            columns: vec![col("x", TypeClass::Other)],
+            rows: vec![vec![cell("2")], vec![cell("1")]],
+            rows_seen: 2,
+            complete: true,
+            ..ResultSet::default()
+        };
+        q.results.push(StatementOutcome::new(0..0, Arc::new(first), 0));
+        q.results.push(StatementOutcome::new(0..0, Arc::new(second), 0));
+        q.shown = 1;
+        s.state.tabs.push(Tab::Query(q));
+        s.state.active = Some(id);
+        s
+    }
+
+    fn done(s: &mut Session, id: &str, params: Json) -> Json {
+        match s.execute(id, params) {
+            Ok(Outcome::Done(v)) => v,
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+
+    /// Every cell of the shown result as a copy reads it: rows by `/`, cells by `|`, NULL empty.
+    fn copied(s: &mut Session) -> String {
+        done(s, "selection.all", json!({}));
+        let text = done(s, "copy.selection", json!({ "format": "tsv" }))["text"].as_str().unwrap().to_owned();
+        text.replace('\t', "|").replace('\n', "/")
+    }
+
+    /// `query.sortResult` with a result to sort and no database (the fuzz's sessions have no
+    /// result, so there the command is always disabled): hostile params change nothing and are
+    /// never an `internal` error, and a run of sorts, copies, selections and result switches
+    /// reads every row through its result's own order.
+    #[test]
+    fn sort_result_survives_hostile_params_and_reads_through_the_order() {
+        let mut s = with_results();
+        done(&mut s, SHOW_RESULT, json!({ "index": 0 }));
+        done(&mut s, SORT_RESULT, json!({ "column": 1, "dir": "desc" }));
+        done(&mut s, "selection.set", json!({ "anchor": [1, 0], "focus": [2, 1] }));
+        let before = (s.inspect(), s.state.tabs.clone());
+        let deep = (0..64).fold(json!(0), |v, _| json!([v]));
+        let hostile = [
+            json!({}),
+            json!(null),
+            json!([]),
+            json!("column"),
+            json!({ "column": 2 }),
+            json!({ "column": u64::MAX }),
+            json!({ "column": i64::MIN }),
+            json!({ "column": -1 }),
+            json!({ "column": 0.5 }),
+            json!({ "column": 1e300 }),
+            json!({ "column": "0" }),
+            json!({ "column": "\0" }),
+            json!({ "column": "x".repeat(10_000) }),
+            json!({ "column": true }),
+            json!({ "column": [0] }),
+            json!({ "column": { "column": 0 } }),
+            json!({ "column": deep }),
+            json!({ "column": null, "dir": "asc" }),
+            json!({ "column": 0, "dir": "up" }),
+            json!({ "column": 0, "dir": "" }),
+            json!({ "column": 0, "dir": "ASC" }),
+            json!({ "column": 0, "dir": "asc\0" }),
+            json!({ "column": 0, "dir": "🐙" }),
+            json!({ "column": 0, "dir": 0 }),
+            json!({ "column": 0, "dir": ["asc"] }),
+            json!({ "column": 0, "dir": deep }),
+            json!({ "column": 2, "dir": "none" }),
+        ];
+        for params in hostile {
+            let e = s.execute(SORT_RESULT, params.clone()).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{params}: {e}");
+            assert_eq!(s.inspect(), before.0, "{params} changed what inspect shows");
+            assert!(s.state.tabs == before.1, "{params} changed the tab");
+        }
+        // Text descending, as left before the hostile params: NULL first (no connection reads as
+        // Postgres), the short row's missing cell is NULL too, and ties keep the received order.
+        assert_eq!(copied(&mut s), "9|/10|b/100|a/|A");
+        // Numbers ascending; the selection stays, and the copy and the value are of the rows shown.
+        done(&mut s, "selection.set", json!({ "anchor": [0, 0], "focus": [1, 1] }));
+        let sorted = done(&mut s, SORT_RESULT, json!({ "column": 0 }));
+        assert_eq!(sorted["sort"], json!({ "column": 0, "name": "n", "dir": "asc" }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 1], "whole": false }));
+        assert_eq!(done(&mut s, "copy.selection", json!({ "format": "tsv" }))["text"], "9\t\n10\tb");
+        assert_eq!(done(&mut s, "value.show", json!({}))["text"], "b");
+        assert_eq!(copied(&mut s), "9|/10|b/100|a/|A");
+        done(&mut s, SORT_RESULT, json!({ "column": 0 }));
+        assert_eq!(copied(&mut s), "|A/100|a/10|b/9|");
+        // Rows selected whole, moved by the keyboard's command, copied as JSON.
+        done(&mut s, "selection.rows", json!({ "first": 0 }));
+        done(&mut s, "selection.move", json!({ "rows": 1 }));
+        assert_eq!(done(&mut s, "value.copy", json!({}))["text"], "{\"n\": 100, \"t\": \"a\"}");
+        // The other result has its own order, and each is shown as it was left.
+        assert_eq!(done(&mut s, SHOW_RESULT, json!({ "index": 1 }))["result"]["sort"], Json::Null);
+        assert_eq!(copied(&mut s), "2/1");
+        done(&mut s, SORT_RESULT, json!({ "column": 0, "dir": "asc" }));
+        assert_eq!(copied(&mut s), "1/2");
+        assert_eq!(done(&mut s, SHOW_RESULT, json!({ "index": 0 }))["result"]["sort"]["dir"], "desc");
+        assert_eq!(copied(&mut s), "|A/100|a/10|b/9|");
+        assert_eq!(done(&mut s, SORT_RESULT, json!({ "column": 1, "dir": "none" }))["sort"], Json::Null);
+        assert_eq!(copied(&mut s), "10|b/9|/|A/100|a");
+        // The rows never moved, no job ran, and nothing was journaled.
+        let Some(Tab::Query(q)) = s.state.active_tab() else { panic!("a query tab") };
+        assert_eq!(q.results[0].result.rows[1], vec![Some("9".to_owned())]);
+        assert_eq!(q.results[1].sort().map(|sort| sort.dir), Some(SortDir::Asc));
+        assert_eq!(s.inspect()["jobs"], json!([]));
+        assert!(s.journal().iter().all(|(id, _)| id != SORT_RESULT));
+        // Without a result with columns the command is off, whatever the params.
+        let mut s = Session::new(SessionOptions::default()).unwrap();
+        done(&mut s, "tab.newQuery", json!({ "text": "select 1" }));
+        for params in [json!({}), json!({ "column": 0 }), json!({ "column": -1, "dir": 7 })] {
+            assert_eq!(s.execute(SORT_RESULT, params).unwrap_err().data()["why"], NO_RESULT);
+        }
+    }
+
     #[test]
     fn a_dead_tunnel_marks_the_session_lost() {
         let db = dbee_testkit::require_testdb!();

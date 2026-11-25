@@ -6,12 +6,16 @@
 //!
 //! - **NULL** sorts where the caller says ([`Nulls`], which follows the connection's database):
 //!   before every value or after every value ascending, and the other end descending.
-//! - **Numbers** ([`TypeClass::Number`], and a [`TypeClass::Other`] cell that reads as one: an
-//!   engine that names no type for an expression sends `count(*)` so) compare by value, exactly:
+//! - **Numbers** ([`TypeClass::Number`], and a [`TypeClass::Other`] or [`TypeClass::Bool`] cell
+//!   that reads as one: an engine that names no type for an expression sends `count(*)` so, and
+//!   MySQL's boolean is a small integer) compare by value, exactly:
 //!   sign, digits and exponent, never through a float, so a 64-bit integer past 2^53 and a long
 //!   decimal are right, and `1`, `1.0` and `1e0` are equal. In a Number column `NaN`, `Infinity`
 //!   and `-Infinity` (in any case, `inf` too) are numbers, NaN the greatest. A cell that does not
 //!   read as a number comes after every number, compared as text.
+//!   A number is read once, into its sign, place and digits without the zeros around them, so a
+//!   comparison of two numbers is a comparison of slices. A cell longer than [`NUMBER_BYTES`]
+//!   is not read as a number: it is text.
 //! - **Text** (every other class, dates and times included: the ISO forms servers print sort as
 //!   text) compares without regard to case first (each character's Unicode lowercase), then by
 //!   bytes, so `Apple, apple, fig, Zucchini` ([`text_cmp`]). Case is disregarded over a text's
@@ -101,9 +105,12 @@ impl<'a> Key<'a> {
         let Some(text) = cell else { return Key::Null };
         let number = match class {
             TypeClass::Number => Number::read(text, true),
-            // No type named: digits are a number, a word is a word.
-            TypeClass::Other => Number::read(text, false),
-            TypeClass::Bool | TypeClass::Text | TypeClass::LongText | TypeClass::Json | TypeClass::DateTime | TypeClass::Binary => None,
+            // No type named: digits are a number, a word is a word. A boolean is read the same
+            // way: where the engine keeps one as a small integer (MySQL's `TINYINT(1)`) the
+            // column can hold any, and `f`, `false` and `0` come before `t`, `true` and `1`
+            // either way.
+            TypeClass::Other | TypeClass::Bool => Number::read(text, false),
+            TypeClass::Text | TypeClass::LongText | TypeClass::Json | TypeClass::DateTime | TypeClass::Binary => None,
         };
         number.map_or(Key::Text(text), Key::Number)
     }
@@ -174,21 +181,40 @@ impl<'a> Number<'a> {
     }
 }
 
+/// The longest cell that is read as a number; a longer one is text, after the numbers. No
+/// engine's number prints longer in practice, and the bound keeps reading a cell, and comparing
+/// two, short: 10,000 numbers of 25,000 digits that differ at their end took 0.5 s to sort,
+/// measured, the reading and the comparing of their shared digits both counted.
+pub const NUMBER_BYTES: usize = 1024;
+
 /// A finite number as its sign, the place of its first digit that is not zero, and its digits
-/// where they stand in the cell.
+/// from that one to the last that is not zero, where they stand in the cell. The same value in
+/// any spelling (`1`, `1.0`, `0.1e1`, `001`) reads as the same three, so two numbers compare by
+/// a few slice comparisons, whatever their length.
+///
+/// **Past the exponent's bound** the order is by a rule, not by value. `top` saturates at the
+/// ends of an `i64`, so of two numbers whose place is at or past an end, the digits decide:
+/// `9e9223372036854775806` sorts above `1e9223372036854775807`, though it is the smaller, and
+/// `1e9223372036854775807` equals `10e9223372036854775807`. No database prints such a number.
+/// The order stays total there (`numbers_past_the_exponent_bound_keep_a_total_order`).
 #[derive(Clone, Copy, Debug)]
 struct Decimal<'a> {
     /// -1, 0 (every digit is zero, whatever the sign) or 1.
     sign: i8,
     /// The power of ten above the first digit that is not zero: 1 for `5`, 3 for `123.4`, 0 for
-    /// `0.5`, -1 for `0.05`. Saturating, so exponents no number has compare by their digits.
+    /// `0.5`, -1 for `0.05`. Saturating.
     top: i64,
-    int: &'a str,
-    frac: &'a str,
+    /// The digits in two parts that follow each other (the integer part's and the fraction's,
+    /// or one of them and nothing): the first starts with a digit that is not zero and the last
+    /// ends with one. Both empty for zero.
+    digits: [&'a [u8]; 2],
 }
 
 impl<'a> Decimal<'a> {
     fn read(text: &'a str) -> Option<Decimal<'a>> {
+        if text.len() > NUMBER_BYTES {
+            return None;
+        }
         let (negative, rest) = match text.strip_prefix('-') {
             Some(rest) => (true, rest),
             None => (false, text.strip_prefix('+').unwrap_or(text)),
@@ -202,32 +228,48 @@ impl<'a> Decimal<'a> {
         if (int.is_empty() && frac.is_empty()) || !digits(int) || !digits(frac) {
             return None;
         }
-        let zeros = int.bytes().chain(frac.bytes()).take_while(|b| *b == b'0').count();
-        if zeros == int.len().saturating_add(frac.len()) {
-            return Some(Decimal { sign: 0, top: 0, int, frac });
-        }
         let wide = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
-        let top = wide(int.len()).saturating_sub(wide(zeros)).saturating_add(exponent);
-        Some(Decimal { sign: if negative { -1 } else { 1 }, top, int, frac })
+        let int = int.trim_start_matches('0');
+        let frac = frac.trim_end_matches('0');
+        let (top, digits) = if int.is_empty() {
+            // 0.00ddd: the place falls by each zero after the point.
+            let first = frac.trim_start_matches('0');
+            let zeros = frac.len().saturating_sub(first.len());
+            (exponent.saturating_sub(wide(zeros)), [first.as_bytes(), &[][..]])
+        } else if frac.is_empty() {
+            // ddd000: the zeros at the end are not digits of the number.
+            (wide(int.len()).saturating_add(exponent), [int.trim_end_matches('0').as_bytes(), &[][..]])
+        } else {
+            (wide(int.len()).saturating_add(exponent), [int.as_bytes(), frac.as_bytes()])
+        };
+        if digits.iter().all(|part| part.is_empty()) {
+            return Some(Decimal { sign: 0, top: 0, digits });
+        }
+        Some(Decimal { sign: if negative { -1 } else { 1 }, top, digits })
     }
 
-    /// The digits from the first that is not zero.
-    fn digits(&self) -> impl Iterator<Item = u8> + '_ {
-        self.int.bytes().chain(self.frac.bytes()).skip_while(|b| *b == b'0')
-    }
-
-    /// Which is further from zero, both being non-zero.
+    /// Which is further from zero, both being non-zero: the higher place, then the digits. With
+    /// no zeros at either end, digits that go on where the other's stop are the larger.
     fn magnitude_cmp(&self, other: &Decimal<'_>) -> Ordering {
         self.top.cmp(&other.top).then_with(|| {
-            let (mut a, mut b) = (self.digits(), other.digits());
+            let ([mut a, mut a_next], [mut b, mut b_next]) = (self.digits, other.digits);
             loop {
-                // Past its last digit a number goes on in zeros.
-                let (x, y) = match (a.next(), b.next()) {
-                    (None, None) => return Ordering::Equal,
-                    (x, y) => (x.unwrap_or(b'0'), y.unwrap_or(b'0')),
+                if a.is_empty() {
+                    (a, a_next) = (a_next, &[]);
+                }
+                if b.is_empty() {
+                    (b, b_next) = (b_next, &[]);
+                }
+                let shared = a.len().min(b.len());
+                let (Some((a_head, a_rest)), Some((b_head, b_rest))) = (a.split_at_checked(shared), b.split_at_checked(shared)) else {
+                    return a.len().cmp(&b.len());
                 };
-                if x != y {
-                    return x.cmp(&y);
+                if shared == 0 {
+                    return a.len().cmp(&b.len());
+                }
+                match a_head.cmp(b_head) {
+                    Ordering::Equal => (a, b) = (a_rest, b_rest),
+                    decided => return decided,
                 }
             }
         })
@@ -340,6 +382,11 @@ mod tests {
         assert_eq!(eq("1e99999999999999999999999", "1e9"), Ordering::Greater);
         assert_eq!(eq("1e-99999999999999999999999", "1e-9"), Ordering::Less);
         assert_eq!(eq("-1e99999999999999999999999", "-1e9"), Ordering::Less);
+        // A cell past the length read as a number is text, after the numbers.
+        let long = "1".repeat(NUMBER_BYTES + 1);
+        assert_eq!(eq(&long, "2"), Ordering::Greater);
+        assert_eq!(eq(&"1".repeat(NUMBER_BYTES), "2"), Ordering::Greater, "a number, and the larger");
+        assert_eq!(eq(&format!("0.{}", "0".repeat(NUMBER_BYTES - 3)), "0"), Ordering::Equal);
         // No numbers: they are text, after the numbers.
         for text in ["", "-", "+", ".", "e5", "1e", "1e+", "1.2.3", "1 ", " 1", "0x10", "1,000", "١", "--1", "1e5e5"] {
             assert_eq!(eq("999999", text), Ordering::Less, "{text:?}");
@@ -370,7 +417,6 @@ mod tests {
         // The ISO forms of dates and times sort as text; so do t and f.
         let dates = values(&["2026-11-25 10:00:00", "2026-02-03 09:00:00", "1999-12-31 23:59:59"]);
         assert_eq!(sorted(TypeClass::DateTime, &dates, false, Nulls::Last), ["1999-12-31 23:59:59", "2026-02-03 09:00:00", "2026-11-25 10:00:00"]);
-        assert_eq!(sorted(TypeClass::Bool, &values(&["t", "f", "t"]), false, Nulls::Last), ["f", "t", "t"]);
         // Only the same text is equal.
         assert_eq!(text_cmp("aé", "aè"), "é".cmp("è"));
         assert_eq!(text_cmp("straße", "STRASSE"), Ordering::Greater);
@@ -392,6 +438,71 @@ mod tests {
         assert_eq!(asc(&["pear", "10", "Apple", "9", "-1.5"]), ["-1.5", "9", "10", "Apple", "pear"]);
         // Without a type a word is a word: a name is not a number.
         assert_eq!(asc(&["Nan", "Ian", "Inf", "Zoe", "3"]), ["3", "Ian", "Inf", "Nan", "Zoe"]);
+    }
+
+    /// False before true in every spelling the engines print, and MySQL's `TINYINT(1)`, which is
+    /// classed a boolean and holds any small integer, by value.
+    #[test]
+    fn booleans_sort_false_first_and_small_integers_by_value() {
+        let asc = |cells: &[&'static str]| sorted(TypeClass::Bool, &values(cells), false, Nulls::Last);
+        assert_eq!(asc(&["t", "f", "t"]), ["f", "t", "t"]);
+        assert_eq!(asc(&["true", "false", "true"]), ["false", "true", "true"]);
+        assert_eq!(asc(&["1", "0", "1", "0"]), ["0", "0", "1", "1"]);
+        assert_eq!(asc(&["2", "10", "-5", "-1", "0"]), ["-5", "-1", "0", "2", "10"]);
+        let cells = [Some("1"), None, Some("0")];
+        assert_eq!(sorted(TypeClass::Bool, &cells, true, Nulls::First), ["1", "0", "NULL"]);
+    }
+
+    /// Past the bound of the exponent the order is by a rule (the digits), not by value; it is
+    /// still one order: every pair agrees both ways round, and the whole list sorts the same
+    /// from any start.
+    #[test]
+    fn numbers_past_the_exponent_bound_keep_a_total_order() {
+        let cmp = |a: &str, b: &str| compare(TypeClass::Number, Some(a), Some(b), Nulls::Last);
+        // By the rule: at the bound the digits decide.
+        assert_eq!(cmp("9e9223372036854775806", "1e9223372036854775807"), Ordering::Greater, "the smaller value, the larger digits");
+        assert_eq!(cmp("1e9223372036854775807", "10e9223372036854775807"), Ordering::Equal);
+        assert_eq!(cmp("1e9223372036854775807", "1e99999999999999999999999999"), Ordering::Equal);
+        assert_eq!(cmp("0.01e-9223372036854775808", "0.001e-9223372036854775808"), Ordering::Equal);
+        assert_eq!(cmp("1e-9223372036854775808", "0.1e-9223372036854775808"), Ordering::Greater, "not yet at the bound: by value");
+        // Below the bound it is by value.
+        assert_eq!(cmp("9e9223372036854775805", "1e9223372036854775806"), Ordering::Less);
+        assert_eq!(cmp("1e9223372036854775805", "10e9223372036854775804"), Ordering::Equal);
+        let cells = [
+            "9e9223372036854775806",
+            "1e9223372036854775807",
+            "10e9223372036854775807",
+            "2e9223372036854775807",
+            "0.5e9223372036854775807",
+            "-1e9223372036854775807",
+            "-9e9223372036854775806",
+            "1e-9223372036854775808",
+            "5e-9223372036854775809",
+            "0.01e-9223372036854775808",
+            "0.002e-9223372036854775808",
+            "0e9223372036854775807",
+            "1e99999999999999999999999999",
+            "7",
+            "Infinity",
+        ];
+        for a in cells {
+            for b in cells {
+                assert_eq!(cmp(a, b), cmp(b, a).reverse(), "{a} {b}");
+                for c in cells {
+                    if cmp(a, b) != Ordering::Greater && cmp(b, c) != Ordering::Greater {
+                        assert_ne!(cmp(a, c), Ordering::Greater, "{a} {b} {c}");
+                    }
+                }
+            }
+        }
+        let forward = sorted(TypeClass::Number, &values(&cells), false, Nulls::Last);
+        let mut turned = cells;
+        turned.reverse();
+        let backward = sorted(TypeClass::Number, &values(&turned), false, Nulls::Last);
+        let classes = |list: &[&str]| list.iter().map(|c| list.iter().filter(|d| cmp(c, d) == Ordering::Greater).count()).collect::<Vec<_>>();
+        assert_eq!(classes(&forward), classes(&backward));
+        assert_eq!(forward.first(), Some(&"-9e9223372036854775806"), "by the rule again: the larger digits, further from zero");
+        assert_eq!(forward.last(), Some(&"Infinity"));
     }
 
     #[test]
@@ -526,8 +637,9 @@ mod tests {
         }
     }
 
-    /// The cost of a sort at the query cap (10,000 rows), which runs in a frame: 16 ms for what
-    /// results usually hold, and half a second for the worst the text order can meet.
+    /// The cost of [`order`] at the query cap (10,000 rows), which runs in the frame of the click:
+    /// 16 ms for what results usually hold, and half a second for the worst it can meet, values
+    /// of 20 kB and more (a run's whole 256 MiB) that are the same nearly to their end.
     #[test]
     #[ignore = "timing; run with --ignored --nocapture"]
     fn a_sort_of_ten_thousand_rows_within_a_frame() {
@@ -540,12 +652,27 @@ mod tests {
             .map(|i| format!("{}{}", if i % 2 == 0 { "x" } else { "X" }.repeat(20_000), i.wrapping_mul(2_654_435_761) % 10_007))
             .collect();
         let same: Vec<String> = (0..10_000u64).map(|_| "y".repeat(20_000)).collect();
+        // Texts of 20 kB that differ only at their end: every comparison walks what they share.
+        let late: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "z".repeat(20_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
+        // Numbers of 1,000 digits that differ only at their end. Digit strings of 25,000 (past
+        // what is read as a number, so text) that differ at their end; zeros before a number, and
+        // after its point.
+        let numbers_1000: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "7".repeat(1_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
+        let digits: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "7".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
+        let zeros: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
+        let small: Vec<String> = (0..10_000u64).map(|i| format!("0.{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
         for (what, class, cells, budget) in [
             ("numbers", TypeClass::Number, &numbers, 16.0),
             ("numbers without a type", TypeClass::Other, &numbers, 16.0),
             ("short texts", TypeClass::Text, &texts, 16.0),
             ("the same 20 kB text", TypeClass::LongText, &same, 16.0),
             ("20 kB texts that differ in case along their whole length", TypeClass::LongText, &long, 500.0),
+            ("20 kB texts that differ at their end", TypeClass::LongText, &late, 500.0),
+            ("numbers of 1,000 digits that differ at their end", TypeClass::Number, &numbers_1000, 100.0),
+            ("digit strings of 25,000 that differ at their end", TypeClass::Number, &digits, 500.0),
+            ("the same without a type", TypeClass::Other, &digits, 500.0),
+            ("25,000 zeros before a number", TypeClass::Number, &zeros, 500.0),
+            ("25,000 zeros after the point", TypeClass::Other, &small, 500.0),
         ] {
             let rs = ResultSet {
                 columns: vec![Column { class, ..Column::untyped("c") }],
