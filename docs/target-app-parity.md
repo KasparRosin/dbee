@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor ("What works today": a query's result sorted by a header click; "Performance": what that sort costs at the cap; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor ("What works today": a query's result sorted by a header click; "Performance": what `dbee_core::sort::order` costs at the cap, measured again with long digit strings; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -110,7 +110,7 @@ The launch check, a release build to the connection screen with the window shown
 
 The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 40.3 s and 39.8 s on 2026-11-05 (the load was not recorded for those two), 91.9 s in that day's `--ignored` run (load 22.14 at its start), and 37.6 s on 2026-11-06 (load 7.79 at its start, 5.70 at its end).
 
-Sorting a query result at the cap (`query.sortResult`, 10,000 rows, in the frame of the click) took 2.4 ms for numbers, 9.4 ms for short texts, 7.2 ms for 10,000 copies of one 20 kB text and 199 ms for 10,000 texts of 20 kB that differ in case at their first character, the worst the text rule meets (medians of 5; targets 16 ms, and 500 ms for the last). Measured 2026-11-25 on an Intel Core i5-14400F (16 threads) in the dev container, dev profile, at a load average of 3.51 / 5.52 / 4.14, with `a_sort_of_ten_thousand_rows_within_a_frame` (`crates/core/src/sort.rs`).
+Sorting a query result at the cap: `dbee_core::sort::order` over 10,000 rows, which runs in the frame of the click, took 1.5 ms for numbers, 8.4 ms for short texts, 6.9 ms for 10,000 copies of one 20 kB text and 21 ms for numbers of 1,000 digits that differ at their end. The worst cases are values that fill a run's 256 MiB and are alike nearly to their end, at about 0.2 s: 207 ms for texts of 20 kB that differ in case at their first character, 176 ms for texts of 20 kB that differ at their end, and 208–210 ms for digit strings of 25,000 (that differ at their end, or after 25,000 zeros before the number or after its point; past 1,024 bytes a cell is text, not a number). Medians of 5, targets 16 ms for the first three, 100 ms for the long numbers and 500 ms for the worst cases; measured 2026-11-25 on an Intel Core i5-14400F (16 threads) in the dev container, dev profile, at a load average of 1.57 / 2.62 / 3.42, with `a_sort_of_ten_thousand_rows_within_a_frame` (`crates/core/src/sort.rs`, `#[ignore]`). The command and the frame around it were not timed.
 
 Beekeeper Studio's own timings were not measured.
 
@@ -155,6 +155,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | "Performance": the sort's timing is of `dbee_core::sort::order`, not of the command or a frame; measured again after numbers are read once, with the digit-string cases and texts that differ at their end. |
 | 2026-11-25 | minor | "What works today": a query's result is sorted in memory by a header click. "Performance": the sort's cost at the 10,000-row cap. No grade changes: what Beekeeper Studio does there was not observed. |
 | 2026-11-23 | minor | Checked against the M3 tree. Query: what dbee does with a transaction a script opens (manual transactions still missing). Data: the value panel shows a selected row and an edited cell's draft. "What works today": the cell editor, the error band, the transaction. "Effort and calibration" keeps the dates and counts only. Grades unchanged. |
 | 2026-11-20 | minor | M3's screens: Structure 40 % (2 of 5, read-only; estimated), App 12 % (light and dark themes), features ~38 %, overall ~30 % (estimated); UI ~45 % stands (24 elements, 3 done, 18 partial); what works today gains Structure and the look. |
