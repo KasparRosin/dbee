@@ -23,7 +23,7 @@ pub use fetch::{DEFAULT_REPO, Fetch, HttpFetch, MANIFEST_URL_ENV, PRETEND_VERSIO
 pub use install::{Action, Install, InstallKind, Offer, Os, Platform, Probe, Progress, asset_name, is_development_build, offer};
 pub use manifest::{Asset, MANIFEST_NAME, MAX_MANIFEST, Manifest};
 pub use semver::Version;
-pub use signature::{PINNED_KEYS, PublicKey, SIGNATURE_LEN, verify};
+pub use signature::{PINNED_KEYS, PublicKey, ReleaseCheck, SIGNATURE_LEN, SIGNATURE_NAME, check_release, verify};
 pub use version::{is_newer, parse_version};
 
 /// Why an update step failed. The texts are dbee's own words and never quote the bytes read from

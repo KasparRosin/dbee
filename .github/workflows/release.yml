@@ -397,8 +397,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job builds the release check with the write token in reach; git needs none of it.
+          persist-credentials: false
       - uses: ./.github/actions/draft-release
         with:
           version: ${{ needs.version.outputs.version }}
           prerelease: ${{ needs.version.outputs.prerelease }}
+          signing-key: ${{ secrets.RELEASE_SIGNING_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
