@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M4). M1 "Daily Postgres workflow" and M2 "Three databases" are built and wait for their last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor (a query result sorted by a header click in the progress log; one more command; parity numbers unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-26 · **Change:** minor (the update button's click opens the release's page, in the progress log; parity numbers unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite; both `#[ignore]`: `cargo xtask ci` skips them, and the CI workflow runs them on a virtual screen on every pull request). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M4. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
@@ -61,6 +61,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Entry |
 |---|---|
+| 2026-11-26 | A click on `DOWNLOAD <version>` starts the desktop's opener with the release's page (run on Linux with a stand-in opener; a real browser, macOS and Windows were not run). In 0.3.1 and 0.3.2 the click opens nothing, so those two are updated by hand ([decisions.md](docs/decisions.md), 2026-11-26; [gaps.md](docs/gaps.md) entry 59). Releases carry a signed checksum file from 0.3.1 on. |
 | 2026-11-25 | A click on a column header of a query tab's result sorts it (asc, desc, then as the server sent it), as it does in a table tab. The result is sorted in memory, among the rows it holds, by dbee's own rules, not the database's `ORDER BY` ([decisions.md](docs/decisions.md), 2026-11-25; [gaps.md](docs/gaps.md) entries 7 and 89). |
 | 2026-11-23 | The update check: an installed copy asks GitHub for the newest release once a day, and when one is newer the right end of the menu bar reads `DOWNLOAD <version>`, which opens the release's page. Each package now says how it was installed. dbee installs nothing by itself yet, and releases are not signed ([gaps.md](docs/gaps.md) entry 59). |
 | 2026-11-23 | M3, the fixes from looking at the screens (2026-11-22 and 2026-11-23): several whole rows are selected by a drag over the row numbers or by Shift with the arrow keys, which also move the selection, and are copied whole; every cell editor opens in its cell, one line whatever the type, while the value panel shows the same draft; a grid header cuts its words with `…`, draws long type names in their short spelling and says the whole on hover; STRUCTURE's columns take the page's spare room where their content is cut and are resized at their edges; the DATA / STRUCTURE switch stands in the table tab's bottom bar in both views; selected text has a colour of its own, stronger than a selected row's. Parity numbers unchanged. |
@@ -79,6 +80,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-26 | minor | Progress log: the update button's click opens the release's page; releases signed from 0.3.1 on. Parity numbers unchanged. |
 | 2026-11-25 | minor | Progress log: a query result sorted by a header click. Commands: 68 (59 engine, 9 UI-only), `query.sortResult` added to the count of 2026-11-23; the tests were not counted again. Parity numbers unchanged. |
 | 2026-11-23 | minor | Progress log: the update check and its button. Headline numbers counted again: 67 commands (58 engine, 9 UI-only), 1,848 `#[test]` attributes in 126,484 lines, 2,132 tests listed by the harness. Parity numbers unchanged. |
 | 2026-11-23 | minor | Platforms: the other platforms are built by the release pipeline ([hardware-parity](docs/hardware-parity.md)); the row said they were not built yet. |

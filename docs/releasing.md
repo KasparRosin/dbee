@@ -1,10 +1,10 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor (the release key: the checksum file's signature, its secret and how to make or replace the key)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-26 · **Change:** minor (status: `v0.3.1` and `v0.3.2` are published, the first with a signed checksum file)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `v<version>`, the tag alone. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
-**Status:** three releases are published, all unsigned: `v0.1.0`, a test of the pipeline, as a pre-release, `v0.2.0` as the first full release, and `v0.3.0`. The release key is pinned since 2026-11-25, and the next release is the first signed one. User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
+**Status:** five releases are published: `v0.1.0`, a test of the pipeline, as a pre-release, `v0.2.0` as the first full release, `v0.3.0`, `v0.3.1` and `v0.3.2`. From `v0.3.1` on the checksum file is signed with the release key, pinned since 2026-11-25; the installers themselves are unsigned in all five (macOS ad-hoc, not notarized). User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
 
 ## Cutting a release
 
@@ -71,7 +71,7 @@ Windows signing uses the `.pfx` pair if both are set, otherwise Azure Trusted Si
 
 The last job signs `SHA256SUMS.txt` with `RELEASE_SIGNING_KEY` into `SHA256SUMS.txt.sig`: ed25519, the 64 raw bytes. A running dbee will install a release itself only when that signature is by a public key compiled into it (`PINNED_KEYS` in `crates/update/src/signature.rs`; [decisions](decisions.md), 2026-11-24). No copy does so yet: the install step is not built and the app does not fetch the signature ([gaps](gaps.md), entry 59). The same job then checks the files as the app will (`cargo run -p dbee-update --example check_release -- artifacts <version>`): the checksum file must read as a release's file list of that version, and once a key is pinned, a release without a signature by it is not drafted. With no key pinned it only warns. The check knows the keys this release pins, not the keys of the copies in use, so it cannot tell that a key was replaced too early (below).
 
-The key was made on 2026-11-25 and its public half is in `PINNED_KEYS`; no release is signed with it yet, so the first release from here is the signing step's first run. The steps below are for a fork, or for a new key. Before making one, check in the repository's settings that the `release` environment deploys from the `release` branch only. That rule, not the branch's protection alone, keeps a workflow on another branch from reading the key.
+The key was made on 2026-11-25 and its public half is in `PINNED_KEYS`; `v0.3.1` was the signing step's first run, and its checksum file and `v0.3.2`'s passed the release job's check against the pinned key. The steps below are for a fork, or for a new key. Before making one, check in the repository's settings that the `release` environment deploys from the `release` branch only. That rule, not the branch's protection alone, keeps a workflow on another branch from reading the key.
 
 To make the key, with openssl 3 and `gh`:
 
