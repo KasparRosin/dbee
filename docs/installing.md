@@ -1,6 +1,6 @@
 # Installing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-26 · **Change:** minor (macOS: the disk image itself is blocked, and how to open it, then dbee)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor (macOS: the disk image itself is blocked, and how to open it)
 
 Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
 
@@ -15,9 +15,6 @@ dbee's builds aren't signed (see [releasing.md](releasing.md), "Signing"). macOS
    xattr -d com.apple.quarantine ~/Downloads/dbee-*-macos-universal.dmg
    open ~/Downloads/dbee-*-macos-universal.dmg
    ```
-
-3. Drag dbee to Applications.
-4. Open dbee.
 
 If macOS blocks the app when you open it:
 
