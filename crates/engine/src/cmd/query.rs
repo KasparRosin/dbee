@@ -1,5 +1,5 @@
-//! Query tabs: `query.run`, `query.cancel`, `query.showResult`, `query.setDatabase`, `query.commit`
-//! and `query.rollback`.
+//! Query tabs: `query.run`, `query.cancel`, `query.showResult`, `query.sortResult`,
+//! `query.setDatabase`, `query.commit` and `query.rollback`.
 //!
 //! **Running** is a job on the query connection, which is not the browse connection: a `BEGIN`
 //! left open in a query tab never reaches table pages or an Apply. The job opens the connection
@@ -85,8 +85,28 @@
 //! lost. A query connection the session had is kept even when the run lost it, so the next run
 //! says it was lost.
 //!
-//! None of these commands is journaled: a replay would run the SQL again, writes included. Logs
-//! carry command ids and job labels, never SQL text.
+//! **Sorting a result.** `query.sortResult` sorts the shown result by one column, in memory
+//! ([`dbee_core::sort`]): it sends nothing to the database, starts no job and needs no connection,
+//! so it works while the connection is lost, while the tab's next run goes (the last run's
+//! results are still the ones shown) and inside a transaction. It is not the table tab's
+//! `table.sort`, which asks the database for a page in that order. Wrapping the statement in an
+//! `ORDER BY` was ruled out: it would run the statement again (its side effects, another
+//! snapshot, its time), cannot wrap what returns rows without being a query (`INSERT … RETURNING`,
+//! `EXPLAIN`, `SHOW`, `PRAGMA`, `CALL`), and would still bring back only the rows the cap lets
+//! through. So the order is among the rows held: of a result the cap cut
+//! (`complete: false`), the rows loaded are sorted, not the database's. The order differs from
+//! the database's own where the database has a collation, an enum's order or a type's own
+//! comparison (docs/decisions.md); NULL sorts where the connection's database puts it
+//! ([`Dialect::nulls`]). The rows are not moved or copied: the result keeps a list of row indices
+//! ([`StatementOutcome`]), which the grid, a copy and the value view read through, and `none`
+//! drops it. A column is named by its index, since a result's columns can share a name or have
+//! none. Each result of a run has its own sort; the selection stays at its place in the grid
+//! (as it does over a table's sort), so the value view shows the cell now there. A new run
+//! replaces the results, and with them every sort.
+//!
+//! Only `query.setDatabase` is journaled: a replay of the others would run the SQL again, writes
+//! included, or act on results a replay does not have. Logs carry command ids and job labels,
+//! never SQL text.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -96,6 +116,7 @@ use std::time::Instant;
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
 use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState, TransactionState};
+use dbee_sql::filter::SortDir;
 use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
@@ -103,16 +124,21 @@ use serde_json::json;
 use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
 use crate::jobs::{self, Sent, Stop};
-use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome, Transaction};
+use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, ResultSort, Selection, StatementOutcome, Transaction};
 use crate::turns::InTurn;
 use crate::{Apply, ConnectionId, EndAbout, EngineError, JobId, Json, Need, Outcome, Running, Session, Tab, TabId, Which};
 
 const RUN: &str = "query.run";
 const CANCEL: &str = "query.cancel";
 const SHOW_RESULT: &str = "query.showResult";
+const SORT_RESULT: &str = "query.sortResult";
 const SET_DATABASE: &str = "query.setDatabase";
 const COMMIT: &str = "query.commit";
 const ROLLBACK: &str = "query.rollback";
+
+/// Why `query.sortResult` is off in a query tab: no result with columns is shown (none yet, or
+/// the shown statement returned no rows to show).
+pub const NO_RESULT: &str = "no result is shown";
 
 /// What `query.commit` and `query.rollback` say when the query session has no transaction open.
 pub const NO_TRANSACTION: &str = "no transaction is open";
@@ -188,6 +214,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
     CommandSpec {
+        id: SORT_RESULT,
+        label: "Sort Result by Column",
+        menu: &[],
+        shortcut: None,
+        params: "{column: 0-based index, dir?: \"asc\" | \"desc\" | \"none\" (default: the next of asc, desc, none)}",
+        enabled: can_sort_result,
+        run: sort_result,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
         id: COMMIT,
         label: "Commit",
         menu: &[],
@@ -228,6 +265,16 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 pub fn can_run(s: &Session) -> Result<(), String> {
     needs_db(s)?;
     active_query(s)
+}
+
+/// `query.sortResult`'s enabled check: a query tab is active and shows a result with columns. It
+/// asks nothing of the connection: the rows are in memory.
+pub fn can_sort_result(s: &Session) -> Result<(), String> {
+    match s.state.active_tab() {
+        Some(Tab::Query(q)) if q.shown_result().is_some_and(|o| !o.result.columns.is_empty()) => Ok(()),
+        Some(Tab::Query(_)) => Err(NO_RESULT.into()),
+        _ => Err(NO_QUERY_TAB.into()),
+    }
 }
 
 /// `query.setDatabase`'s enabled check: a connection is open whose dialect has `USE`.
@@ -441,7 +488,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                 Ok(result) => {
                     ran.current = ran.current.after(&result.database_after, moves);
                     left = left.saturating_sub(dbee_driver::result_cost(&result));
-                    ran.outcomes.push(StatementOutcome { range, result: Arc::new(result), ms });
+                    ran.outcomes.push(StatementOutcome::new(range, Arc::new(result), ms));
                 }
                 Err(error) => {
                     ran.current = ran.current.after_failure(&error, moves);
@@ -475,8 +522,9 @@ async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) 
 // ---- applying a run --------------------------------------------------------------------------
 
 /// The result as `query.run`, `query.showResult` and `inspect()` show it: `{statement, start,
-/// end, columns, rows, rowsSeen, complete, rowsAffected, ms}`, `rows` being the rows kept and
-/// `ms` how long the statement took.
+/// end, columns, rows, rowsSeen, complete, rowsAffected, ms, sort}`, `rows` being the rows kept,
+/// `ms` how long the statement took and `sort` the column its rows are sorted by in memory
+/// ([`sort_json`]), null as received.
 fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
     let r = &o.result;
     json!({
@@ -489,7 +537,17 @@ fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
         "complete": r.complete,
         "rowsAffected": r.rows_affected,
         "ms": o.ms,
+        "sort": sort_json(o),
     })
+}
+
+/// A result's sort as `query.sortResult` and `inspect()` give it: `{column, name, dir}`, the
+/// column's index and name and `asc` or `desc`; null for rows as received.
+fn sort_json(o: &StatementOutcome) -> Json {
+    match o.sort {
+        Some(sort) => json!({ "column": sort.column, "name": o.result.columns.get(sort.column).map(|c| c.name.as_str()), "dir": sort.dir }),
+        None => Json::Null,
+    }
 }
 
 fn results_json(q: &QueryTab) -> Vec<Json> {
@@ -1134,6 +1192,49 @@ fn show_result(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "tab": tab, "shown": index, "result": result })))
 }
 
+/// `{column, dir?}` → `{tab, shown, sort}`: sorts the shown result by its column `column` (a
+/// 0-based index), in memory over the rows held (see the module docs); `sort` is the result's
+/// sort after it (`{column, name, dir}`, or null). `dir` is `asc`, `desc` or `none`, which gives
+/// the order received back; without it the column's sort moves on like a header click: asc, desc,
+/// none. One column is sorted at a time. A column the result does not have, and a `dir` that is
+/// none of the three, are `BadParams` and change nothing.
+fn sort_result(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let column = p::usize(params, "column")?;
+    let dir = p::opt_str(params, "dir")?;
+    let tab = match s.state.active_tab() {
+        Some(Tab::Query(q)) => q.id,
+        _ => return Err(disabled(NO_QUERY_TAB)),
+    };
+    let nulls = s.state.dialect(Which::Tab(tab)).nulls();
+    let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Err(disabled(NO_QUERY_TAB)) };
+    let shown = q.shown;
+    let Some(outcome) = q.results.get_mut(shown).filter(|o| !o.result.columns.is_empty()) else { return Err(disabled(NO_RESULT)) };
+    let columns = outcome.result.columns.len();
+    if column >= columns {
+        return Err(bad(format!("`column` must be below {columns}, the number of the result's columns")));
+    }
+    let current = outcome.sort.filter(|sort| sort.column == column).map(|sort| sort.dir);
+    let dir = match dir {
+        Some("asc") => Some(SortDir::Asc),
+        Some("desc") => Some(SortDir::Desc),
+        Some("none") => None,
+        Some(_) => return Err(bad("`dir` must be \"asc\", \"desc\" or \"none\"")),
+        None => match current {
+            None => Some(SortDir::Asc),
+            Some(SortDir::Asc) => Some(SortDir::Desc),
+            Some(SortDir::Desc) => None,
+        },
+    };
+    outcome.sort = dir.map(|dir| ResultSort { column, dir });
+    // Always from the rows as received, so equal rows keep the server's order whatever the sort
+    // was before; a new list each time, which the value view takes as new rows.
+    outcome.order = dir.map(|dir| dbee_core::sort::order(&outcome.result, column, dir == SortDir::Desc, nulls).into());
+    let sort = sort_json(outcome);
+    // The selection stays at its place in the grid, which has the rows it had.
+    q.selection = fitting(q.selection, q.results.get(shown).map(|o| o.result.as_ref()));
+    Ok(Outcome::Done(json!({ "tab": tab, "shown": shown, "sort": sort })))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1165,6 +1266,139 @@ mod tests {
     }
 
     const T: Duration = Duration::from_secs(30);
+
+    /// A session with no database whose active query tab shows two results, the second one:
+    /// `(n, t)` in four rows, one short and one with a NULL, and `(x)` in two.
+    fn with_results() -> Session {
+        use dbee_core::{Column, TypeClass};
+
+        let mut s = Session::new(SessionOptions::default()).unwrap();
+        let id = s.state.take_tab_id();
+        let mut q = QueryTab::new(id, "q".into(), String::new());
+        let col = |name: &str, class| Column { name: name.into(), base_type: String::new(), type_label: String::new(), class };
+        let cell = |v: &str| Some(v.to_owned());
+        let first = ResultSet {
+            columns: vec![col("n", TypeClass::Number), col("t", TypeClass::Text)],
+            rows: vec![vec![cell("10"), cell("b")], vec![cell("9")], vec![None, cell("A")], vec![cell("100"), cell("a")]],
+            rows_seen: 4,
+            complete: true,
+            ..ResultSet::default()
+        };
+        let second = ResultSet {
+            columns: vec![col("x", TypeClass::Other)],
+            rows: vec![vec![cell("2")], vec![cell("1")]],
+            rows_seen: 2,
+            complete: true,
+            ..ResultSet::default()
+        };
+        q.results.push(StatementOutcome::new(0..0, Arc::new(first), 0));
+        q.results.push(StatementOutcome::new(0..0, Arc::new(second), 0));
+        q.shown = 1;
+        s.state.tabs.push(Tab::Query(q));
+        s.state.active = Some(id);
+        s
+    }
+
+    fn done(s: &mut Session, id: &str, params: Json) -> Json {
+        match s.execute(id, params) {
+            Ok(Outcome::Done(v)) => v,
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+
+    /// Every cell of the shown result as a copy reads it: rows by `/`, cells by `|`, NULL empty.
+    fn copied(s: &mut Session) -> String {
+        done(s, "selection.all", json!({}));
+        let text = done(s, "copy.selection", json!({ "format": "tsv" }))["text"].as_str().unwrap().to_owned();
+        text.replace('\t', "|").replace('\n', "/")
+    }
+
+    /// `query.sortResult` with a result to sort and no database (the fuzz's sessions have no
+    /// result, so there the command is always disabled): hostile params change nothing and are
+    /// never an `internal` error, and a run of sorts, copies, selections and result switches
+    /// reads every row through its result's own order.
+    #[test]
+    fn sort_result_survives_hostile_params_and_reads_through_the_order() {
+        let mut s = with_results();
+        done(&mut s, SHOW_RESULT, json!({ "index": 0 }));
+        done(&mut s, SORT_RESULT, json!({ "column": 1, "dir": "desc" }));
+        done(&mut s, "selection.set", json!({ "anchor": [1, 0], "focus": [2, 1] }));
+        let before = (s.inspect(), s.state.tabs.clone());
+        let deep = (0..64).fold(json!(0), |v, _| json!([v]));
+        let hostile = [
+            json!({}),
+            json!(null),
+            json!([]),
+            json!("column"),
+            json!({ "column": 2 }),
+            json!({ "column": u64::MAX }),
+            json!({ "column": i64::MIN }),
+            json!({ "column": -1 }),
+            json!({ "column": 0.5 }),
+            json!({ "column": 1e300 }),
+            json!({ "column": "0" }),
+            json!({ "column": "\0" }),
+            json!({ "column": "x".repeat(10_000) }),
+            json!({ "column": true }),
+            json!({ "column": [0] }),
+            json!({ "column": { "column": 0 } }),
+            json!({ "column": deep }),
+            json!({ "column": null, "dir": "asc" }),
+            json!({ "column": 0, "dir": "up" }),
+            json!({ "column": 0, "dir": "" }),
+            json!({ "column": 0, "dir": "ASC" }),
+            json!({ "column": 0, "dir": "asc\0" }),
+            json!({ "column": 0, "dir": "🐙" }),
+            json!({ "column": 0, "dir": 0 }),
+            json!({ "column": 0, "dir": ["asc"] }),
+            json!({ "column": 0, "dir": deep }),
+            json!({ "column": 2, "dir": "none" }),
+        ];
+        for params in hostile {
+            let e = s.execute(SORT_RESULT, params.clone()).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{params}: {e}");
+            assert_eq!(s.inspect(), before.0, "{params} changed what inspect shows");
+            assert!(s.state.tabs == before.1, "{params} changed the tab");
+        }
+        // Text descending, as left before the hostile params: NULL first (no connection reads as
+        // Postgres), and the short row's missing cell is NULL too.
+        assert_eq!(copied(&mut s), "9|/10|b/100|a/|A");
+        // Numbers ascending; the selection stays, and the copy and the value are of the rows shown.
+        done(&mut s, "selection.set", json!({ "anchor": [0, 0], "focus": [1, 1] }));
+        let sorted = done(&mut s, SORT_RESULT, json!({ "column": 0 }));
+        assert_eq!(sorted["sort"], json!({ "column": 0, "name": "n", "dir": "asc" }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 1], "whole": false }));
+        assert_eq!(done(&mut s, "copy.selection", json!({ "format": "tsv" }))["text"], "9\t\n10\tb");
+        assert_eq!(done(&mut s, "value.show", json!({}))["text"], "b");
+        assert_eq!(copied(&mut s), "9|/10|b/100|a/|A");
+        done(&mut s, SORT_RESULT, json!({ "column": 0 }));
+        assert_eq!(copied(&mut s), "|A/100|a/10|b/9|");
+        // Rows selected whole, moved by the keyboard's command, copied as JSON.
+        done(&mut s, "selection.rows", json!({ "first": 0 }));
+        done(&mut s, "selection.move", json!({ "rows": 1 }));
+        assert_eq!(done(&mut s, "value.copy", json!({}))["text"], "{\"n\": 100, \"t\": \"a\"}");
+        // The other result has its own order, and each is shown as it was left.
+        assert_eq!(done(&mut s, SHOW_RESULT, json!({ "index": 1 }))["result"]["sort"], Json::Null);
+        assert_eq!(copied(&mut s), "2/1");
+        done(&mut s, SORT_RESULT, json!({ "column": 0, "dir": "asc" }));
+        assert_eq!(copied(&mut s), "1/2");
+        assert_eq!(done(&mut s, SHOW_RESULT, json!({ "index": 0 }))["result"]["sort"]["dir"], "desc");
+        assert_eq!(copied(&mut s), "|A/100|a/10|b/9|");
+        assert_eq!(done(&mut s, SORT_RESULT, json!({ "column": 1, "dir": "none" }))["sort"], Json::Null);
+        assert_eq!(copied(&mut s), "10|b/9|/|A/100|a");
+        // The rows never moved, no job ran, and nothing was journaled.
+        let Some(Tab::Query(q)) = s.state.active_tab() else { panic!("a query tab") };
+        assert_eq!(q.results[0].result.rows[1], vec![Some("9".to_owned())]);
+        assert_eq!(q.results[1].sort().map(|sort| sort.dir), Some(SortDir::Asc));
+        assert_eq!(s.inspect()["jobs"], json!([]));
+        assert!(s.journal().iter().all(|(id, _)| id != SORT_RESULT));
+        // Without a result with columns the command is off, whatever the params.
+        let mut s = Session::new(SessionOptions::default()).unwrap();
+        done(&mut s, "tab.newQuery", json!({ "text": "select 1" }));
+        for params in [json!({}), json!({ "column": 0 }), json!({ "column": -1, "dir": 7 })] {
+            assert_eq!(s.execute(SORT_RESULT, params).unwrap_err().data()["why"], NO_RESULT);
+        }
+    }
 
     #[test]
     fn a_dead_tunnel_marks_the_session_lost() {

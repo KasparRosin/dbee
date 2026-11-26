@@ -5,6 +5,7 @@ use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, tokenize};
 use crate::refusal::{Code, Refusal};
+use dbee_core::sort::Nulls;
 use dbee_core::{ColumnInfo, Operators, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,9 @@ pub(crate) struct Rules {
     /// takes it ([`Dialect::misplaced_nul`]). The literals dbee writes still never carry one as a
     /// raw byte: [`StringLiteral::HexForBackslash`] writes such a value as hex.
     pub text_holds_nul: bool,
+    /// Where the engine's `ORDER BY` puts NULL ascending (descending, at the other end), which a
+    /// result sorted in memory follows.
+    pub nulls: Nulls,
     /// The texts a Bool column writes for true and false.
     pub bool_literals: (&'static str, &'static str),
     /// What filter operators do on the engine that their labels do not say.
@@ -453,6 +457,12 @@ impl Dialect {
         self.rules().text_holds_nul
     }
 
+    /// Where the engine's `ORDER BY` puts NULL ascending, with no `NULLS FIRST` or `NULLS LAST`:
+    /// a result sorted in memory puts it there too ([`dbee_core::sort`]).
+    pub fn nulls(self) -> Nulls {
+        self.rules().nulls
+    }
+
     /// The byte offset of the first NUL in `sql` the engine cannot take, which must not be sent:
     /// any NUL where statements cannot hold one, else one outside a string literal.
     pub fn misplaced_nul(self, sql: &str) -> Option<usize> {
@@ -808,6 +818,13 @@ mod tests {
         assert_eq!(Dialect::MySql.insert_defaults("`s`.`t`"), "INSERT INTO `s`.`t` () VALUES ()");
         assert_eq!(Dialect::Postgres.insert_defaults("\"s\".\"t\""), "INSERT INTO \"s\".\"t\" DEFAULT VALUES");
         assert_eq!(Dialect::Sqlite.insert_defaults("\"main\".\"t\""), "INSERT INTO \"main\".\"t\" DEFAULT VALUES");
+    }
+
+    /// Where each engine's `ORDER BY` puts NULL, from its documentation; the engine's tests check
+    /// it against each server (`sort_result_nulls_as_the_engine_sorts_them`).
+    #[test]
+    fn nulls_sort_last_only_on_postgres() {
+        assert_eq!(Dialect::ALL.map(Dialect::nulls), [Nulls::Last, Nulls::First, Nulls::First]);
     }
 
     #[test]

@@ -723,6 +723,7 @@ fn grid_frame_within_budget() {
                 sort: None,
                 sortable: false,
                 blocked: None,
+                sort_hint: None,
                 edits: RowEdits::None,
                 links: false,
                 first_number: 1,

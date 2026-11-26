@@ -369,7 +369,8 @@ fn the_ssh_login_row_keeps_its_height() {
             assert!(ui.text_in(line.expand2(egui::vec2(0.0, 24.0)), "USES").is_some(), "{auth}: USES over the line");
         }
     }
-    assert!(ui.value("conn-ssh-key").as_str().unwrap().starts_with("Uses "), "no file chosen: the key line");
+    // The key line is a job's answer (`connection.sshKey`), asked again at each change of login.
+    ui.until("the key line with no file chosen", |ui| ui.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ")));
     assert_eq!(ui.tag("conn-ssh-auto").unwrap()["enabled"], false, "CLEAR is off with no file chosen");
 
     // A key file chosen: CLEAR is on, and forgets it.

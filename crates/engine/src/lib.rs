@@ -39,7 +39,7 @@ pub use dbee_driver::{Meaning, TlsState, TransactionState, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{
-    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, Showing, State, StatementOutcome, StructureRead, Tab,
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, ResultSort, Screen, Selection, Showing, State, StatementOutcome, StructureRead, Tab,
     TabStructure, TableTab, Total, Transaction, Which,
 };
 pub use update::{UpdateState, Updates};

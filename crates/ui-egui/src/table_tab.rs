@@ -724,6 +724,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     sort,
                     sortable: true,
                     blocked: blocked(tab, lost),
+                    sort_hint: None,
                     edits: match edit_blocked.as_deref() {
                         None => RowEdits::Allowed,
                         Some(why) => RowEdits::Blocked(why),

@@ -4,6 +4,7 @@ use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules,
 use crate::filter::Op;
 use crate::lexer::{Token, is_word, significant, word};
 use crate::refusal::{Code, Refusal};
+use dbee_core::sort::Nulls;
 use dbee_core::{ColumnInfo, TypeClass};
 
 pub(crate) const RULES: Rules = Rules {
@@ -19,6 +20,7 @@ pub(crate) const RULES: Rules = Rules {
     use_database: None,
     // Its prepare stops at a NUL, so text after one would be cut off unseen.
     text_holds_nul: false,
+    nulls: Nulls::First,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Like, Op::NotLike, Op::ILike, Op::NotILike], "Ignores upper and lower case for A–Z only.")],
     schema_word: ("schema", "Schemas"),

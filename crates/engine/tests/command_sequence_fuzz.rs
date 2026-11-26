@@ -52,6 +52,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("query.run", &[("current", Hint::Bool), ("cursor", Hint::Count)]),
     ("query.cancel", &[]),
     ("query.showResult", &[("index", Hint::Count)]),
+    ("query.sortResult", &[("column", Hint::Count), ("dir", Hint::OneOf(&["asc", "desc", "none", "up", ""]))]),
     ("query.setDatabase", &[("tab", Hint::Tab), ("database", Hint::Text)]),
     ("query.commit", &[("tab", Hint::Tab)]),
     ("query.rollback", &[("tab", Hint::Tab)]),

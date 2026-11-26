@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (checked against the M3 tree: the Query and Data rows and "What works today" say what the cell editor, the value panel, the error band and the tracked transaction do; "Effort and calibration" keeps the dates and counts; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-26 · **Change:** minor ("What works today": a query's result sorted by a header click; "Performance": what `dbee_core::sort::order` costs at the cap, measured again once a text is folded once; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -110,6 +110,8 @@ The launch check, a release build to the connection screen with the window shown
 
 The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 40.3 s and 39.8 s on 2026-11-05 (the load was not recorded for those two), 91.9 s in that day's `--ignored` run (load 22.14 at its start), and 37.6 s on 2026-11-06 (load 7.79 at its start, 5.70 at its end).
 
+Sorting a query result at the cap: `dbee_core::sort::order` over 10,000 rows, which runs in the frame of the click, took 1.8 ms for numbers, 5.6 ms for short texts, 7.5 ms for 10,000 copies of one 20 kB text and 20 ms for numbers of 1,000 digits that differ at their end. The worst cases found are long values that are alike nearly to their end. The worst of them, 0.31 s, is texts of 26.8 kB that fill a run's 256 MiB and differ at their end, their first 256 characters of four bytes each. The others took 0.15 to 0.18 s: 160 ms for texts of 20 kB that differ in case at their first character, 151 ms for texts of 20 kB that differ at their end, and 178–179 ms for digit strings of 25,000 (that differ at their end, or after 25,000 zeros before the number or after its point; past 1,024 bytes a cell is text, not a number). Texts that are the same over their first 256 characters but for case, each letter in a case of its own, took 36 ms (ASCII letters) and 81 ms (Cyrillic): a text's first 256 characters are folded once and kept while the sort runs. With every comparison folding both of its texts, as the comparison first was, the same two took 559 ms and 1.81 s (the same build but for that, at a load average of 0.64 / 1.22 / 1.74). The kept key has a cost of its own where none was needed: texts of 256 Cyrillic letters that differ in case at their first letter and by more right after took 51 ms, and 12 ms when two letters were folded at each comparison. Medians of 5, targets 16 ms for the first three, 100 ms for the long numbers and for those last texts, and 500 ms for the rest; measured 2026-11-26 on an Intel Core i5-14400F (16 threads) in the dev container, dev profile, at a load average of 0.50 / 0.65 / 1.44, with `a_sort_of_ten_thousand_rows_within_a_frame` (`crates/core/src/sort.rs`, `#[ignore]`). The command and the frame around it were timed once, by hand, in the real window on PostgreSQL: `query.sortResult` over the control channel answered in 90–97 ms on 10,000 of those Cyrillic texts.
+
 Beekeeper Studio's own timings were not measured.
 
 ## Platforms
@@ -139,7 +141,7 @@ Agent hours were not logged in either, so per-area hours are not estimated yet. 
 - **Browsing:** a schema tree with a filter (databases on MySQL and MariaDB); quick search (Ctrl+P) over the tables and the saved connections, switching connection; table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging by 100, estimated and exact counts, and foreign keys followed into a filtered tab.
 - **Editing:** staged edits (an editor in the cell for every type, the value panel showing the same draft and taking new lines; set NULL, add and delete rows), undo and redo, and Apply or Ctrl+S in one transaction, all or nothing.
 - **Values:** a value panel with the whole value of a cell, or a selected row as JSON, JSON pretty-printed and coloured, selectable and copyable.
-- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results; an error band that jumps to the position, with ROLLBACK under a failed transaction; an open transaction shown in the status bar and asked about on close; on MySQL and MariaDB the database a tab runs in.
+- **Queries:** query tabs with syntax colours in the engine's dialect; run all, or the statement under the cursor; cancel; several results, each sorted in memory by a click on a column header; an error band that jumps to the position, with ROLLBACK under a failed transaction; an open transaction shown in the status bar and asked about on close; on MySQL and MariaDB the database a tab runs in.
 - **Copying:** values, with a header, or as CSV, JSON or Markdown, up to 8 MiB.
 - **Structure:** a table tab's STRUCTURE, read-only: columns, indexes, foreign keys, the keys that reference the table, triggers.
 - **Look:** M3's redesign on every screen built so far, in light and dark; nothing that waits shows before it has run 300 ms.
@@ -153,6 +155,9 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-26 | minor | "Performance": the sort's cost measured again, a text's first 256 characters now folded once and kept: texts that are the same there but for case took 559 ms and 1.81 s with every comparison folding them, and take 36 ms and 81 ms; the worst case found is 0.31 s, for texts that fill a run's 256 MiB. |
+| 2026-11-25 | minor | "Performance": the sort's timing is of `dbee_core::sort::order`, not of the command or a frame; measured again after numbers are read once, with the digit-string cases and texts that differ at their end. |
+| 2026-11-25 | minor | "What works today": a query's result is sorted in memory by a header click. "Performance": the sort's cost at the 10,000-row cap. No grade changes: what Beekeeper Studio does there was not observed. |
 | 2026-11-23 | minor | Checked against the M3 tree. Query: what dbee does with a transaction a script opens (manual transactions still missing). Data: the value panel shows a selected row and an edited cell's draft. "What works today": the cell editor, the error band, the transaction. "Effort and calibration" keeps the dates and counts only. Grades unchanged. |
 | 2026-11-20 | minor | M3's screens: Structure 40 % (2 of 5, read-only; estimated), App 12 % (light and dark themes), features ~38 %, overall ~30 % (estimated); UI ~45 % stands (24 elements, 3 done, 18 partial); what works today gains Structure and the look. |
 | 2026-11-08 | minor | Platforms: the first test release built every row (2026-10-29), regular CI builds Linux only; M2 effort; import and export are M4 (M3 is the Redesign). |

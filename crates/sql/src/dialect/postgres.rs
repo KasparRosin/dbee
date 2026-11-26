@@ -3,6 +3,7 @@
 use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, LikeOperators, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
 use crate::refusal::{CHAIN, CHANGES_MODE, Code, ON, READ_WRITE, Refusal};
+use dbee_core::sort::Nulls;
 use dbee_core::{ColumnInfo, Operators};
 
 pub(crate) const RULES: Rules = Rules {
@@ -19,6 +20,7 @@ pub(crate) const RULES: Rules = Rules {
     use_database: None,
     // The protocol carries statements as C strings.
     text_holds_nul: false,
+    nulls: Nulls::Last,
     bool_literals: ("t", "f"),
     op_notes: &[],
     schema_word: ("schema", "Schemas"),

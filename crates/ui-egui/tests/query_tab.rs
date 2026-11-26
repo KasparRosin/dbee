@@ -1,9 +1,9 @@
 //! The query tab driven through the control channel, one frame at a time in a kittest harness over
 //! [`DbeeApp::ui`]: the SQL editor (keys, Tab, the cursor), Run, Run current and Cancel, the result
-//! selector, the read-only result grid with its cap notice and rows-affected line, the error card
-//! and the split between editor and results. Everything goes through control requests and
-//! automation ids, the way an agent drives the real window; assertions read `ui.inspect` and
-//! `document.inspect`.
+//! selector, the result grid (sorted by a header click, never edited) with its cap notice and
+//! rows-affected line, the error card and the split between editor and results. Everything goes
+//! through control requests and automation ids, the way an agent drives the real window;
+//! assertions read `ui.inspect` and `document.inspect`.
 //!
 //! Safety: every session keeps its connections file in a throwaway home, its secrets in a
 //! `MemoryStore`, and reads SSH files from `<temp home>/.ssh` with no agent. The tests connect
@@ -526,15 +526,12 @@ fn the_value_panel_follows_the_result_grid() {
 }
 
 #[test]
-fn the_result_grid_is_read_only() {
+fn the_result_grid_edits_nothing() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select id, name from shop.customers order by id limit 5");
     ui.ctrl("Enter");
     ui.ran();
-    ui.click("grid-header-0");
-    ui.frame();
-    assert_eq!(ui.document()["jobs"], json!([]), "a header click sorts nothing");
     ui.click_with("grid-cell-1-1", json!({ "count": 2 }));
     ui.frame();
     assert!(ui.tag("cell-editor").is_none(), "a double-click edits nothing");
@@ -546,6 +543,171 @@ fn the_result_grid_is_read_only() {
     }
     ui.click("grid-menu-copy");
     assert_eq!(ui.copied().as_deref(), Some("Customer 2"));
+    assert_eq!(ui.document()["jobs"], json!([]), "a double-click and the menu's copy start no job");
+}
+
+/// Four rows of a number and a text, in no order. `Fig` has its capital so that a sort by bytes
+/// (`Apple, Fig, apple, pear`) is not the sort without regard to case.
+const UNSORTED: &str = "select * from (values (10, 'Apple'), (2, 'pear'), (100, 'Fig'), (9, 'apple')) v(n, t)";
+
+/// Column `col` of the result grid as drawn, top to bottom.
+fn drawn_column(ui: &mut Ui, col: usize, rows: usize) -> Vec<String> {
+    (0..rows).map(|row| ui.value(&format!("grid-cell-{row}-{col}"))["text"].as_str().unwrap_or_default().to_owned()).collect()
+}
+
+#[test]
+fn a_header_click_sorts_the_result() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text(UNSORTED);
+    ui.ctrl("Enter");
+    ui.ran();
+    let head = ui.value("grid-header-0");
+    assert_eq!((head["name"].clone(), head["sort"].clone()), (json!("n"), Json::Null), "{head}");
+    assert_eq!(drawn_column(&mut ui, 0, 4), ["10", "2", "100", "9"]);
+    // Asc, desc, then the order the server sent; the rows are drawn in the new order in the frame
+    // after the click.
+    for (dir, numbers, texts) in [
+        (json!("asc"), ["2", "9", "10", "100"], ["pear", "apple", "Apple", "Fig"]),
+        (json!("desc"), ["100", "10", "9", "2"], ["Fig", "Apple", "apple", "pear"]),
+        (Json::Null, ["10", "2", "100", "9"], ["Apple", "pear", "Fig", "apple"]),
+    ] {
+        ui.click("grid-header-0");
+        ui.frame();
+        assert_eq!(ui.value("grid-header-0")["sort"], dir);
+        assert_eq!(ui.value("grid-header-1")["sort"], Json::Null, "one sorted column");
+        assert_eq!(drawn_column(&mut ui, 0, 4), numbers, "{dir}");
+        assert_eq!(drawn_column(&mut ui, 1, 4), texts, "{dir}: whole rows move");
+        let sort = ui.query()["results"][0]["sort"].clone();
+        assert_eq!(sort, if dir.is_null() { Json::Null } else { json!({ "column": 0, "name": "n", "dir": dir }) });
+        assert_eq!(ui.document()["jobs"], json!([]), "a sort asks the database nothing");
+        assert!(ui.tag("notice").is_none(), "{:?}", ui.tag("notice"));
+    }
+    // Another header takes the sort over, from asc; text sorts without regard to case.
+    ui.click("grid-header-0");
+    ui.click("grid-header-1");
+    ui.frame();
+    assert_eq!((ui.value("grid-header-0")["sort"].clone(), ui.value("grid-header-1")["sort"].clone()), (Json::Null, json!("asc")));
+    assert_eq!(drawn_column(&mut ui, 1, 4), ["Apple", "apple", "Fig", "pear"]);
+    // The row numbers stay 1 to n (the second row here is the fourth the server sent), and the
+    // hover says what a click does.
+    let numbers: Vec<Json> = (0..4).map(|row| ui.value(&format!("grid-row-{row}"))["number"].clone()).collect();
+    assert_eq!(numbers, [1, 2, 3, 4]);
+    let head = ui.drawn("grid-header-0").center();
+    ui.rest(head);
+    let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
+    assert_eq!(said, ["Sort by this column"]);
+    // Running again shows the new result as the server sent it.
+    ui.click("query-run");
+    ui.ran();
+    assert_eq!(ui.value("grid-header-1")["sort"], Json::Null);
+    assert_eq!(drawn_column(&mut ui, 0, 4), ["10", "2", "100", "9"]);
+}
+
+#[test]
+fn the_value_panel_and_copy_follow_the_sorted_result() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text(UNSORTED);
+    ui.ctrl("Enter");
+    ui.ran();
+    ui.click("grid-cell-0-1");
+    let at = json!({ "anchor": [0, 1], "focus": [0, 1], "whole": false });
+    assert_eq!(ui.document()["selection"], at);
+    assert_eq!(ui.value("value-text")["text"], "Apple", "{}", ui.value("value-text"));
+    // The selection stays where it is; the panel and a copy give the cell now under it.
+    ui.click("grid-header-0");
+    ui.frame();
+    assert_eq!(ui.document()["selection"], at);
+    assert_eq!(ui.value("grid-cell-0-1")["text"], "pear");
+    assert_eq!(ui.value("value-text")["text"], "pear", "the panel shows the row now selected");
+    assert_eq!(ui.document()["value"]["text"], "pear");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("pear"));
+    // The arrow keys move the selection over the rows as shown.
+    ui.key("ArrowDown");
+    ui.frame();
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1], "whole": false }));
+    assert_eq!(ui.value("value-text")["text"], "apple", "the second row as sorted (9, apple)");
+    ui.key("ArrowDown");
+    ui.key("ArrowLeft");
+    ui.key_with("ArrowDown", json!({ "shift": true }));
+    ui.frame();
+    assert_eq!(ui.value("value-text")["text"], "100");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("10\n100"));
+    // A whole sorted row, and every cell in the order shown.
+    ui.click("grid-row-3");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("100\tFig"));
+    ui.ctrl("A");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("2\tpear\n9\tapple\n10\tApple\n100\tFig"));
+    // The menu's copy too (a right-click inside the selection keeps it).
+    ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
+    ui.click("grid-menu-copy-header");
+    assert_eq!(ui.copied().as_deref(), Some("n\tt\n2\tpear\n9\tapple\n10\tApple\n100\tFig"));
+}
+
+#[test]
+fn a_cut_results_header_says_it_sorts_the_rows_loaded() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    let long = "a_rather_long_column_name_its_header_has_no_room_for_at_all";
+    ui.text(&format!("select g as n, g as {long} from generate_series(1, 25000) g"));
+    ui.ctrl("Enter");
+    ui.ran();
+    assert_eq!(ui.value("query-rows"), "First 10,000 of 25,000 rows");
+    let head = ui.drawn("grid-header-0").center();
+    ui.rest(head);
+    let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
+    assert_eq!(said, ["Sort the 10,000 rows loaded by this column"]);
+    // A header that shows less than its name says the whole name and type first, then the same.
+    assert_eq!(ui.value("grid-header-1")["cut"], true, "{}", ui.value("grid-header-1"));
+    let head = ui.drawn("grid-header-1").center();
+    ui.rest(head);
+    let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
+    assert_eq!(said, [format!("{long} int4\nSort the 10,000 rows loaded by this column")]);
+    // It sorts them: the largest of the rows held comes first, and the bar keeps its notice.
+    ui.click("grid-header-0");
+    ui.click("grid-header-0");
+    ui.frame();
+    assert_eq!(ui.value("grid-header-0")["sort"], "desc");
+    assert_eq!(ui.value("grid-cell-0-0")["text"], "10000");
+    assert_eq!(ui.value("query-rows"), "First 10,000 of 25,000 rows");
+    assert_eq!(ui.query()["results"][0]["complete"], false);
+}
+
+#[test]
+fn sorting_one_result_leaves_the_others() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("select * from (values (2), (1), (3)) v(a); select * from (values ('b'), ('c'), ('a')) v(b)");
+    ui.ctrl("Enter");
+    ui.ran();
+    assert_eq!(ui.value("grid-header-0")["name"], "b");
+    ui.click("grid-header-0");
+    ui.frame();
+    assert_eq!(drawn_column(&mut ui, 0, 3), ["a", "b", "c"]);
+    // The first result is as it came, and keeps a sort of its own.
+    ui.click("result-1");
+    ui.frame();
+    assert_eq!((ui.value("grid-header-0")["name"].clone(), ui.value("grid-header-0")["sort"].clone()), (json!("a"), Json::Null));
+    assert_eq!(drawn_column(&mut ui, 0, 3), ["2", "1", "3"]);
+    ui.click("grid-header-0");
+    ui.click("grid-header-0");
+    ui.frame();
+    assert_eq!(drawn_column(&mut ui, 0, 3), ["3", "2", "1"]);
+    ui.click("result-2");
+    ui.frame();
+    assert_eq!(ui.value("grid-header-0")["sort"], "asc");
+    assert_eq!(drawn_column(&mut ui, 0, 3), ["a", "b", "c"]);
+    ui.click("result-1");
+    ui.frame();
+    assert_eq!(ui.value("grid-header-0")["sort"], "desc");
+    assert_eq!(drawn_column(&mut ui, 0, 3), ["3", "2", "1"]);
+    let sorts: Vec<Json> = ui.query()["results"].as_array().unwrap().iter().map(|r| r["sort"]["dir"].clone()).collect();
+    assert_eq!(sorts, [json!("desc"), json!("asc")]);
 }
 
 #[test]
