@@ -2,85 +2,72 @@
 //!
 //! The desktop's own opener is started with the page's address as its one argument, through no
 //! shell: `xdg-open` on Linux and FreeBSD, found on `PATH` (inside a Flatpak it asks the desktop's
-//! portal), `/usr/bin/open` on macOS, and on Windows `rundll32 url.dll,FileProtocolHandler`.
-//! Nothing is linked in for it: egui's own way (`Context::open_url`, eframe's `links` feature)
-//! brings a URL library and its Unicode tables, 28 crates, and a page that does not open is one
-//! line in its log. dbee was built without that feature, so 0.3.1 and 0.3.2 opened nothing on a
-//! click.
+//! portal), `/usr/bin/open` on macOS, and on Windows `rundll32 url.dll,FileProtocolHandler`. Not
+//! through egui's `Context::open_url`: `docs/decisions.md`, 2026-11-26.
 //!
-//! Only a plain web page's address is passed on ([`fits`]): `https://`, then letters, digits and
-//! `-`, `.`, `_`, `/`, which is what a release's page is made of (the one caller hands in the
-//! repository's address with a version the manifest was read for). No shell reads the address,
-//! and with this set an opener has nothing to read into it either: no pattern, no `%`, no `@`,
-//! no query. On Linux, FreeBSD and macOS the opener is started in `/`, not in the folder dbee was
-//! started in: some openers (KDE's) take a file there of the address's own name for what to
-//! open. Windows needs none of it, where no file can have such a name. There too it is in a
-//! process group of its own, so what ends dbee from its terminal does not end a browser the
-//! opener stayed with.
+//! Only a plain web page's address is passed on ([`plain_page`]). No shell reads it, and an
+//! opener has nothing to read into it either: no pattern, no `%`, no `@`, no query. On Linux,
+//! FreeBSD and macOS the opener is started in `/`, not in the folder dbee was started in: some
+//! openers (KDE's) take a file there of the address's own name for what to open. Windows needs
+//! none of it, where no file can have such a name. On those three it is also in a process group
+//! of its own, so what ends dbee from its terminal does not end a browser the opener stayed with.
 //!
-//! A click that opens nothing has to say so. A failure to start the opener is the answer of
-//! [`open`]. One that shows only when the opener ends (no browser to hand the page to) is told
-//! through `failed`, from a thread that waits for the opener, so it is not left behind as a
-//! zombie; an opener that ends in failure later than [`TOLD_WITHIN`] is only logged, since some
-//! stay for as long as the browser they started. What is not told: an opener that ends well and
-//! opened nothing, which is every failure on Windows, where `rundll32` ends well whatever
+//! A click that opens nothing has to say so. A failure to start the opener is the [`Browser`]'s
+//! answer. One that shows only when the opener ends (no browser to hand the page to) is told
+//! through its [`LateFailure`], from a thread that waits for the opener, so it is not left behind
+//! as a zombie; an opener that ends in failure later than [`TOLD_WITHIN`] is only logged, since
+//! some stay for as long as the browser they started. What is not told: an opener that ends well
+//! and opened nothing, which is every failure on Windows, where `rundll32` ends well whatever
 //! happened.
 
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Where a failure that shows only after [`Browser`] answered is told: at most once, from another
-/// thread.
-pub type Failed = Box<dyn FnOnce(String) + Send>;
+/// Where a failure that shows only after a [`Browser`] answered is told: at most once, from
+/// another thread.
+pub type LateFailure = Box<dyn FnOnce(String) + Send>;
 
 /// What opens a page for the app ([`crate::DbeeApp::with_browser`]): the page's address, and
 /// where a late failure goes. `Err` says why nothing was started.
-pub type Browser = Arc<dyn Fn(&str, Failed) -> Result<(), String> + Send + Sync>;
+pub type Browser = Arc<dyn Fn(&str, LateFailure) -> Result<(), String> + Send + Sync>;
 
 /// The longest address passed on.
-pub const MAX_ADDRESS: usize = 2048;
+const MAX_ADDRESS: usize = 2048;
 
-/// How long after its start an opener's failure is still told to the user.
-pub const TOLD_WITHIN: Duration = Duration::from_secs(10);
+/// How long after its start an opener's failure is still told, and how long after it was told
+/// the app still acts on it. The app answers a failure by putting the page's address on the
+/// clipboard, which by later may hold something newer.
+pub(crate) const TOLD_WITHIN: Duration = Duration::from_secs(3);
 
-/// The desktop's opener ([`open`]).
+/// The desktop's opener.
 pub fn system() -> Browser {
-    Arc::new(open)
+    Arc::new(|url, failed| {
+        let (program, before): (&str, &[&str]) = if cfg!(target_os = "macos") {
+            // Its place is fixed, so `PATH` is not asked.
+            ("/usr/bin/open", &[])
+        } else if cfg!(windows) {
+            ("rundll32", &["url.dll,FileProtocolHandler"])
+        } else {
+            ("xdg-open", &[])
+        };
+        start(program, before, url, failed)
+    })
 }
 
-/// The opener of this system, and what it takes before the address.
-fn opener() -> (&'static str, &'static [&'static str]) {
-    if cfg!(target_os = "macos") {
-        // Its place is fixed, so `PATH` is not asked.
-        ("/usr/bin/open", &[])
-    } else if cfg!(windows) {
-        ("rundll32", &["url.dll,FileProtocolHandler"])
-    } else {
-        ("xdg-open", &[])
-    }
-}
-
-/// Whether `url` is a web page's address an opener may be handed: `https://` and then, to at most
-/// [`MAX_ADDRESS`] in all, ASCII letters, digits and `-`, `.`, `_`, `/`. A release's page needs no
-/// more, and every other mark means something to one opener or another (see the module docs); a
-/// caller that needs one adds it here with the reason it is safe.
-pub fn fits(url: &str) -> bool {
+/// Whether `url` is a plain web page's address, one an opener may be handed: `https://` and then,
+/// to at most [`MAX_ADDRESS`] in all, ASCII letters, digits and `-`, `.`, `_`, `/`. A release's
+/// page needs no more, and every other mark means something to one opener or another; a caller
+/// that needs one adds it here with the reason it is safe.
+pub(crate) fn plain_page(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else { return false };
     !rest.is_empty() && url.len() <= MAX_ADDRESS && rest.chars().all(|c| c.is_ascii_alphanumeric() || "-._/".contains(c))
 }
 
-/// Opens `url` in the browser with the desktop's opener. `Err` says why the opener was not
-/// started; a failure it ends with is told to `failed` (see the module docs).
-pub fn open(url: &str, failed: Failed) -> Result<(), String> {
-    let (program, before) = opener();
-    start(program, before, url, failed)
-}
-
 /// Starts `program` with `before` and then `url` as its arguments, and waits for it on a thread
 /// of its own.
-fn start(program: &str, before: &[&str], url: &str, failed: Failed) -> Result<(), String> {
-    if !fits(url) {
+fn start(program: &str, before: &[&str], url: &str, failed: LateFailure) -> Result<(), String> {
+    if !plain_page(url) {
         return Err("it is not a web page's address".into());
     }
     let mut command = Command::new(program);
@@ -92,7 +79,7 @@ fn start(program: &str, before: &[&str], url: &str, failed: Failed) -> Result<()
         use std::os::unix::process::CommandExt;
         command.current_dir("/").process_group(0);
     }
-    let mut child = command.spawn().map_err(|e| format!("`{program}` did not start: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("`{program}` did not start: {}", words(&e)))?;
     let (program, started) = (program.to_owned(), Instant::now());
     let waiting = std::thread::Builder::new().name("dbee-open-page".into()).spawn(move || {
         let why = match child.wait() {
@@ -114,6 +101,12 @@ fn start(program: &str, before: &[&str], url: &str, failed: Failed) -> Result<()
     Ok(())
 }
 
+/// The system's words for `e`, without their number and the full stop Windows ends them with:
+/// `No such file or directory (os error 2)`, `Access is denied. (os error 5)`.
+fn words(e: &std::io::Error) -> String {
+    e.to_string().split(" (os error").next().unwrap_or_default().trim_end_matches('.').to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -123,9 +116,9 @@ mod tests {
     const PAGE: &str = "https://github.com/KasparRosin/dbee/releases/tag/v0.3.2";
 
     #[test]
-    fn only_a_web_pages_address_fits() {
+    fn only_a_plain_web_pages_address_is_one() {
         for url in [PAGE, "https://github.com/Some-One/a.b_c/releases/tag/v0.4.0-rc.1", "https://example.org"] {
-            assert!(fits(url), "{url}");
+            assert!(plain_page(url), "{url}");
         }
         let long = format!("https://example.org/{}", "a".repeat(MAX_ADDRESS));
         for url in [
@@ -159,13 +152,13 @@ mod tests {
             "https://example.org/ü",
             long.as_str(),
         ] {
-            assert!(!fits(url), "{url:?}");
+            assert!(!plain_page(url), "{url:?}");
         }
-        assert!(fits(&long[..MAX_ADDRESS]));
+        assert!(plain_page(&long[..MAX_ADDRESS]));
     }
 
     /// A callback that hands what it is told to the receiver.
-    fn told() -> (Failed, mpsc::Receiver<String>) {
+    fn told() -> (LateFailure, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel();
         (
             Box::new(move |why| {
@@ -176,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn an_address_that_does_not_fit_starts_nothing() {
+    fn an_address_that_is_no_plain_page_starts_nothing() {
         let (failed, rx) = told();
         // `true` would start anywhere: the address is refused before it.
         assert_eq!(start("true", &[], "http://example.org/", failed), Err("it is not a web page's address".into()));
@@ -186,8 +179,12 @@ mod tests {
     #[test]
     fn an_opener_that_is_not_there_says_so_at_once() {
         let (failed, rx) = told();
+        assert_eq!(words(&std::io::Error::other("Access is denied. (os error 5)")), "Access is denied");
         let why = start("dbee-no-such-opener", &[], PAGE, failed).unwrap_err();
-        assert!(why.starts_with("`dbee-no-such-opener` did not start: "), "{why}");
+        assert!(
+            why.starts_with("`dbee-no-such-opener` did not start: ") && !why.contains("os error"),
+            "the system's words, without their number: {why}"
+        );
         assert!(rx.recv().is_err());
     }
 

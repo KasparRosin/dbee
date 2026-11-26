@@ -230,7 +230,6 @@ impl Ui {
             match c {
                 egui::OutputCommand::CopyText(t) => self.copied.push(t.clone()),
                 egui::OutputCommand::CopyImage(_) => {}
-                // 0.3.1 and 0.3.2 asked egui for the release's page and opened nothing.
                 egui::OutputCommand::OpenUrl(open) => {
                     panic!(
                         "egui was asked to open {}: the real app is built without eframe's `links`, so nothing would open; use `DbeeApp::open_page`",

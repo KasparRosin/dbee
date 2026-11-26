@@ -8,8 +8,8 @@
 //! unless that listener is named. It never reaches GitHub. One test lets the click open its page,
 //! with the system clipboard: there the desktop's opener is a stand-in of the test's, whose folder
 //! is the app's whole `PATH`, and which only writes down what it was started with, so no browser
-//! starts. (Should the stand-in not start, the app says so and leaves the page's address on this
-//! machine's clipboard.)
+//! starts. (Should the stand-in not start, or end in failure, the app says so and leaves the
+//! page's address on this machine's clipboard.)
 
 mod common;
 
@@ -26,6 +26,9 @@ use serde_json::json;
 const SHOTS: &str = "target/update-check";
 
 const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+/// The page of the release the stand-in offers.
+const PAGE: &str = "https://github.com/KasparRosin/dbee/releases/tag/v0.3.1";
 
 /// A stand-in for the releases: answers every request with the manifest of release `version`,
 /// and keeps each request's lines. Returns its port.
@@ -81,14 +84,13 @@ fn the_real_app_finds_a_newer_release_and_offers_its_download() {
     assert_eq!(update["checks"], "automatic", "{update}");
     app.until("the update button", |app| app.tag("update-button").is_some());
     assert_eq!(app.value("update-button"), json!({ "state": "download", "label": "Download 0.3.1" }));
-    let page = "https://github.com/KasparRosin/dbee/releases/tag/v0.3.1";
     let update = app.document()["update"].clone();
     assert_eq!(
         (update["state"].clone(), update["from"].clone(), update["to"].clone()),
         (json!("available"), json!("0.3.0"), json!("0.3.1")),
         "{update}"
     );
-    assert_eq!(update["action"], json!({ "type": "openPage", "url": page }));
+    assert_eq!(update["action"], json!({ "type": "openPage", "url": PAGE }));
     app.shot(&root, "1-download-on-the-connection-screen");
 
     // One request, naming dbee and its real version, and nothing else of dbee's.
@@ -100,10 +102,10 @@ fn the_real_app_finds_a_newer_release_and_offers_its_download() {
     assert_eq!(headers, [format!("user-agent: dbee/{}", env!("CARGO_PKG_VERSION"))]);
 
     // The command hands the page back; the button names it (a memory clipboard keeps it in the app).
-    assert_eq!(app.execute("app.update", json!({})), json!({ "action": "openPage", "url": page }));
+    assert_eq!(app.execute("app.update", json!({})), json!({ "action": "openPage", "url": PAGE }));
     assert_eq!(app.inspect()["openedUrl"], json!(null));
     app.click("update-button");
-    assert_eq!(app.inspect()["openedUrl"], page);
+    assert_eq!(app.inspect()["openedUrl"], PAGE);
 
     // A test source's answer is not kept, and the setting is.
     let settings = home.home.join(".config").join("dbee");
@@ -118,8 +120,7 @@ fn the_real_app_finds_a_newer_release_and_offers_its_download() {
 
 /// The click's own path, which the memory clipboard keeps the test above out of: with the system
 /// clipboard the real app starts the desktop's opener with the release's page as its one
-/// argument, in the root folder. (0.3.1 and 0.3.2 opened nothing: they asked egui, which was
-/// built without its `links`.)
+/// argument, in the root folder.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "opens a window on the desktop; run by hand: cargo test -p dbee --test update_check -- --ignored --nocapture"]
@@ -153,9 +154,8 @@ fn a_click_on_the_real_apps_button_starts_the_desktops_opener_with_the_page() {
     app.until("the update button", |app| app.tag("update-button").is_some());
     assert!(!seen.exists(), "nothing opens before the click");
     app.click("update-button");
-    let page = "https://github.com/KasparRosin/dbee/releases/tag/v0.3.1";
-    app.until("the opener's start", |_| std::fs::read_to_string(&seen).is_ok_and(|args| args == format!("{page}\n/\n")));
-    assert_eq!(app.inspect()["openedUrl"], page);
+    app.until("the opener's start", |_| std::fs::read_to_string(&seen).is_ok_and(|args| args == format!("{PAGE}\n/\n")));
+    assert_eq!(app.inspect()["openedUrl"], PAGE);
     assert!(app.tag("notice").is_none(), "the page opened: no notice ({:?})", app.tag("notice"));
     app.quit();
 }
