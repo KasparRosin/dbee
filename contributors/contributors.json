@@ -2,19 +2,19 @@
   "schema": 1,
   "repo": "KasparRosin/dbee",
   "branch": "main",
-  "head": "2206d3b2f6be221db68c738e1598cf2aa74d9ae9",
-  "head_date": "2026-11-25T12:37:44Z",
-  "commits": 534,
+  "head": "9124140a9f0c119b69ce575a8343075673d160ce",
+  "head_date": "2026-11-26T12:00:02Z",
+  "commits": 547,
   "contributors": [
     {
       "login": "Kaspar Rosin",
       "people_entry": false,
-      "commits": 534,
-      "lines_added": 173199,
-      "lines_deleted": 32171,
+      "commits": 547,
+      "lines_added": 175422,
+      "lines_deleted": 32409,
       "binary_changes": 45,
       "first_commit": "2026-10-16T10:37:08Z",
-      "last_commit": "2026-11-25T12:22:31Z"
+      "last_commit": "2026-11-26T11:46:32Z"
     }
   ],
   "models": [
@@ -23,9 +23,9 @@
       "company": "Anthropic",
       "model": "Claude Fable",
       "version": "5.2",
-      "commits": 2,
-      "lines_added": 233,
-      "lines_deleted": 23
+      "commits": 15,
+      "lines_added": 2456,
+      "lines_deleted": 261
     }
   ]
 }
