@@ -760,14 +760,13 @@ mod tests {
 
         /// The order of two texts, short or about as long as the folded length, is that of their
         /// lowercase starts (the first 256 characters, each as its own lowercase), then of their
-        /// bytes; only the same text is equal.
+        /// bytes, so only the same text is equal.
         #[test]
         fn text_order_is_the_lowercase_start_then_the_bytes((a, b) in arb_texts()) {
             let start = |text: &str| text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>();
             let want = start(&a).chars().cmp(start(&b).chars()).then_with(|| a.cmp(&b));
             prop_assert_eq!(text_cmp(&a, &b), want);
             prop_assert_eq!(text_cmp(&b, &a), want.reverse());
-            prop_assert_eq!(text_cmp(&a, &b) == Ordering::Equal, a == b);
             // A text class the unit tests do not name, through the comparison the sort uses.
             prop_assert_eq!(compare(TypeClass::LongText, Some(&a), Some(&b), Nulls::Last), want);
         }
