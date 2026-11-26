@@ -1494,6 +1494,12 @@ mod tests {
         assert_eq!(rows_text(&rs(1, 1, true)), "1 row");
         assert_eq!(rows_text(&rs(0, 0, true)), "0 rows");
         assert_eq!(rows_text(&rs(2, 12_345, false)), "First 2 of 12,345 rows");
+        // A header's hover: a whole result says the grid's own words, a cut one counts the rows
+        // it holds, which the cap on bytes can leave far below the cap on rows.
+        assert_eq!(sort_hint(&rs(3, 3, true)), None);
+        assert_eq!(sort_hint(&rs(10_000, 25_000, false)).as_deref(), Some("Sort the 10,000 rows loaded by this column"));
+        assert_eq!(sort_hint(&rs(2, 12_345, false)).as_deref(), Some("Sort the 2 rows loaded by this column"));
+        assert_eq!(sort_hint(&rs(1, 12_345, false)).as_deref(), Some("Sort the 1 row loaded by this column"));
     }
 
     #[test]

@@ -1979,7 +1979,8 @@ fn grid_rows(s: &mut Session) -> Vec<String> {
     let copied = run(s, "copy.selection", json!({ "format": "tsv" }));
     // Not `lines()`: a last row that is one NULL is an empty line at the end.
     let rows = copied["text"].as_str().unwrap().split('\n').map(|l| l.replace('\t', "|")).collect();
-    // The selection the test had comes back.
+    // The cells the test had selected are selected again (a whole row as its cells); with none,
+    // the first cell.
     if before.is_null() {
         if let Some(Tab::Query(_)) = s.state().active_tab() {
             run(s, "selection.set", json!({ "anchor": [0, 0] }));
@@ -2216,6 +2217,7 @@ fn copy_gives_the_rows_as_sorted() {
         assert_eq!(copy(s, "tsv"), "9\tapple\n100\tfig", "{}", t.name());
         assert_eq!(copy(s, "tsvHeader"), "n\tt\n9\tapple\n100\tfig");
         assert_eq!(copy(s, "csv").replace("\r\n", "\n").trim_end(), "n,t\n9,apple\n100,fig");
+        assert_eq!(copy(s, "markdown"), "| n | t |\n|---|---|\n| 9 | apple |\n| 100 | fig |");
         let objects: Json = serde_json::from_str(&copy(s, "json")).unwrap();
         assert_eq!(objects.as_array().map(Vec::len), Some(2), "{objects}");
         assert_eq!((&objects[0]["t"], &objects[1]["t"]), (&json!("apple"), &json!("fig")), "{}: {objects}", t.name());

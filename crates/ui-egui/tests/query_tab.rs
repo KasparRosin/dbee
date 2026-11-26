@@ -546,8 +546,9 @@ fn the_result_grid_edits_nothing() {
     assert_eq!(ui.document()["jobs"], json!([]), "a double-click and the menu's copy start no job");
 }
 
-/// Four rows of a number and a text, in no order.
-const UNSORTED: &str = "select * from (values (10, 'Apple'), (2, 'pear'), (100, 'fig'), (9, 'apple')) v(n, t)";
+/// Four rows of a number and a text, in no order. `Fig` has its capital so that a sort by bytes
+/// (`Apple, Fig, apple, pear`) is not the sort without regard to case.
+const UNSORTED: &str = "select * from (values (10, 'Apple'), (2, 'pear'), (100, 'Fig'), (9, 'apple')) v(n, t)";
 
 /// Column `col` of the result grid as drawn, top to bottom.
 fn drawn_column(ui: &mut Ui, col: usize, rows: usize) -> Vec<String> {
@@ -567,9 +568,9 @@ fn a_header_click_sorts_the_result() {
     // Asc, desc, then the order the server sent; the rows are drawn in the new order in the frame
     // after the click.
     for (dir, numbers, texts) in [
-        (json!("asc"), ["2", "9", "10", "100"], ["pear", "apple", "Apple", "fig"]),
-        (json!("desc"), ["100", "10", "9", "2"], ["fig", "Apple", "apple", "pear"]),
-        (Json::Null, ["10", "2", "100", "9"], ["Apple", "pear", "fig", "apple"]),
+        (json!("asc"), ["2", "9", "10", "100"], ["pear", "apple", "Apple", "Fig"]),
+        (json!("desc"), ["100", "10", "9", "2"], ["Fig", "Apple", "apple", "pear"]),
+        (Json::Null, ["10", "2", "100", "9"], ["Apple", "pear", "Fig", "apple"]),
     ] {
         ui.click("grid-header-0");
         ui.frame();
@@ -587,9 +588,11 @@ fn a_header_click_sorts_the_result() {
     ui.click("grid-header-1");
     ui.frame();
     assert_eq!((ui.value("grid-header-0")["sort"].clone(), ui.value("grid-header-1")["sort"].clone()), (Json::Null, json!("asc")));
-    assert_eq!(drawn_column(&mut ui, 1, 4), ["Apple", "apple", "fig", "pear"]);
-    // The row numbers stay 1 to n, and the hover says what a click does.
-    assert_eq!(ui.value("grid-row-0")["number"], 1);
+    assert_eq!(drawn_column(&mut ui, 1, 4), ["Apple", "apple", "Fig", "pear"]);
+    // The row numbers stay 1 to n (the second row here is the fourth the server sent), and the
+    // hover says what a click does.
+    let numbers: Vec<Json> = (0..4).map(|row| ui.value(&format!("grid-row-{row}"))["number"].clone()).collect();
+    assert_eq!(numbers, [1, 2, 3, 4]);
     let head = ui.drawn("grid-header-0").center();
     ui.rest(head);
     let said: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_string()).filter(|w| w.contains("Sort")).collect();
@@ -636,14 +639,14 @@ fn the_value_panel_and_copy_follow_the_sorted_result() {
     // A whole sorted row, and every cell in the order shown.
     ui.click("grid-row-3");
     ui.ctrl("C");
-    assert_eq!(ui.copied().as_deref(), Some("100\tfig"));
+    assert_eq!(ui.copied().as_deref(), Some("100\tFig"));
     ui.ctrl("A");
     ui.ctrl("C");
-    assert_eq!(ui.copied().as_deref(), Some("2\tpear\n9\tapple\n10\tApple\n100\tfig"));
+    assert_eq!(ui.copied().as_deref(), Some("2\tpear\n9\tapple\n10\tApple\n100\tFig"));
     // The menu's copy too (a right-click inside the selection keeps it).
     ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
     ui.click("grid-menu-copy-header");
-    assert_eq!(ui.copied().as_deref(), Some("n\tt\n2\tpear\n9\tapple\n10\tApple\n100\tfig"));
+    assert_eq!(ui.copied().as_deref(), Some("n\tt\n2\tpear\n9\tapple\n10\tApple\n100\tFig"));
 }
 
 #[test]
