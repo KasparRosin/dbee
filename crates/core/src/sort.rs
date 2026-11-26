@@ -19,8 +19,8 @@
 //! - **Text** (every other class, dates and times included: the ISO forms servers print sort as
 //!   text) compares without regard to case first (each character's Unicode lowercase), then by
 //!   bytes, so `Apple, apple, fig, Zucchini` ([`text_cmp`]). Case is disregarded over a text's
-//!   first [`FOLDED_CHARS`] characters; texts that are the same there but for case are in byte
-//!   order.
+//!   first [`FOLDED_CHARS`] characters; texts that are the same there, or the same but for case,
+//!   are in byte order.
 //!
 //! Every cell maps to a key in one ordered set, so the comparison is a total preorder whatever
 //! the cells hold (`the_comparison_is_a_total_order`), which the standard sort needs to never
@@ -28,9 +28,14 @@
 //! keep the server's order, ascending and descending alike (descending reverses the comparison,
 //! not the rows).
 //!
-//! Nothing is copied: keys borrow the cells, and the result is a list of row indices
-//! ([`order`]). Nothing indexes: a short row and a column the result does not have read as NULL.
+//! No cell is copied or moved: keys borrow the cells, and the result is a list of row indices
+//! ([`order`]). The one thing a sort makes is a text's key without regard to case, its first
+//! [`FOLDED_CHARS`] characters in lowercase, and only for a text met with one that differs from it
+//! in case where they first differ: made once, and kept while the sort runs, so no comparison
+//! folds a text again ([`Text`]). Nothing indexes: a short row reads as NULL, and a column the
+//! result does not have sorts nothing.
 
+use std::cell::OnceCell;
 use std::cmp::Ordering;
 
 use crate::{ResultSet, TypeClass};
@@ -46,13 +51,13 @@ pub enum Nulls {
 
 /// The rows of `result` sorted by `column`: shown row `i` is `result.rows[order[i]]`. A stable
 /// sort from the order received (see the module docs). A column the result does not have sorts
-/// nothing (every cell reads as NULL). The indices are `u32`: rows past `u32::MAX`, which no
-/// result holds, are left out.
+/// nothing: the order received, whatever a row holds past the columns. The indices are `u32`:
+/// rows past `u32::MAX`, which no result holds, are left out.
 pub fn order(result: &ResultSet, column: usize, descending: bool, nulls: Nulls) -> Vec<u32> {
-    let class = result.columns.get(column).map_or(TypeClass::Other, |c| c.class);
-    let keys: Vec<Key<'_>> = result.rows.iter().map(|row| Key::of(class, row.get(column).and_then(|cell| cell.as_deref()))).collect();
-    let count = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+    let count = u32::try_from(result.rows.len()).unwrap_or(u32::MAX);
     let mut order: Vec<u32> = (0..count).collect();
+    let Some(class) = result.columns.get(column).map(|c| c.class) else { return order };
+    let keys: Vec<Key<'_>> = result.rows.iter().map(|row| Key::of(class, row.get(column).and_then(|cell| cell.as_deref()))).collect();
     let key = |row: u32| usize::try_from(row).ok().and_then(|row| keys.get(row));
     order.sort_by(|&a, &b| {
         let (Some(a), Some(b)) = (key(a), key(b)) else { return Ordering::Equal };
@@ -67,37 +72,75 @@ pub fn compare(class: TypeClass, a: Option<&str>, b: Option<&str>, nulls: Nulls)
     Key::of(class, a).cmp(&Key::of(class, b), nulls)
 }
 
-/// How many characters of a text are compared without regard to case ([`text_cmp`]).
+/// How many characters of a text are compared without regard to case ([`text_cmp`]). The bound
+/// keeps what a sort folds and holds short whatever the values' length: a text's key is at most
+/// this many characters' lowercase, where the whole of 10,000 values of 20 kB would be 200 MB of
+/// keys, and past it two long values compare as bytes.
 pub const FOLDED_CHARS: usize = 256;
 
 /// Text order: without regard to case first (each character's Unicode lowercase, over the first
-/// [`FOLDED_CHARS`] characters), then by bytes, so only the same text compares equal. The bound
-/// keeps a comparison of two long values at a byte comparison: folding 10,000 values of 20 kB
-/// that differ only in case took 23 s, measured, and a sort runs in a frame.
+/// [`FOLDED_CHARS`] characters), then by bytes, so only the same text compares equal.
 pub fn text_cmp(a: &str, b: &str) -> Ordering {
-    if a == b {
-        return Ordering::Equal;
+    Text::new(a).cmp(&Text::new(b))
+}
+
+/// A text as it sorts: by its key without regard to case, then by its bytes ([`text_cmp`]).
+///
+/// The key is made by the first comparison that needs it and kept, so a sort folds each text at
+/// most once: folding at every comparison took 1.8 s for 10,000 texts of 256 letters that differ
+/// only in case, measured. Most comparisons need no key: see [`Text::cmp`].
+#[derive(Debug)]
+struct Text<'a> {
+    text: &'a str,
+    folded: OnceCell<Box<str>>,
+}
+
+impl<'a> Text<'a> {
+    fn new(text: &'a str) -> Text<'a> {
+        Text { text, folded: OnceCell::new() }
     }
-    let (mut x, mut y) = (a.chars().take(FOLDED_CHARS), b.chars().take(FOLDED_CHARS));
-    loop {
-        match (x.next(), y.next()) {
-            // The same character folds the same: only from the first difference on is anything
-            // folded.
-            (Some(p), Some(q)) if p == q => {}
-            (p, q) => {
-                let folded = p.into_iter().chain(x).flat_map(char::to_lowercase).cmp(q.into_iter().chain(y).flat_map(char::to_lowercase));
-                return folded.then_with(|| a.cmp(b));
+
+    /// The key without regard to case: the first [`FOLDED_CHARS`] characters, each as its
+    /// Unicode lowercase.
+    fn folded(&self) -> &str {
+        self.folded.get_or_init(|| self.text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>().into_boxed_str())
+    }
+
+    /// By the keys ([`Self::folded`]), then by the bytes. Up to the first characters that differ
+    /// both keys are the same, so where those two fold to another first character that settles
+    /// the keys' order with nothing folded but the two; the keys themselves are compared, and so
+    /// made, only where the two are the same but for case (or their lowercases begin alike).
+    fn cmp(&self, other: &Text<'_>) -> Ordering {
+        let (a, b) = (self.text, other.text);
+        if a == b {
+            return Ordering::Equal;
+        }
+        let (mut x, mut y) = (a.chars().take(FOLDED_CHARS), b.chars().take(FOLDED_CHARS));
+        loop {
+            match (x.next(), y.next()) {
+                (Some(p), Some(q)) if p == q => {}
+                // The same over the folded length: the same key, so the bytes decide.
+                (None, None) => return a.cmp(b),
+                // One ends where the other goes on: its key is the start of the other's.
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+                (Some(p), Some(q)) => {
+                    return match p.to_lowercase().next().cmp(&q.to_lowercase().next()) {
+                        Ordering::Equal => self.folded().cmp(other.folded()).then_with(|| a.cmp(b)),
+                        decided => decided,
+                    };
+                }
             }
         }
     }
 }
 
 /// What a cell sorts by. Variants in their order, but for NULL, which [`Nulls`] places.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum Key<'a> {
     Null,
     Number(Number<'a>),
-    Text(&'a str),
+    Text(Text<'a>),
 }
 
 impl<'a> Key<'a> {
@@ -112,7 +155,7 @@ impl<'a> Key<'a> {
             TypeClass::Other | TypeClass::Bool => Number::read(text, false),
             TypeClass::Text | TypeClass::LongText | TypeClass::Json | TypeClass::DateTime | TypeClass::Binary => None,
         };
-        number.map_or(Key::Text(text), Key::Number)
+        number.map_or_else(|| Key::Text(Text::new(text)), Key::Number)
     }
 
     fn cmp(&self, other: &Key<'_>, nulls: Nulls) -> Ordering {
@@ -127,7 +170,7 @@ impl<'a> Key<'a> {
             (Key::Number(a), Key::Number(b)) => a.cmp(b),
             (Key::Number(_), Key::Text(_)) => Ordering::Less,
             (Key::Text(_), Key::Number(_)) => Ordering::Greater,
-            (Key::Text(a), Key::Text(b)) => text_cmp(a, b),
+            (Key::Text(a), Key::Text(b)) => a.cmp(b),
         }
     }
 }
@@ -181,10 +224,11 @@ impl<'a> Number<'a> {
     }
 }
 
-/// The longest cell that is read as a number; a longer one is text, after the numbers. No
-/// engine's number prints longer in practice, and the bound keeps reading a cell, and comparing
-/// two, short: 10,000 numbers of 25,000 digits that differ at their end took 0.5 s to sort,
-/// measured, the reading and the comparing of their shared digits both counted.
+/// The longest cell that is read as a number; a longer one is text, after the numbers. Few
+/// numbers print longer (PostgreSQL's `numeric` can: `factorial(1000)` has 2,568 digits), and the
+/// bound keeps reading a cell, and comparing two, short: 10,000 numbers of 25,000 digits that
+/// differ at their end took 0.5 s to sort, measured, the reading and the comparing of their
+/// shared digits both counted.
 pub const NUMBER_BYTES: usize = 1024;
 
 /// A finite number as its sign, the place of its first digit that is not zero, and its digits
@@ -193,9 +237,9 @@ pub const NUMBER_BYTES: usize = 1024;
 /// a few slice comparisons, whatever their length.
 ///
 /// **Near the exponent's bound** the order is by a rule, not by value. The written exponent
-/// saturates at the ends of an `i64` before the digits' place is counted in, and `top` saturates
-/// there too, so of two numbers whose exponent is at an end or within the cell's length of it,
-/// the digits decide:
+/// saturates at `i64::MAX` and at its negative before the digits' place is counted in, and `top`
+/// saturates at the ends of an `i64`, so of two numbers whose exponent is at such an end or
+/// within the cell's length of it, the digits decide:
 /// `9e9223372036854775806` sorts above `1e9223372036854775807`, though it is the smaller, and
 /// `1e9223372036854775807` equals `10e9223372036854775807`. No database prints such a number.
 /// The order stays total there (`numbers_past_the_exponent_bound_keep_a_total_order`).
@@ -380,6 +424,20 @@ mod tests {
         {
             assert_eq!(eq(a, b), Ordering::Equal, "{a} {b}");
         }
+        // The same digits split otherwise between the integer part, the fraction and the
+        // exponent: the same number, and its neighbours on their own sides of it.
+        for (a, b) in
+            [(".99", "9.9e-1"), (".99e1", "9.9"), ("0.05e3", "50"), ("1234e-2", "12.34"), ("1.25e1", "12.5"), ("120", "1.2e2"), ("1200.0", "12e2")]
+        {
+            assert_eq!((eq(a, b), eq(b, a)), (Ordering::Equal, Ordering::Equal), "{a} {b}");
+        }
+        for (less, more) in
+            [(".99", "9.99e-1"), ("1234e-2", "12.35"), ("1.25e1", "12.6"), ("100.25", "100.5"), ("100.5", "1000"), ("9.99", "10"), ("0.05e3", "50.5")]
+        {
+            assert_eq!((eq(less, more), eq(more, less)), (Ordering::Less, Ordering::Greater), "{less} {more}");
+            let (neg_less, neg_more) = (format!("-{less}"), format!("-{more}"));
+            assert_eq!(eq(&neg_less, &neg_more), Ordering::Greater, "{neg_less} {neg_more}");
+        }
         // Exponents past what a number can have saturate instead of overflowing.
         assert_eq!(eq("1e99999999999999999999999", "1e9"), Ordering::Greater);
         assert_eq!(eq("1e-99999999999999999999999", "1e-9"), Ordering::Less);
@@ -387,7 +445,10 @@ mod tests {
         // A cell past the length read as a number is text, after the numbers.
         let long = "1".repeat(NUMBER_BYTES + 1);
         assert_eq!(eq(&long, "2"), Ordering::Greater);
-        assert_eq!(eq(&"1".repeat(NUMBER_BYTES), "2"), Ordering::Greater, "a number, and the larger");
+        assert_eq!(eq(&"1".repeat(NUMBER_BYTES), "2"), Ordering::Greater, "the larger number");
+        // `!` is text, and by bytes comes before a digit: a number is before it all the same.
+        assert_eq!(eq(&"1".repeat(NUMBER_BYTES), "!"), Ordering::Less, "a number, before any text");
+        assert_eq!(eq(&long, "!"), Ordering::Greater, "text, by its bytes");
         // The bound itself: zeros are zero up to it, and text one byte past it.
         assert_eq!(eq(&"0".repeat(NUMBER_BYTES), "0"), Ordering::Equal, "still a number");
         assert_eq!(eq(&"0".repeat(NUMBER_BYTES + 1), "0"), Ordering::Greater, "text, after the numbers");
@@ -428,12 +489,48 @@ mod tests {
         assert_eq!(text_cmp("same", "same"), Ordering::Equal);
         assert_eq!(text_cmp("Same", "same"), Ordering::Less);
         assert_eq!(text_cmp("ab", "abc"), Ordering::Less);
+        // A text longer than the folded length is folded at its start like any other.
+        let tail = "x".repeat(300);
+        assert_eq!(text_cmp(&format!("B{tail}"), &format!("a{tail}")), Ordering::Greater);
+        assert_eq!(text_cmp(&format!("a{tail}"), &format!("B{tail}")), Ordering::Less);
+        assert_eq!(text_cmp(&format!("b{tail}"), "C"), Ordering::Less);
         // Case is disregarded over the first 256 characters; past them the bytes decide.
         let start = "é".repeat(FOLDED_CHARS - 1);
         assert_eq!(text_cmp(&format!("{start}B"), &format!("{start}a")), Ordering::Greater, "the 256th character folds");
         assert_eq!(text_cmp(&format!("{start}xB"), &format!("{start}xa")), Ordering::Less, "the 257th does not");
         assert_eq!(text_cmp(&format!("{start}XB"), &format!("{start}xa")), Ordering::Less);
         assert_eq!(text_cmp(&format!("{start}Xa"), &format!("{start}xB")), Ordering::Less, "the same but for case there: bytes");
+    }
+
+    /// A text's key without regard to case is made by the comparison that needs it, once: where
+    /// two texts first differ by more than case nothing is kept. The key is each of the first
+    /// 256 characters as its own lowercase, however long that makes it.
+    #[test]
+    fn a_texts_key_is_made_where_a_first_difference_is_one_of_case() {
+        let (apple, pear) = (Text::new("apple pie"), Text::new("apple tart"));
+        assert_eq!(apple.cmp(&pear), Ordering::Less);
+        assert_eq!(apple.cmp(&Text::new("apple")), Ordering::Greater, "the longer, after its own start");
+        assert_eq!(apple.cmp(&Text::new("apple pie")), Ordering::Equal);
+        assert!(apple.folded.get().is_none() && pear.folded.get().is_none(), "no key for texts that differ by a letter");
+        let capital = Text::new("Apple Pie");
+        assert_eq!(capital.cmp(&apple), Ordering::Less);
+        assert_eq!((capital.folded.get().map(|k| &**k), apple.folded.get().map(|k| &**k)), (Some("apple pie"), Some("apple pie")));
+        // A lowercase of two characters begins as another's of one: the keys decide.
+        let (dotted, plain) = (Text::new("İx"), Text::new("iy"));
+        assert_eq!(dotted.cmp(&plain), "i\u{307}x".cmp("iy"));
+        assert_eq!(dotted.folded.get().map(|k| &**k), Some("i\u{307}x"));
+        // The key of a long text is its first 256 characters', whatever follows them.
+        let long = Text::new(&"É".repeat(5_000)).folded().to_owned();
+        assert_eq!(long, "é".repeat(FOLDED_CHARS));
+        // The 256 are counted before they are folded: a lowercase of two characters takes none
+        // of the others' room.
+        let dotted = Text::new(&"İ".repeat(300)).folded().to_owned();
+        assert_eq!(dotted, "i\u{307}".repeat(FOLDED_CHARS));
+        let run = "İ".repeat(FOLDED_CHARS - 2);
+        assert_eq!(text_cmp(&format!("X{run}b"), &format!("x{run}a")), Ordering::Greater, "the 256th character is in the key");
+        // Each character's own lowercase, not the text's: a sigma at a word's end is a sigma.
+        assert_eq!(Text::new("AΣ").folded(), "aσ");
+        assert_eq!(text_cmp("Aσ", "aΣ"), Ordering::Less, "the same key, so the bytes");
     }
 
     #[test]
@@ -528,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_row_and_a_missing_column_read_as_null() {
+    fn a_short_row_reads_as_null_and_a_missing_column_sorts_nothing() {
         let rs = ResultSet {
             columns: vec![Column::untyped("a"), Column::untyped("b")],
             rows: vec![vec![Some("x".into()), Some("2".into())], vec![Some("y".into())], vec![], vec![Some("z".into()), Some("1".into())]],
@@ -541,6 +638,14 @@ mod tests {
             assert_eq!(order(&rs, column, false, Nulls::Last), [0, 1, 2, 3]);
             assert_eq!(order(&rs, column, true, Nulls::First), [0, 1, 2, 3]);
         }
+        // Also where rows hold more cells than the result has columns.
+        let wide = ResultSet {
+            columns: vec![Column::untyped("a")],
+            rows: vec![vec![Some("x".into()), Some("2".into())], vec![Some("y".into()), Some("1".into())]],
+            ..ResultSet::default()
+        };
+        assert_eq!(order(&wide, 1, false, Nulls::Last), [0, 1]);
+        assert_eq!(order(&wide, 0, true, Nulls::Last), [1, 0]);
         assert_eq!(order(&ResultSet::default(), 0, false, Nulls::Last), Vec::<u32>::new());
     }
 
@@ -549,7 +654,7 @@ mod tests {
     }
 
     /// Cells that meet every branch: NULL, numbers in every spelling, the words, texts that differ
-    /// in case only, and any text.
+    /// in case only, any text, and texts and digits about as long as the two bounds.
     fn arb_cell() -> impl Strategy<Value = Option<String>> {
         prop_oneof![
             1 => Just(None),
@@ -558,7 +663,35 @@ mod tests {
             1 => prop_oneof![Just("NaN"), Just("nan"), Just("Infinity"), Just("-Infinity"), Just("inf"), Just("-inf"), Just("+Inf")].prop_map(|w| Some(w.to_owned())),
             2 => "[aAbBßẞéÉİi ]{0,4}".prop_map(Some),
             2 => ".{0,12}".prop_map(Some),
+            2 => arb_long_text().prop_map(Some),
+            1 => arb_long_digits().prop_map(Some),
         ]
+    }
+
+    /// Texts as long as the folded length or a few characters to either side of it, alike but for
+    /// case and for their ends: one letter repeated, some of it in the other case, then a few
+    /// letters more.
+    fn arb_long_text() -> impl Strategy<Value = String> {
+        let letter = prop_oneof![Just(('x', 'X')), Just(('é', 'É')), Just(('ж', 'Ж')), Just(('i', 'İ')), Just(('σ', 'Σ')), Just(('İ', 'i'))];
+        (letter, FOLDED_CHARS - 6..FOLDED_CHARS + 6, proptest::collection::vec(0..FOLDED_CHARS + 6, 0..4), "[aAbBxX]{0,3}").prop_map(
+            |((lower, upper), length, capitals, end)| {
+                let mut text: String = (0..length).map(|at| if capitals.contains(&at) { upper } else { lower }).collect();
+                text.push_str(&end);
+                text
+            },
+        )
+    }
+
+    /// Digits as long as the longest number read or a few bytes to either side of it, with a
+    /// sign, a point or an exponent at their end.
+    fn arb_long_digits() -> impl Strategy<Value = String> {
+        (
+            prop_oneof![Just(""), Just("-")],
+            prop_oneof![Just("7"), Just("0")],
+            NUMBER_BYTES - 6..NUMBER_BYTES + 6,
+            "[0-9]{0,2}(\\.[0-9]{0,2})?(e[0-9])?",
+        )
+            .prop_map(|(sign, digit, length, end)| format!("{sign}{}{end}", digit.repeat(length)))
     }
 
     fn arb_nulls() -> impl Strategy<Value = Nulls> {
@@ -583,8 +716,12 @@ mod tests {
             let mut seen = got.clone();
             seen.sort_unstable();
             prop_assert_eq!(seen, (0..rs.rows.len() as u32).collect::<Vec<_>>());
+            // A column the result does not have sorts nothing, whatever the rows hold there.
+            let Some(class) = rs.columns.get(column).map(|c| c.class) else {
+                prop_assert_eq!(got, (0..rs.rows.len() as u32).collect::<Vec<_>>());
+                return Ok(());
+            };
             // In order, and equal neighbours in the order received.
-            let class = rs.columns.get(column).map_or(TypeClass::Other, |c| c.class);
             let cell = |row: u32| rs.rows[row as usize].get(column).and_then(|c| c.as_deref());
             for pair in got.windows(2) {
                 let ascending = compare(class, cell(pair[0]), cell(pair[1]), nulls);
@@ -626,8 +763,19 @@ mod tests {
             prop_assert_eq!(text_cmp(&a, &b) == Ordering::Equal, a == b);
         }
 
+        /// At the folded length too, the order of two texts is that of their keys (the first 256
+        /// characters, each as its lowercase), then of their bytes.
         #[test]
-        fn numbers_agree_with_floats_where_floats_are_exact(a in -100_000i64..100_000, b in -100_000i64..100_000, da in 0u32..4, db in 0u32..4) {
+        fn long_texts_order_by_their_folded_start_then_their_bytes(a in arb_long_text(), b in arb_long_text()) {
+            let key = |text: &str| text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>();
+            let want = key(&a).chars().cmp(key(&b).chars()).then_with(|| a.cmp(&b));
+            prop_assert_eq!(text_cmp(&a, &b), want);
+            prop_assert_eq!(text_cmp(&b, &a), want.reverse());
+            prop_assert_eq!(compare(TypeClass::LongText, Some(&a), Some(&b), Nulls::Last), want);
+        }
+
+        #[test]
+        fn numbers_agree_with_scaled_integers(a in -100_000i64..100_000, b in -100_000i64..100_000, da in 0u32..4, db in 0u32..4) {
             // a / 10^da against b / 10^db, written with a point, compared as scaled integers.
             let write = |n: i64, d: u32| {
                 let digits = format!("{:0>width$}", n.unsigned_abs(), width = d as usize + 1);
@@ -643,13 +791,18 @@ mod tests {
     }
 
     /// The cost of [`order`] at the query cap (10,000 rows), which runs in the frame of the click:
-    /// 16 ms for what results usually hold, and half a second for the worst it can meet, values
-    /// of 20 kB and more (a run's whole 256 MiB) that are the same nearly to their end.
+    /// 16 ms for what results usually hold, and half a second for the worst found for it: values
+    /// of 20 kB and more (most of a run's 256 MiB, and all of it) that are the same nearly to
+    /// their end, and texts that are the same over the whole folded length but for case.
     #[test]
     #[ignore = "timing; run with --ignored --nocapture"]
     fn a_sort_of_ten_thousand_rows_within_a_frame() {
+        let cpu = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(':').nth(1)).map(|m| m.trim().to_string()))
+            .unwrap_or_else(|| "an unknown CPU".into());
         let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-        println!("load average: {}", load.trim());
+        println!("{cpu}, load average: {}", load.trim());
         let numbers: Vec<String> = (0..10_000u64).map(|i| (i.wrapping_mul(2_654_435_761) % 1_000_003).to_string()).collect();
         let texts: Vec<String> = (0..10_000u64).map(|i| format!("Customer {} of {}", i.wrapping_mul(2_654_435_761) % 1_000_003, i % 7)).collect();
         // 10,000 values of 20 kB that differ only at their end, and only in case before that.
@@ -666,6 +819,33 @@ mod tests {
         let digits: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "7".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
         let zeros: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
         let small: Vec<String> = (0..10_000u64).map(|i| format!("0.{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
+        // Texts that are the same over the whole folded length but for case, each letter in a
+        // case a generator's coin gives it: every pair differs in case only, at many places.
+        let mut coin = 0x2545_F491_4F6C_DD1D_u64;
+        let mut cased = |upper: char, lower: char| -> Vec<String> {
+            (0..10_000u64)
+                .map(|i| {
+                    let letters: String = (0..FOLDED_CHARS)
+                        .map(|_| {
+                            coin = coin.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                            if (coin >> 33).is_multiple_of(2) { upper } else { lower }
+                        })
+                        .collect();
+                    format!("{letters}{i}")
+                })
+                .collect()
+        };
+        let (cased_ascii, cased_cyrillic) = (cased('X', 'x'), cased('Ж', 'ж'));
+        // Texts of 256 letters that differ in case at their first letter and by more right after:
+        // each gets a key, where its first letters would have settled every comparison.
+        let first_cased: Vec<String> = (0..10_000u64)
+            .map(|i| format!("{}{:05}{}", if i % 2 == 0 { "ж" } else { "Ж" }, i.wrapping_mul(2_654_435_761) % 10_007, "ж".repeat(250)))
+            .collect();
+        // Values that fill a run's 256 MiB and differ at their end, their first 256 characters of
+        // four bytes each: the most one comparison reads.
+        let full: Vec<String> = (0..10_000u64)
+            .map(|i| format!("{}{}{:05}", "\u{10428}".repeat(256), "z".repeat(25_811), i.wrapping_mul(2_654_435_761) % 10_007))
+            .collect();
         for (what, class, cells, budget) in [
             ("numbers", TypeClass::Number, &numbers, 16.0),
             ("numbers without a type", TypeClass::Other, &numbers, 16.0),
@@ -678,6 +858,11 @@ mod tests {
             ("the same without a type", TypeClass::Other, &digits, 500.0),
             ("25,000 zeros before a number", TypeClass::Number, &zeros, 500.0),
             ("25,000 zeros after the point", TypeClass::Other, &small, 500.0),
+            ("256 letters, each in a case of its own", TypeClass::Text, &cased_ascii, 500.0),
+            ("256 Cyrillic letters, each in a case of its own", TypeClass::Text, &cased_cyrillic, 500.0),
+            ("the same without a type", TypeClass::Other, &cased_cyrillic, 500.0),
+            ("256 Cyrillic letters that differ in case at the first, then by more", TypeClass::Text, &first_cased, 100.0),
+            ("26.8 kB texts that fill 256 MiB and differ at their end", TypeClass::LongText, &full, 500.0),
         ] {
             let rs = ResultSet {
                 columns: vec![Column { class, ..Column::untyped("c") }],
