@@ -18,7 +18,7 @@
 //!   is not read as a number: it is text.
 //! - **Text** (every other class, dates and times included: the ISO forms servers print sort as
 //!   text) compares without regard to case first (each character's Unicode lowercase), then by
-//!   bytes, so `Apple, apple, fig, Zucchini` ([`text_cmp`]). Case is disregarded over a text's
+//!   bytes, so `Apple, apple, fig, Zucchini` ([`Text`]). Case is disregarded over a text's
 //!   first [`FOLDED_CHARS`] characters; texts that are the same there, or the same but for case,
 //!   are in byte order.
 //!
@@ -29,11 +29,9 @@
 //! not the rows).
 //!
 //! No cell is copied or moved: keys borrow the cells, and the result is a list of row indices
-//! ([`order`]). The one thing a sort makes is a text's key without regard to case, its first
-//! [`FOLDED_CHARS`] characters in lowercase, and only for a text met with one that differs from it
-//! in case where they first differ: made once, and kept while the sort runs, so no comparison
-//! folds a text again ([`Text`]). Nothing indexes: a short row reads as NULL, and a column the
-//! result does not have sorts nothing.
+//! ([`order`]). The one copy a sort makes of a cell's text is its lowercase start, at most once
+//! a text ([`Text`]). Nothing indexes: a short row reads as NULL, and a column the result does
+//! not have sorts nothing.
 
 use std::cell::OnceCell;
 use std::cmp::Ordering;
@@ -72,23 +70,19 @@ pub fn compare(class: TypeClass, a: Option<&str>, b: Option<&str>, nulls: Nulls)
     Key::of(class, a).cmp(&Key::of(class, b), nulls)
 }
 
-/// How many characters of a text are compared without regard to case ([`text_cmp`]). The bound
-/// keeps what a sort folds and holds short whatever the values' length: a text's key is at most
-/// this many characters' lowercase, where the whole of 10,000 values of 20 kB would be 200 MB of
-/// keys, and past it two long values compare as bytes.
+/// How many characters of a text are compared without regard to case ([`Text`]). The bound
+/// keeps what a sort folds and holds short whatever the values' length: a text's lowercase start
+/// is at most this many characters', where the whole of 10,000 values of 20 kB would be 200 MB,
+/// and past it two long values compare as bytes.
 pub const FOLDED_CHARS: usize = 256;
 
-/// Text order: without regard to case first (each character's Unicode lowercase, over the first
-/// [`FOLDED_CHARS`] characters), then by bytes, so only the same text compares equal.
-pub fn text_cmp(a: &str, b: &str) -> Ordering {
-    Text::new(a).cmp(&Text::new(b))
-}
-
-/// A text as it sorts: by its key without regard to case, then by its bytes ([`text_cmp`]).
+/// A text as it sorts: without regard to case first (its lowercase start: each of its first
+/// [`FOLDED_CHARS`] characters as its Unicode lowercase), then by its bytes, so only the same
+/// text compares equal.
 ///
-/// The key is made by the first comparison that needs it and kept, so a sort folds each text at
-/// most once: folding at every comparison took 1.8 s for 10,000 texts of 256 letters that differ
-/// only in case, measured. Most comparisons need no key: see [`Text::cmp`].
+/// The lowercase start is made by the first comparison that needs it and kept, so a sort folds
+/// each text at most once: folding at every comparison took 1.8 s for 10,000 texts of 256 letters
+/// that differ only in case, measured. Most comparisons need none: see [`Text::cmp`].
 #[derive(Debug)]
 struct Text<'a> {
     text: &'a str,
@@ -100,15 +94,14 @@ impl<'a> Text<'a> {
         Text { text, folded: OnceCell::new() }
     }
 
-    /// The key without regard to case: the first [`FOLDED_CHARS`] characters, each as its
-    /// Unicode lowercase.
+    /// The lowercase start: the first [`FOLDED_CHARS`] characters, each as its Unicode lowercase.
     fn folded(&self) -> &str {
         self.folded.get_or_init(|| self.text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>().into_boxed_str())
     }
 
-    /// By the keys ([`Self::folded`]), then by the bytes. Up to the first characters that differ
-    /// both keys are the same, so where those two fold to another first character that settles
-    /// the keys' order with nothing folded but the two; the keys themselves are compared, and so
+    /// By the lowercase starts ([`Self::folded`]), then by the bytes. Up to the first characters
+    /// that differ both starts are the same, so where those two fold to another first character
+    /// that settles it with nothing folded but the two; the starts themselves are compared, and so
     /// made, only where the two are the same but for case (or their lowercases begin alike).
     fn cmp(&self, other: &Text<'_>) -> Ordering {
         let (a, b) = (self.text, other.text);
@@ -119,11 +112,9 @@ impl<'a> Text<'a> {
         loop {
             match (x.next(), y.next()) {
                 (Some(p), Some(q)) if p == q => {}
-                // The same over the folded length: the same key, so the bytes decide.
-                (None, None) => return a.cmp(b),
-                // One ends where the other goes on: its key is the start of the other's.
-                (None, Some(_)) => return Ordering::Less,
-                (Some(_), None) => return Ordering::Greater,
+                // One ends where the other goes on, or both are the same over the folded length:
+                // the same lowercase start as far as the shorter goes, so the bytes decide.
+                (None, _) | (_, None) => return a.cmp(b),
                 (Some(p), Some(q)) => {
                     return match p.to_lowercase().next().cmp(&q.to_lowercase().next()) {
                         Ordering::Equal => self.folded().cmp(other.folded()).then_with(|| a.cmp(b)),
@@ -390,6 +381,11 @@ mod tests {
         cells.iter().map(|c| Some(*c)).collect()
     }
 
+    /// How two texts compare ([`Text::cmp`]).
+    fn text_cmp(a: &str, b: &str) -> Ordering {
+        Text::new(a).cmp(&Text::new(b))
+    }
+
     #[test]
     fn numbers_sort_by_value_not_text() {
         let asc = |cells: &[&'static str]| sorted(TypeClass::Number, &values(cells), false, Nulls::Last);
@@ -489,10 +485,10 @@ mod tests {
         assert_eq!(text_cmp("same", "same"), Ordering::Equal);
         assert_eq!(text_cmp("Same", "same"), Ordering::Less);
         assert_eq!(text_cmp("ab", "abc"), Ordering::Less);
+        assert_eq!(text_cmp("Xb", "xa"), Ordering::Greater, "the lowercase starts decide before the bytes do");
         // A text longer than the folded length is folded at its start like any other.
         let tail = "x".repeat(300);
         assert_eq!(text_cmp(&format!("B{tail}"), &format!("a{tail}")), Ordering::Greater);
-        assert_eq!(text_cmp(&format!("a{tail}"), &format!("B{tail}")), Ordering::Less);
         assert_eq!(text_cmp(&format!("b{tail}"), "C"), Ordering::Less);
         // Case is disregarded over the first 256 characters; past them the bytes decide.
         let start = "é".repeat(FOLDED_CHARS - 1);
@@ -502,35 +498,33 @@ mod tests {
         assert_eq!(text_cmp(&format!("{start}Xa"), &format!("{start}xB")), Ordering::Less, "the same but for case there: bytes");
     }
 
-    /// A text's key without regard to case is made by the comparison that needs it, once: where
-    /// two texts first differ by more than case nothing is kept. The key is each of the first
-    /// 256 characters as its own lowercase, however long that makes it.
+    /// A text's lowercase start is made by the comparison that needs it, once: where two texts
+    /// first differ by more than case nothing is kept. It is each of the first 256 characters as
+    /// its own lowercase, however long that makes it.
     #[test]
-    fn a_texts_key_is_made_where_a_first_difference_is_one_of_case() {
+    fn a_texts_lowercase_start_is_made_where_a_first_difference_is_one_of_case() {
         let (apple, pear) = (Text::new("apple pie"), Text::new("apple tart"));
         assert_eq!(apple.cmp(&pear), Ordering::Less);
         assert_eq!(apple.cmp(&Text::new("apple")), Ordering::Greater, "the longer, after its own start");
         assert_eq!(apple.cmp(&Text::new("apple pie")), Ordering::Equal);
-        assert!(apple.folded.get().is_none() && pear.folded.get().is_none(), "no key for texts that differ by a letter");
+        assert!(apple.folded.get().is_none() && pear.folded.get().is_none(), "no lowercase start for texts that differ by a letter");
         let capital = Text::new("Apple Pie");
         assert_eq!(capital.cmp(&apple), Ordering::Less);
         assert_eq!((capital.folded.get().map(|k| &**k), apple.folded.get().map(|k| &**k)), (Some("apple pie"), Some("apple pie")));
-        // A lowercase of two characters begins as another's of one: the keys decide.
+        // A lowercase of two characters begins as another's of one: the lowercase starts decide.
         let (dotted, plain) = (Text::new("İx"), Text::new("iy"));
         assert_eq!(dotted.cmp(&plain), "i\u{307}x".cmp("iy"));
         assert_eq!(dotted.folded.get().map(|k| &**k), Some("i\u{307}x"));
-        // The key of a long text is its first 256 characters', whatever follows them.
+        // A long text's is its first 256 characters', whatever follows them.
         let long = Text::new(&"É".repeat(5_000)).folded().to_owned();
         assert_eq!(long, "é".repeat(FOLDED_CHARS));
         // The 256 are counted before they are folded: a lowercase of two characters takes none
         // of the others' room.
         let dotted = Text::new(&"İ".repeat(300)).folded().to_owned();
         assert_eq!(dotted, "i\u{307}".repeat(FOLDED_CHARS));
-        let run = "İ".repeat(FOLDED_CHARS - 2);
-        assert_eq!(text_cmp(&format!("X{run}b"), &format!("x{run}a")), Ordering::Greater, "the 256th character is in the key");
         // Each character's own lowercase, not the text's: a sigma at a word's end is a sigma.
         assert_eq!(Text::new("AΣ").folded(), "aσ");
-        assert_eq!(text_cmp("Aσ", "aΣ"), Ordering::Less, "the same key, so the bytes");
+        assert_eq!(text_cmp("Aσ", "aΣ"), Ordering::Less, "the same lowercase start, so the bytes");
     }
 
     #[test]
@@ -682,6 +676,19 @@ mod tests {
         )
     }
 
+    /// Two texts of one kind (short and of letters that differ in case only, of anything, or
+    /// about as long as the folded length, which is half of the pairs), or of any two kinds.
+    fn arb_texts() -> impl Strategy<Value = (String, String)> {
+        let cased = "[aAbBßẞéÉİiσΣ ]{0,6}";
+        let any = || prop_oneof![cased, ".{0,12}", arb_long_text()];
+        prop_oneof![
+            1 => (cased, cased),
+            1 => (".{0,12}", ".{0,12}"),
+            3 => (arb_long_text(), arb_long_text()),
+            1 => (any(), any()),
+        ]
+    }
+
     /// Digits as long as the longest number read or a few bytes to either side of it, with a
     /// sign, a point or an exponent at their end.
     fn arb_long_digits() -> impl Strategy<Value = String> {
@@ -751,26 +758,17 @@ mod tests {
             }
         }
 
+        /// The order of two texts, short or about as long as the folded length, is that of their
+        /// lowercase starts (the first 256 characters, each as its own lowercase), then of their
+        /// bytes; only the same text is equal.
         #[test]
-        fn text_order_is_the_folded_text_then_the_bytes(a in "[aAbBßẞéÉİi ]{0,6}|.{0,12}", b in "[aAbBßẞéÉİi ]{0,6}|.{0,12}") {
-            // For texts within the folded length, `text_cmp` is the lowercase texts compared,
-            // then the bytes. `str::to_lowercase` differs from the per-character lowercase only
-            // for a final sigma.
-            if !a.contains('Σ') && !b.contains('Σ') {
-                let whole = a.to_lowercase().chars().cmp(b.to_lowercase().chars()).then_with(|| a.cmp(&b));
-                prop_assert_eq!(text_cmp(&a, &b), whole);
-            }
-            prop_assert_eq!(text_cmp(&a, &b) == Ordering::Equal, a == b);
-        }
-
-        /// At the folded length too, the order of two texts is that of their keys (the first 256
-        /// characters, each as its lowercase), then of their bytes.
-        #[test]
-        fn long_texts_order_by_their_folded_start_then_their_bytes(a in arb_long_text(), b in arb_long_text()) {
-            let key = |text: &str| text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>();
-            let want = key(&a).chars().cmp(key(&b).chars()).then_with(|| a.cmp(&b));
+        fn text_order_is_the_lowercase_start_then_the_bytes((a, b) in arb_texts()) {
+            let start = |text: &str| text.chars().take(FOLDED_CHARS).flat_map(char::to_lowercase).collect::<String>();
+            let want = start(&a).chars().cmp(start(&b).chars()).then_with(|| a.cmp(&b));
             prop_assert_eq!(text_cmp(&a, &b), want);
             prop_assert_eq!(text_cmp(&b, &a), want.reverse());
+            prop_assert_eq!(text_cmp(&a, &b) == Ordering::Equal, a == b);
+            // A text class the unit tests do not name, through the comparison the sort uses.
             prop_assert_eq!(compare(TypeClass::LongText, Some(&a), Some(&b), Nulls::Last), want);
         }
 
@@ -793,94 +791,92 @@ mod tests {
     /// The cost of [`order`] at the query cap (10,000 rows), which runs in the frame of the click:
     /// 16 ms for what results usually hold, and half a second for the worst found for it: values
     /// of 20 kB and more (most of a run's 256 MiB, and all of it) that are the same nearly to
-    /// their end, and texts that are the same over the whole folded length but for case.
+    /// their end, and texts that are the same over the whole folded length but for case. Each
+    /// case's rows are made for it and dropped after it, so the test holds one case at a time.
     #[test]
     #[ignore = "timing; run with --ignored --nocapture"]
     fn a_sort_of_ten_thousand_rows_within_a_frame() {
+        /// A case: what its rows hold, the classes it is timed under, its budget in ms, and the
+        /// cell of row `i`.
+        type Case = (&'static str, &'static [TypeClass], f64, fn(u64) -> String);
+
+        /// Row `i`'s number, in no order.
+        fn mixed(i: u64) -> u64 {
+            i.wrapping_mul(2_654_435_761)
+        }
+
+        /// 256 letters, each `upper` or `lower` as a hash of its row and its place has it, then the
+        /// row's number: any two rows are the same over the folded length but for case, at many
+        /// places.
+        fn cased(i: u64, upper: char, lower: char) -> String {
+            let letter = |at: u64| {
+                // SplitMix64's mixing of the row and the place: every bit of it a coin.
+                let mut hash = (i << 9 | at).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                hash = (hash ^ (hash >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                hash = (hash ^ (hash >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                if (hash ^ (hash >> 31)) & 1 == 0 { upper } else { lower }
+            };
+            let letters: String = (0..FOLDED_CHARS as u64).map(letter).collect();
+            format!("{letters}{i}")
+        }
+
         let cpu = std::fs::read_to_string("/proc/cpuinfo")
             .ok()
             .and_then(|s| s.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(':').nth(1)).map(|m| m.trim().to_string()))
             .unwrap_or_else(|| "an unknown CPU".into());
         let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
         println!("{cpu}, load average: {}", load.trim());
-        let numbers: Vec<String> = (0..10_000u64).map(|i| (i.wrapping_mul(2_654_435_761) % 1_000_003).to_string()).collect();
-        let texts: Vec<String> = (0..10_000u64).map(|i| format!("Customer {} of {}", i.wrapping_mul(2_654_435_761) % 1_000_003, i % 7)).collect();
-        // 10,000 values of 20 kB that differ only at their end, and only in case before that.
-        let long: Vec<String> = (0..10_000u64)
-            .map(|i| format!("{}{}", if i % 2 == 0 { "x" } else { "X" }.repeat(20_000), i.wrapping_mul(2_654_435_761) % 10_007))
-            .collect();
-        let same: Vec<String> = (0..10_000u64).map(|_| "y".repeat(20_000)).collect();
-        // Texts of 20 kB that differ only at their end: every comparison walks what they share.
-        let late: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "z".repeat(20_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
-        // Numbers of 1,000 digits that differ only at their end. Digit strings of 25,000 (past
-        // what is read as a number, so text) that differ at their end; zeros before a number, and
-        // after its point.
-        let numbers_1000: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "7".repeat(1_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
-        let digits: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "7".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
-        let zeros: Vec<String> = (0..10_000u64).map(|i| format!("{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
-        let small: Vec<String> = (0..10_000u64).map(|i| format!("0.{}{}", "0".repeat(25_000), i.wrapping_mul(2_654_435_761) % 10_007)).collect();
-        // Texts that are the same over the whole folded length but for case, each letter in a
-        // case a generator's coin gives it: every pair differs in case only, at many places.
-        let mut coin = 0x2545_F491_4F6C_DD1D_u64;
-        let mut cased = |upper: char, lower: char| -> Vec<String> {
-            (0..10_000u64)
-                .map(|i| {
-                    let letters: String = (0..FOLDED_CHARS)
-                        .map(|_| {
-                            coin = coin.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-                            if (coin >> 33).is_multiple_of(2) { upper } else { lower }
-                        })
-                        .collect();
-                    format!("{letters}{i}")
-                })
-                .collect()
-        };
-        let (cased_ascii, cased_cyrillic) = (cased('X', 'x'), cased('Ж', 'ж'));
-        // Texts of 256 letters that differ in case at their first letter and by more right after:
-        // each gets a key, where its first letters would have settled every comparison.
-        let first_cased: Vec<String> = (0..10_000u64)
-            .map(|i| format!("{}{:05}{}", if i % 2 == 0 { "ж" } else { "Ж" }, i.wrapping_mul(2_654_435_761) % 10_007, "ж".repeat(250)))
-            .collect();
-        // Values that fill a run's 256 MiB and differ at their end, their first 256 characters of
-        // four bytes each: the most one comparison reads.
-        let full: Vec<String> = (0..10_000u64)
-            .map(|i| format!("{}{}{:05}", "\u{10428}".repeat(256), "z".repeat(25_811), i.wrapping_mul(2_654_435_761) % 10_007))
-            .collect();
-        for (what, class, cells, budget) in [
-            ("numbers", TypeClass::Number, &numbers, 16.0),
-            ("numbers without a type", TypeClass::Other, &numbers, 16.0),
-            ("short texts", TypeClass::Text, &texts, 16.0),
-            ("the same 20 kB text", TypeClass::LongText, &same, 16.0),
-            ("20 kB texts that differ in case along their whole length", TypeClass::LongText, &long, 500.0),
-            ("20 kB texts that differ at their end", TypeClass::LongText, &late, 500.0),
-            ("numbers of 1,000 digits that differ at their end", TypeClass::Number, &numbers_1000, 100.0),
-            ("digit strings of 25,000 that differ at their end", TypeClass::Number, &digits, 500.0),
-            ("the same without a type", TypeClass::Other, &digits, 500.0),
-            ("25,000 zeros before a number", TypeClass::Number, &zeros, 500.0),
-            ("25,000 zeros after the point", TypeClass::Other, &small, 500.0),
-            ("256 letters, each in a case of its own", TypeClass::Text, &cased_ascii, 500.0),
-            ("256 Cyrillic letters, each in a case of its own", TypeClass::Text, &cased_cyrillic, 500.0),
-            ("the same without a type", TypeClass::Other, &cased_cyrillic, 500.0),
-            ("256 Cyrillic letters that differ in case at the first, then by more", TypeClass::Text, &first_cased, 100.0),
-            ("26.8 kB texts that fill 256 MiB and differ at their end", TypeClass::LongText, &full, 500.0),
-        ] {
-            let rs = ResultSet {
-                columns: vec![Column { class, ..Column::untyped("c") }],
-                rows: cells.iter().map(|c| vec![Some(c.clone())]).collect(),
+        let (typed, either): (&[TypeClass], &[TypeClass]) = (&[TypeClass::Number], &[TypeClass::Number, TypeClass::Other]);
+        let (text, long): (&[TypeClass], &[TypeClass]) = (&[TypeClass::Text], &[TypeClass::LongText]);
+        let cases: [Case; 13] = [
+            ("numbers", either, 16.0, |i| (mixed(i) % 1_000_003).to_string()),
+            ("short texts", text, 16.0, |i| format!("Customer {} of {}", mixed(i) % 1_000_003, i % 7)),
+            ("the same 20 kB text", long, 16.0, |_| "y".repeat(20_000)),
+            // The same nearly to their end: every comparison walks what they share.
+            ("20 kB texts that differ in case along their whole length", long, 500.0, |i| {
+                format!("{}{}", if i % 2 == 0 { "x" } else { "X" }.repeat(20_000), mixed(i) % 10_007)
+            }),
+            ("20 kB texts that differ at their end", long, 500.0, |i| format!("{}{}", "z".repeat(20_000), mixed(i) % 10_007)),
+            ("numbers of 1,000 digits that differ at their end", typed, 100.0, |i| format!("{}{}", "7".repeat(1_000), mixed(i) % 10_007)),
+            // Past what is read as a number, so text.
+            ("digit strings of 25,000 that differ at their end", either, 500.0, |i| format!("{}{}", "7".repeat(25_000), mixed(i) % 10_007)),
+            ("25,000 zeros before a number", typed, 500.0, |i| format!("{}{}", "0".repeat(25_000), mixed(i) % 10_007)),
+            ("25,000 zeros after the point", &[TypeClass::Other], 500.0, |i| format!("0.{}{}", "0".repeat(25_000), mixed(i) % 10_007)),
+            ("256 letters, each in a case of its own", text, 500.0, |i| cased(i, 'X', 'x')),
+            // Without a type each is first read as a number, and is none.
+            ("256 Cyrillic letters, each in a case of its own", &[TypeClass::Text, TypeClass::Other], 500.0, |i| cased(i, 'Ж', 'ж')),
+            // Each gets a lowercase start, where its first letters would have settled it.
+            ("256 Cyrillic letters that differ in case at the first, then by more", text, 100.0, |i| {
+                format!("{}{:05}{}", if i % 2 == 0 { "ж" } else { "Ж" }, mixed(i) % 10_007, "ж".repeat(250))
+            }),
+            // The most one comparison reads: their first 256 characters are of four bytes each.
+            ("26.8 kB texts that fill 256 MiB and differ at their end", long, 500.0, |i| {
+                format!("{}{}{:05}", "\u{10428}".repeat(256), "z".repeat(25_811), mixed(i) % 10_007)
+            }),
+        ];
+        for (what, classes, budget, cell) in cases {
+            let mut rs = ResultSet {
+                columns: vec![Column::untyped("c")],
+                rows: (0..10_000u64).map(|i| vec![Some(cell(i))]).collect(),
                 ..ResultSet::default()
             };
-            let mut times: Vec<f64> = (0..5)
-                .map(|i| {
-                    let start = Instant::now();
-                    let got = order(&rs, 0, i % 2 == 1, Nulls::Last);
-                    std::hint::black_box(got);
-                    start.elapsed().as_secs_f64() * 1000.0
-                })
-                .collect();
-            times.sort_by(|a, b| a.total_cmp(b));
-            let median = times[times.len() / 2];
-            println!("order() over 10,000 rows of {what}: median {median:.2} ms");
-            assert!(median < budget, "{what}: median {median} ms");
+            for class in classes {
+                rs.columns[0].class = *class;
+                // One sort before the timed ones, so the first case is not timed cold.
+                std::hint::black_box(order(&rs, 0, false, Nulls::Last));
+                let mut times: Vec<f64> = (0..5)
+                    .map(|i| {
+                        let start = Instant::now();
+                        let got = order(&rs, 0, i % 2 == 1, Nulls::Last);
+                        std::hint::black_box(got);
+                        start.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect();
+                times.sort_by(|a, b| a.total_cmp(b));
+                let median = times[times.len() / 2];
+                println!("order() over 10,000 rows of {what}, as {class:?}: median {median:.2} ms");
+                assert!(median < budget, "{what}, as {class:?}: median {median} ms");
+            }
         }
     }
 }
