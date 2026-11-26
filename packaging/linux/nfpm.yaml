@@ -40,6 +40,7 @@ overrides:
       - libxrandr2
       - mesa-vulkan-drivers
       - xdg-desktop-portal
+      - xdg-utils
   # By the libraries' file names, not package names: Fedora, RHEL and openSUSE name the packages
   # differently, and each of them resolves these.
   rpm:
@@ -56,6 +57,7 @@ overrides:
       - libXrandr.so.2()(64bit)
       - mesa-vulkan-drivers
       - xdg-desktop-portal
+      - xdg-utils
 
 contents:
   - src: ${STAGE}/usr/bin/dbee

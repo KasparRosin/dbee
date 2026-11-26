@@ -21,7 +21,7 @@
 #![allow(dead_code, reason = "each test binary uses some of these helpers")]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretStore, SslMode};
@@ -29,6 +29,7 @@ use dbee_driver::Drivers;
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
 use dbee_testkit::{Server, TempHome, TestDb, TestTarget, temp_home, unique};
+use dbee_ui_egui::browser::Browser;
 use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui::{Event, Pos2};
 use egui_kittest::Harness;
@@ -68,6 +69,9 @@ pub struct Setup {
     pub app: Option<MakeApp>,
     /// What the session checks for updates with; `None` is a session that never checks.
     pub updates: Option<dbee_engine::Updates>,
+    /// What opens the pages the app opens; `None` keeps each address in [`Ui::opened`]. No window
+    /// here starts the desktop's opener.
+    pub browser: Option<Browser>,
 }
 
 impl Default for Setup {
@@ -82,6 +86,7 @@ impl Default for Setup {
             drivers: None,
             app: None,
             updates: None,
+            browser: None,
         }
     }
 }
@@ -93,8 +98,12 @@ pub struct Ui {
     pub tx: mpsc::Sender<ControlRequest>,
     /// Every text a frame put on the clipboard (egui's `CopyText`), oldest first.
     pub copied: Vec<String>,
-    /// Every page a frame asked the desktop to open (egui's `OpenUrl`), oldest first.
+    /// Every page the app handed its browser by the end of a frame, oldest first. (A page egui is
+    /// asked for, `OpenUrl`, is not one: the real app is built without eframe's `links`, so that
+    /// opens nothing.)
     pub opened: Vec<String>,
+    /// Where the window's stand-in browser keeps the pages it is handed.
+    pages: Arc<Mutex<Vec<String>>>,
     /// Every command a frame sent the window (`Close`, `CancelClose`, …), oldest first.
     pub sent: Vec<egui::ViewportCommand>,
     /// The slowest frame since [`Ui::time_frames`].
@@ -132,12 +141,22 @@ impl Ui {
             Some(make) => make(session, rx),
             None => DbeeApp::new(session, Some(rx)),
         };
+        // Every window gets a browser of the test's: the stand-in only keeps the address.
+        let pages: Arc<Mutex<Vec<String>>> = Arc::default();
+        let kept = Arc::clone(&pages);
+        let app = app.with_browser(setup.browser.unwrap_or_else(|| {
+            Arc::new(move |url, _failed| {
+                kept.lock().unwrap().push(url.to_owned());
+                Ok(())
+            })
+        }));
         let mut builder = Harness::builder().with_size(setup.size);
         if let Some(step) = setup.step {
             builder = builder.with_step_dt(step);
         }
         let harness = builder.build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-        let mut ui = Ui { harness, tx, copied: Vec::new(), opened: Vec::new(), sent: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
+        let mut ui =
+            Ui { harness, tx, copied: Vec::new(), opened: Vec::new(), pages, sent: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
         ui.frame();
         ui
     }
@@ -210,10 +229,16 @@ impl Ui {
         for c in &self.harness.output().platform_output.commands {
             match c {
                 egui::OutputCommand::CopyText(t) => self.copied.push(t.clone()),
-                egui::OutputCommand::OpenUrl(open) => self.opened.push(open.url.clone()),
                 egui::OutputCommand::CopyImage(_) => {}
+                egui::OutputCommand::OpenUrl(open) => {
+                    panic!(
+                        "egui was asked to open {}: the real app is built without eframe's `links`, so nothing would open; use `DbeeApp::open_page`",
+                        open.url
+                    )
+                }
             }
         }
+        self.opened.append(&mut self.pages.lock().unwrap());
         self.sent.extend(self.harness.output().viewport_output.values().flat_map(|v| v.commands.iter().cloned()));
     }
 

@@ -1,6 +1,6 @@
 # Installing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-25 · **Change:** minor (macOS: the disk image itself is blocked, and how to open it)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-26 · **Change:** minor (updates: in 0.3.1 and 0.3.2 the button's click does nothing)
 
 Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
 
@@ -51,7 +51,7 @@ Unpack `dbee-<version>-freebsd-x86_64.tar.gz` and run `bin/dbee`.
 
 ## Updates
 
-dbee looks for a newer release by itself: a few seconds after it starts, and once a day while it is open, it asks GitHub for the newest release's checksum file. When a newer release is out, the right end of the menu bar reads `DOWNLOAD <version>`; a click opens that release's page in the browser, and you install it as you did the first time. dbee does not install anything by itself. With no newer release nothing is shown there.
+dbee looks for a newer release by itself: a few seconds after it starts, and once a day while it is open, it asks GitHub for the newest release's checksum file. When a newer release is out, the right end of the menu bar reads `DOWNLOAD <version>`; a click opens that release's page in the browser, and you install it as you did the first time. In 0.3.1 and 0.3.2 the click does nothing: open the [Releases page](https://github.com/KasparRosin/dbee/releases) yourself. dbee does not install anything by itself. With no newer release nothing is shown there.
 
 What the check sends, and how to turn it off: [SECURITY.md](../SECURITY.md#what-dbee-sends-by-itself).
 

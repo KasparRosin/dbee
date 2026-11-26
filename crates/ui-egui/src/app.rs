@@ -4,7 +4,8 @@
 //! the start of the next frame, and the screens name them. Before every frame
 //! ([`DbeeApp::feed_input`]) the mode chosen is set and the synthetic input fed in. Every later
 //! frame runs in this order ([`DbeeApp::ui`]):
-//! 1. `session.pump()`: the results of finished jobs are applied;
+//! 1. `session.pump()`: the results of finished jobs are applied; a page whose opener ended in
+//!    failure says so in a notice ([`DbeeApp::open_page`]);
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
 //! 3. the control requests that arrived are handled ([`crate::control`]); then the window's
 //!    close request, which starts a quit when something would be lost or left unfinished
@@ -43,7 +44,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
@@ -51,6 +52,7 @@ use dbee_engine::{CommandInfo, ConnectionId, EngineError, JobId, Json, Outcome, 
 use serde_json::json;
 
 use crate::automation::Tags;
+use crate::browser::{self, Browser, LateFailure};
 use crate::components::toast::{self, Act, Kind, Toast};
 use crate::components::update::UpdateLook;
 use crate::connections::{self, ConnScreen};
@@ -141,6 +143,11 @@ fn not_saved(e: &dbee_config::SaveError) -> Words {
 const UPDATE: &str = "app.update";
 /// The command whose job an update check is.
 const CHECK_FOR_UPDATES: &str = "app.checkForUpdates";
+/// How soon after the press before it a press on what opens a page is let go: a key held down
+/// presses its button many times a second, and each press would start an opener.
+const OPEN_AGAIN_SECS: f64 = 2.0;
+/// A page that did not open: its address, why, and when its opener's waiting thread said so.
+type NotOpened = (String, String, Instant);
 
 /// The window over one session.
 pub struct DbeeApp {
@@ -183,8 +190,15 @@ pub struct DbeeApp {
     pub(crate) carry: Vec<egui::Event>,
     /// The file to open in the first frame that draws ([`DbeeApp::with_file`]).
     file: Option<PathBuf>,
-    /// The last page the window opened in the browser ([`DbeeApp::open_page`]).
+    /// The last page the window was asked to open in the browser ([`DbeeApp::open_page`]).
     opened_url: Option<String>,
+    /// What opens a page ([`DbeeApp::with_browser`]); with none, no page is opened.
+    browser: Option<Browser>,
+    /// When what opens a page was last pressed, on egui's clock ([`OPEN_AGAIN_SECS`]).
+    pressed_at: Option<f64>,
+    /// The pages whose opener ended in failure after it had started, each with why and when
+    /// that was told, from the threads that waited for them to the next frame.
+    not_opened: (Sender<NotOpened>, Receiver<NotOpened>),
 }
 
 /// Where copied text goes ([`DbeeApp::with_clipboard`]).
@@ -345,6 +359,9 @@ impl DbeeApp {
             carry: Vec::new(),
             file: None,
             opened_url: None,
+            browser: None,
+            pressed_at: None,
+            not_opened: channel(),
         }
     }
 
@@ -358,6 +375,13 @@ impl DbeeApp {
     /// This app with copied text going to `clipboard` (the system clipboard by default).
     pub fn with_clipboard(mut self, clipboard: Clipboard) -> DbeeApp {
         self.memory = (clipboard == Clipboard::Memory).then_some(None);
+        self
+    }
+
+    /// This app with `browser` opening the pages it opens (the real app: [`crate::browser::system`]).
+    /// Without one no page is opened, which is what tests and other windows want.
+    pub fn with_browser(mut self, browser: Browser) -> DbeeApp {
+        self.browser = Some(browser);
         self
     }
 
@@ -448,19 +472,47 @@ impl DbeeApp {
         }
     }
 
-    /// Opens `url` in the browser: an HTTPS page only. With [`Clipboard::Memory`] (isolated runs
-    /// and tests) nothing leaves the app, and the URL is only kept, as [`DbeeApp::opened_url`].
+    /// Opens `url` in the browser ([`crate::browser`]): a plain HTTPS page only
+    /// ([`browser::plain_page`]; any other address is refused in a notice that does not repeat
+    /// it). With [`Clipboard::Memory`] (isolated runs and tests) nothing leaves the app, and the
+    /// URL is only kept, as [`DbeeApp::opened_url`]; so it is in an app without a browser. A
+    /// press within [`OPEN_AGAIN_SECS`] of the press before it is let go. A page that does not
+    /// open says so, at once or when its opener ends ([`DbeeApp::page_not_opened`]).
     pub(crate) fn open_page(&mut self, ctx: &egui::Context, url: &str) {
-        if !url.starts_with("https://") {
+        if !browser::plain_page(url) {
+            self.notice(Kind::Error, "The page did not open: its address is not one dbee hands to a browser.");
             return;
         }
         self.opened_url = Some(url.to_owned());
-        if self.memory.is_none() {
-            ctx.open_url(egui::OpenUrl::new_tab(url));
+        if self.memory.is_some() {
+            return;
+        }
+        let Some(browser) = &self.browser else { return };
+        let now = ctx.input(|i| i.time);
+        // Every press counts, also one let go: a key held down opens one page, not one every
+        // two seconds.
+        if self.pressed_at.replace(now).is_some_and(|before| (now - before).abs() < OPEN_AGAIN_SECS) {
+            return;
+        }
+        let (later, page, ctx) = (self.not_opened.0.clone(), url.to_owned(), ctx.clone());
+        let failed: LateFailure = Box::new(move |why| {
+            let _ = later.send((page, why, Instant::now()));
+            ctx.request_repaint();
+        });
+        if let Err(why) = browser(url, failed) {
+            self.page_not_opened(url, &why);
         }
     }
 
-    /// The last page the window opened in the browser, or with [`Clipboard::Memory`] would have.
+    /// Says that the page at `url` did not open and why, and leaves its address on the
+    /// clipboard: a notice's text cannot be copied.
+    fn page_not_opened(&mut self, url: &str, why: &str) {
+        self.copy_text(url.to_owned());
+        let said = Words::from(format!("The browser did not open: {why}. The page's address is on the clipboard: ")).name(url).plain(".");
+        self.notice_again(Kind::Error, said);
+    }
+
+    /// The last page the window was asked to open in the browser, opened or not.
     pub fn opened_url(&self) -> Option<&str> {
         self.opened_url.as_deref()
     }
@@ -758,8 +810,15 @@ impl DbeeApp {
             ctx.request_repaint();
             return;
         }
-        // 1. Job results.
+        // 1. Job results, and the pages whose opener ended in failure.
         let finished = self.session.pump();
+        while let Ok((url, why, told)) = self.not_opened.1.try_recv() {
+            // A frame that comes long after (the window was minimized) lets it go: the notice
+            // would put the address over a clipboard that has moved on.
+            if told.elapsed() <= browser::TOLD_WITHIN {
+                self.page_not_opened(&url, &why);
+            }
+        }
         // 2. Waiting replies.
         let unclaimed = control::answer_deferred(self, &ctx, finished);
         for (job, result) in unclaimed {

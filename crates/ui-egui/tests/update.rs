@@ -1,6 +1,7 @@
 //! The update button in the window, in a kittest harness over [`DbeeApp::ui`], on fakes: a fetch
 //! that answers from memory and an install step the test steers. Nothing here reaches the
-//! network, and no page is opened: the tests read what a frame asked the desktop to open.
+//! network, and no page is opened: each window's browser is a stand-in that keeps the address it
+//! is handed, and the tests read that.
 
 mod common;
 
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 use common::*;
 use dbee_engine::Updates;
+use dbee_ui_egui::browser::{Browser, LateFailure};
 use dbee_ui_egui::{Clipboard, DbeeApp};
 use dbee_update::{Fetch, Install, InstallKind, Offer, Os, Platform, Progress, Repo, UpdateError, Version};
 use serde_json::json;
@@ -154,7 +156,8 @@ fn download_appears_at_the_bars_right_end_on_both_screens() {
 
 #[test]
 fn a_click_opens_the_releases_page() {
-    let mut ui = window(Some(updates("0.3.1")), SIZE);
+    // A hundredth of a second a frame, so that presses a few frames apart are close in time.
+    let mut ui = Ui::window(Setup { size: SIZE, updates: Some(updates("0.3.1")), step: Some(0.01), ..Setup::default() });
     ui.until("the button", |ui| button(ui).is_some());
     assert_eq!(ui.inspect()["openedUrl"], json!(null));
     // The command hands the page back and opens nothing.
@@ -169,11 +172,31 @@ fn a_click_opens_the_releases_page() {
     assert_eq!(ui.inspect()["openedUrl"], PAGE);
     assert_eq!(button(&mut ui).unwrap().1["state"], "download", "the offer stays");
     assert!(ui.toast().is_none());
-    // The keyboard presses it too.
+    // A press this soon after is let go (a key held down is many presses a second)...
     ui.focus("update-button");
+    ui.key("Enter");
+    ui.click("update-button");
+    ui.frame();
+    assert_eq!(ui.opened, [PAGE]);
+    // ...and so is each press a second after the one before it, however long that goes on...
+    for _ in 0..3 {
+        let pressed = ui.clock();
+        while ui.clock() - pressed < 1.0 {
+            ui.frame();
+        }
+        ui.key("Enter");
+        ui.frame();
+        assert_eq!(ui.opened, [PAGE]);
+    }
+    // ...and two seconds after the last press the keyboard presses it too.
+    let pressed = ui.clock();
+    while ui.clock() - pressed < 2.0 {
+        ui.frame();
+    }
     ui.key("Enter");
     ui.frame();
     assert_eq!(ui.opened, [PAGE, PAGE]);
+    assert!(ui.toast().is_none());
 }
 
 /// With the app's clipboard in memory (an isolated run) nothing leaves the app: the page is not
@@ -191,6 +214,71 @@ fn a_click_in_an_isolated_window_opens_nothing() {
     ui.frame();
     assert!(ui.opened.is_empty());
     assert_eq!(ui.inspect()["openedUrl"], PAGE);
+}
+
+/// A page that does not open says so and why, and leaves its address on the clipboard: at once
+/// where the opener does not start, and in a later frame where it started and then ended in
+/// failure.
+#[test]
+fn a_page_that_does_not_open_says_so() {
+    let said = |why: &str| format!("The browser did not open: {why}. The page's address is on the clipboard: {PAGE}.");
+    let clicked = |browser: Browser| {
+        let mut ui = Ui::window(Setup { size: SIZE, updates: Some(updates("0.3.1")), browser: Some(browser), ..Setup::default() });
+        ui.until("the button", |ui| button(ui).is_some());
+        ui.click("update-button");
+        ui.frame();
+        ui
+    };
+    let mut ui = clicked(Arc::new(|_, _| Err("`xdg-open` did not start: No such file or directory".into())));
+    assert_eq!(ui.value("notice"), said("`xdg-open` did not start: No such file or directory"));
+    assert_eq!(ui.copied().as_deref(), Some(PAGE));
+    assert_eq!(button(&mut ui).unwrap().1["state"], "download", "the offer stays");
+    assert_eq!(ui.inspect()["openedUrl"], PAGE, "the page it was asked to open");
+
+    // The opener started: nothing is said until it ends in failure.
+    let handed: Arc<Mutex<Option<LateFailure>>> = Arc::default();
+    let keep = Arc::clone(&handed);
+    let mut ui = clicked(Arc::new(move |_, failed| {
+        *keep.lock().unwrap() = Some(failed);
+        Ok(())
+    }));
+    assert!(ui.tag("notice").is_none(), "{:?}", ui.tag("notice"));
+    assert!(ui.copied().is_none());
+    let failed = handed.lock().unwrap().take().expect("the browser was handed the page");
+    failed("`xdg-open` ended with exit status: 4".into());
+    ui.frame();
+    assert_eq!(ui.value("notice"), said("`xdg-open` ended with exit status: 4"));
+    assert_eq!(ui.copied().as_deref(), Some(PAGE));
+
+    // A failure whose frame comes seconds late (a window that was minimized) is let go: the
+    // clipboard may have moved on.
+    let handed: Arc<Mutex<Option<LateFailure>>> = Arc::default();
+    let keep = Arc::clone(&handed);
+    let mut ui = clicked(Arc::new(move |_, failed| {
+        *keep.lock().unwrap() = Some(failed);
+        Ok(())
+    }));
+    let failed = handed.lock().unwrap().take().expect("the browser was handed the page");
+    failed("`xdg-open` ended with exit status: 4".into());
+    std::thread::sleep(Duration::from_millis(3_100));
+    ui.frame();
+    assert!(ui.tag("notice").is_none(), "{:?}", ui.tag("notice"));
+    assert!(ui.copied().is_none());
+}
+
+/// A release whose page has an address dbee hands no browser (a version with build metadata,
+/// which the manifest's reader lets through and no release of dbee's carries): the click says so,
+/// names no address and hands the browser nothing.
+#[test]
+fn a_page_whose_address_is_not_a_plain_one_is_not_opened() {
+    let mut ui = window(Some(updates("0.3.1+a-word-from-the-manifest")), SIZE);
+    ui.until("the button", |ui| button(ui).is_some());
+    ui.click("update-button");
+    ui.frame();
+    assert_eq!(ui.value("notice"), "The page did not open: its address is not one dbee hands to a browser.");
+    assert!(ui.opened.is_empty());
+    assert_eq!(ui.inspect()["openedUrl"], json!(null));
+    assert!(ui.copied().is_none());
 }
 
 #[test]

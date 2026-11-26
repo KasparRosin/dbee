@@ -6,8 +6,10 @@
 //!
 //! Safety: the app gets an isolated run's environment: the given home (with the test key and the
 //! sshd's host key, from `dbee_testkit::temp_home`), in-memory secrets and clipboard (no copy
-//! reaches the system clipboard), no SSH agent, the test servers as its only targets, and the
-//! home and `target/` as the only folders a database file may lie in.
+//! reaches the system clipboard, and no page is opened), no SSH agent, the test servers as its
+//! only targets, and the home and `target/` as the only folders a database file may lie in.
+//! [`App::start_with_env`] can set the environment otherwise: the test that does says what it
+//! puts in the desktop's place.
 #![allow(dead_code, reason = "each test binary uses some of these helpers")]
 
 use std::ffi::OsStr;
