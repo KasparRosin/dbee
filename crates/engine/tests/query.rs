@@ -1968,8 +1968,9 @@ impl Drop for Removed {
 
 // ---- query.sortResult ------------------------------------------------------------------------
 
-/// Four rows of a number and a text, in no order.
-const UNSORTED: &str = "select 2 as n, 'pear' as t union all select 10, 'Apple' union all select 9, 'apple' union all select 100, 'fig'";
+/// Four rows of a number and a text, in no order. `Fig` has its capital so that a sort by bytes
+/// (`Apple, Fig, apple, pear`) is not the sort without regard to case.
+const UNSORTED: &str = "select 2 as n, 'pear' as t union all select 10, 'Apple' union all select 9, 'apple' union all select 100, 'Fig'";
 
 /// The shown result's rows as the grid has them, read as a copy of every cell reads them: one
 /// line per row, the values separated by `|`, NULL empty.
@@ -2009,24 +2010,24 @@ fn sort_result_asc_desc_none() {
         run(s, "query.run", json!({}));
         assert_eq!(sort_of(s, 0), Json::Null, "{}: a new result is as received", t.name());
         let received = grid_rows(s);
-        assert_eq!(received, ["2|pear", "10|Apple", "9|apple", "100|fig"], "{}", t.name());
+        assert_eq!(received, ["2|pear", "10|Apple", "9|apple", "100|Fig"], "{}", t.name());
         // Each direction by name. Numbers sort by value, on an engine that names no type too.
         let asc = json!({ "column": 0, "name": "n", "dir": "asc" });
         assert_eq!(sort_result(s, json!({ "column": 0, "dir": "asc" })), json!({ "tab": tab, "shown": 0, "sort": asc }), "{}", t.name());
         assert_eq!(sort_of(s, 0), asc);
-        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|fig"], "{}", t.name());
+        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|Fig"], "{}", t.name());
         let desc = json!({ "column": 0, "name": "n", "dir": "desc" });
         assert_eq!(sort_result(s, json!({ "column": 0, "dir": "desc" }))["sort"], desc);
         assert_eq!(sort_of(s, 0), desc);
-        assert_eq!(grid_rows(s), ["100|fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
+        assert_eq!(grid_rows(s), ["100|Fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
         // `none` gives back the order the server sent, exactly.
         assert_eq!(sort_result(s, json!({ "column": 0, "dir": "none" })), json!({ "tab": tab, "shown": 0, "sort": null }));
         assert_eq!(sort_of(s, 0), Json::Null);
         assert_eq!(grid_rows(s), received, "{}", t.name());
         // Without `dir` the column's sort moves on as a header click does: asc, desc, none.
         for (want, rows) in [
-            (json!({ "column": 1, "name": "t", "dir": "asc" }), vec!["10|Apple", "9|apple", "100|fig", "2|pear"]),
-            (json!({ "column": 1, "name": "t", "dir": "desc" }), vec!["2|pear", "100|fig", "9|apple", "10|Apple"]),
+            (json!({ "column": 1, "name": "t", "dir": "asc" }), vec!["10|Apple", "9|apple", "100|Fig", "2|pear"]),
+            (json!({ "column": 1, "name": "t", "dir": "desc" }), vec!["2|pear", "100|Fig", "9|apple", "10|Apple"]),
             (Json::Null, received.iter().map(String::as_str).collect()),
         ] {
             assert_eq!(sort_result(s, json!({ "column": 1 }))["sort"], want, "{}", t.name());
@@ -2035,7 +2036,7 @@ fn sort_result_asc_desc_none() {
         // Another column starts at asc, whatever the sorted one was at, and replaces it.
         sort_result(s, json!({ "column": 1, "dir": "desc" }));
         assert_eq!(sort_result(s, json!({ "column": 0 }))["sort"], asc);
-        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|fig"]);
+        assert_eq!(grid_rows(s), ["2|pear", "9|apple", "10|Apple", "100|Fig"]);
         // `none` for a column that is not the sorted one drops the sort all the same.
         assert_eq!(sort_result(s, json!({ "column": 1, "dir": "none" }))["sort"], Json::Null);
         assert_eq!(grid_rows(s), received);
@@ -2127,11 +2128,11 @@ fn running_again_drops_the_sort() {
         tab(s, UNSORTED);
         run(s, "query.run", json!({}));
         sort_result(s, json!({ "column": 0, "dir": "desc" }));
-        assert_eq!(grid_rows(s).first().map(String::as_str), Some("100|fig"));
+        assert_eq!(grid_rows(s).first().map(String::as_str), Some("100|Fig"));
         let r = run(s, "query.run", json!({}));
         assert_eq!(r["results"][0]["sort"], Json::Null, "{}: {r}", t.name());
         assert_eq!(sort_of(s, 0), Json::Null);
-        assert_eq!(grid_rows(s), ["2|pear", "10|Apple", "9|apple", "100|fig"], "{}", t.name());
+        assert_eq!(grid_rows(s), ["2|pear", "10|Apple", "9|apple", "100|Fig"], "{}", t.name());
         // A header click then starts at asc again.
         assert_eq!(sort_result(s, json!({ "column": 0 }))["sort"]["dir"], "asc");
     });
@@ -2183,8 +2184,8 @@ fn the_selection_stays_and_the_value_follows_the_sorted_rows() {
         // The selection stays where it is; the value is the cell now under it.
         sort_result(s, json!({ "column": 0, "dir": "desc" }));
         assert_eq!(s.inspect()["selection"], at, "{}", t.name());
-        assert_eq!(run(s, "value.show", json!({}))["text"], "fig", "{}: the cell now at the selection", t.name());
-        assert_eq!(s.inspect()["value"]["text"], "fig");
+        assert_eq!(run(s, "value.show", json!({}))["text"], "Fig", "{}: the cell now at the selection", t.name());
+        assert_eq!(s.inspect()["value"]["text"], "Fig");
         assert_eq!(s.value_view_computations(), built + 1, "{}: the kept view was dropped, and built once", t.name());
         // Each new order is a new view, `none` too.
         sort_result(s, json!({ "column": 0, "dir": "asc" }));
@@ -2196,7 +2197,7 @@ fn the_selection_stays_and_the_value_follows_the_sorted_rows() {
         assert_eq!(s.value_view_computations(), built + 4);
         // A whole row's view is the row now there.
         run(s, "selection.rows", json!({ "first": 3 }));
-        assert!(s.value_view().unwrap().text.contains("\"fig\""), "{}", t.name());
+        assert!(s.value_view().unwrap().text.contains("\"Fig\""), "{}", t.name());
         sort_result(s, json!({ "column": 0, "dir": "desc" }));
         assert_eq!(s.inspect()["selection"], json!({ "anchor": [3, 0], "focus": [3, 1], "whole": true }));
         let row = s.value_view().unwrap();
@@ -2214,13 +2215,13 @@ fn copy_gives_the_rows_as_sorted() {
         let copy = |s: &mut Session, format: &str| run(s, "copy.selection", json!({ "format": format }))["text"].as_str().unwrap().to_owned();
         // A rectangle in the middle of the grid, in every format.
         run(s, "selection.set", json!({ "anchor": [1, 0], "focus": [2, 1] }));
-        assert_eq!(copy(s, "tsv"), "9\tapple\n100\tfig", "{}", t.name());
-        assert_eq!(copy(s, "tsvHeader"), "n\tt\n9\tapple\n100\tfig");
-        assert_eq!(copy(s, "csv").replace("\r\n", "\n").trim_end(), "n,t\n9,apple\n100,fig");
-        assert_eq!(copy(s, "markdown"), "| n | t |\n|---|---|\n| 9 | apple |\n| 100 | fig |");
+        assert_eq!(copy(s, "tsv"), "9\tapple\n100\tFig", "{}", t.name());
+        assert_eq!(copy(s, "tsvHeader"), "n\tt\n9\tapple\n100\tFig");
+        assert_eq!(copy(s, "csv").replace("\r\n", "\n").trim_end(), "n,t\n9,apple\n100,Fig");
+        assert_eq!(copy(s, "markdown"), "| n | t |\n|---|---|\n| 9 | apple |\n| 100 | Fig |");
         let objects: Json = serde_json::from_str(&copy(s, "json")).unwrap();
         assert_eq!(objects.as_array().map(Vec::len), Some(2), "{objects}");
-        assert_eq!((&objects[0]["t"], &objects[1]["t"]), (&json!("apple"), &json!("fig")), "{}: {objects}", t.name());
+        assert_eq!((&objects[0]["t"], &objects[1]["t"]), (&json!("apple"), &json!("Fig")), "{}: {objects}", t.name());
         // Whole rows, and a single column out of the sorted one.
         run(s, "selection.rows", json!({ "first": 0, "last": 1 }));
         assert_eq!(copy(s, "tsv"), "10\tApple\n9\tapple");
@@ -2345,7 +2346,7 @@ fn sort_result_works_while_the_connection_is_lost_and_while_a_run_goes() {
         until_running(t, &m);
         assert_eq!(shown(s)["running"], json!(job.0), "{}", t.name());
         assert_eq!(sort_result(s, json!({ "column": 0, "dir": "desc" }))["sort"]["dir"], "desc", "{}", t.name());
-        assert_eq!(grid_rows(s), ["100|fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
+        assert_eq!(grid_rows(s), ["100|Fig", "10|Apple", "9|apple", "2|pear"], "{}", t.name());
         run(s, "query.cancel", json!({}));
         assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
         // A file cannot lose its connection.
@@ -2362,7 +2363,7 @@ fn sort_result_works_while_the_connection_is_lost_and_while_a_run_goes() {
         // The rows are still there, and sort without the database.
         assert_eq!(s.enabled("query.sortResult"), Ok(()));
         assert_eq!(sort_result(s, json!({ "column": 1 }))["sort"], json!({ "column": 1, "name": "t", "dir": "asc" }), "{}", t.name());
-        assert_eq!(grid_rows(s), ["10|Apple", "9|apple", "100|fig", "2|pear"], "{}", t.name());
+        assert_eq!(grid_rows(s), ["10|Apple", "9|apple", "100|Fig", "2|pear"], "{}", t.name());
         assert_eq!(s.inspect()["jobs"], json!([]), "{}: a sort starts no job", t.name());
     });
 }
